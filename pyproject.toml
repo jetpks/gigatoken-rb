@@ -3,7 +3,7 @@ requires = ["maturin>=1.9,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "tokers"
+name = "toker"
 requires-python = ">=3.8"
 classifiers = [
     "Programming Language :: Rust",
@@ -11,9 +11,14 @@ classifiers = [
     "Programming Language :: Python :: Implementation :: PyPy",
 ]
 dynamic = ["version"]
+dependencies = [
+    "numpy>=1.24.4",
+]
 
 [tool.maturin]
+
 features = ["pyo3/extension-module"]
+module-name = "toker.toker_rs"
 python-source = "pysrc"
 
 
@@ -24,4 +29,12 @@ cache-keys = [
     { file = ".cargo/config.toml" },
     { file = "rust-toolchain.toml" },
     { file = "**/*.rs" },
+]
+
+[dependency-groups]
+dev = [
+    "ipython>=8.12.3",
+    "pytest>=8.3.5",
+    "tokenizers>=0.21.0",
+    "tqdm>=4.67.1",
 ]

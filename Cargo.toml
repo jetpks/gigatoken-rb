@@ -1,11 +1,11 @@
 [package]
 name = "tokers"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [lib]
-name = "tokers"
+name = "toker_rs"
 crate-type = ["cdylib"]
 
 [dependencies]
@@ -24,4 +24,4 @@ xxhash-rust = { version = "0.8.15", features = ["xxh3", "std", "const_xxh3"] }
 rustc-hash = "2.1.1"
 
 [profile.release]
-lto = "fat"
+# lto = "fat"
