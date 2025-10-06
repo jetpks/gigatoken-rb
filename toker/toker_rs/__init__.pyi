@@ -1,7 +1,9 @@
+from pathlib import Path
+
 import numpy as np
 
 def train_bpe(
-    in_string: bytes, vocab_size: int, special_tokens: list[str]
+    in_string: bytes | Path | str, vocab_size: int, special_tokens: list[str]
 ) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]: ...
 
 class RustTokenizer:
@@ -19,4 +21,4 @@ class PretokenizerIterator:
     def __iter__(self): ...
     def __next__(self) -> bytes: ...
 
-def pretokenize(text: bytes) -> PretokenizerIterator: ...
+def pretokenizer(text: bytes) -> PretokenizerIterator: ...
