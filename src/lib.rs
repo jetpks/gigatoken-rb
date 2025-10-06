@@ -3,14 +3,10 @@ pub(crate) mod bpe_train;
 pub(crate) mod pretokenize;
 pub(crate) mod utils;
 use itertools::Itertools;
-use numpy::PyArray1;
 use pyo3::prelude::*;
-use pyo3::types::{IntoPyDict, PyBytes, PyDict, PyString};
+use pyo3::types::{IntoPyDict, PyBytes, PyDict};
 use rayon::prelude::*;
-use std::collections::HashMap;
-use std::collections::HashSet;
-use std::ops::Range;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// Formats the sum of two numbers as string.
 #[pyfunction]

@@ -1,12 +1,7 @@
-use arrow::array::ArrayRef;
 use indicatif::{ProgressBar, ProgressIterator};
-use itertools::{Itertools, kmerge};
-use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
-use parquet::file::reader::FileReader;
+use itertools::Itertools;
 use rayon::prelude::*;
-use std::borrow::Cow;
 use std::collections::HashMap;
-use std::hash::Hash;
 use std::path::Path;
 use std::{cmp::min, io::BufRead};
 use unicode_properties::{GeneralCategoryGroup, UnicodeGeneralCategory};

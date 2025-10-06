@@ -4,8 +4,8 @@ use itertools::Itertools;
 use priority_queue::PriorityQueue;
 use rayon::prelude::*;
 use std::{
-    collections::{BTreeSet, HashMap, HashSet},
-    path::{Path, PathBuf},
+    collections::{BTreeSet, HashMap},
+    path::PathBuf,
 };
 
 use crate::pretokenize::pretokenize_par;
