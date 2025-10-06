@@ -11,18 +11,16 @@ classifiers = [
     "Programming Language :: Python :: Implementation :: PyPy",
 ]
 dynamic = ["version"]
-dependencies = [
-    "numpy>=1.24.4",
-]
+dependencies = ["numpy>=1.24.4"]
 
 [tool.maturin]
 
 features = ["pyo3/extension-module"]
 module-name = "toker.toker_rs"
-python-source = "pysrc"
 
 
 [tool.uv]
+package = true
 cache-keys = [
     { file = "pyproject.toml" },
     { file = "Cargo.toml" },
@@ -36,6 +34,7 @@ dev = [
     "ipython>=8.12.3",
     "polars>=1.8.2",
     "pytest>=8.3.5",
+    "rich>=14.1.0",
     "tokenizers>=0.21.0",
     "tqdm>=4.67.1",
 ]
