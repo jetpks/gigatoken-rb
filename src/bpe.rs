@@ -354,7 +354,7 @@ mod tests {
     #[test]
     fn basic_tokenization() {
         let text = "This is a test string. Please tokenize it!";
-        let tokenizer = load_tiktoken("/Users/marcel/data/tokenizers/r50k_base.tiktoken")
+        let mut tokenizer = load_tiktoken("/Users/marcel/data/tokenizers/r50k_base.tiktoken")
             .expect("Failed to load tokenizer");
         let pretokenize_iter = crate::pretokenize::pretokenize_as_iter(text.as_bytes());
         let mut output = vec![];
