@@ -28,7 +28,7 @@ def build_hf_tokenizer():
     )
 
     split = (
-        Path("../../data/TinyStoriesV2-GPT4-validation.txt")
+        Path("../../data/TinyStoriesV2-GPT4-train.txt")
         .read_text()
         .split("<|endoftext|>")
     )
