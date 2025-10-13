@@ -1,5 +1,6 @@
 pub(crate) mod bpe;
 pub(crate) mod bpe_train;
+pub(crate) mod input;
 pub(crate) mod pretokenize;
 pub(crate) mod utils;
 use itertools::Itertools;

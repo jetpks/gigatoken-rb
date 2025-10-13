@@ -1,7 +1,10 @@
-use indicatif::{ProgressBar, ProgressIterator};
+use indicatif::ProgressIterator;
+
+// use clap::
 
 mod bpe;
 mod bpe_train;
+mod input;
 mod pretokenize;
 
 pub fn main() {

@@ -37,7 +37,7 @@ fn update_word(
     pair: Pair,
     new_symbol: u32,
     mut record_changes: impl FnMut((u32, u32), isize),
-) -> () {
+) {
     let mut i = 0;
     while i < w.symbols.len() - 1 {
         if w.symbols[i] == pair.0 && w.symbols[i + 1] == pair.1 {
