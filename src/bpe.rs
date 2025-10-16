@@ -2,7 +2,10 @@ use itertools::Itertools;
 
 use crate::pretokenize::Pretoken;
 use crate::token::TokenId;
-use std::{collections::HashMap, path::Path, rc::Rc};
+use eyre::{Context, Result, anyhow};
+use std::collections::HashMap;
+use std::fmt::{Debug, Formatter};
+use std::sync::Arc;
 // pub fn encode_par(pretokenizeable: PretokenizeableSpec) {
 //     match pretokenizeable {
 //         PretokenizeableSpec::Bytes(b) => {
@@ -20,20 +23,20 @@ pub struct ByteRemapping {
 }
 
 impl ByteRemapping {
-    pub fn from_byte_vocab(vocab: &[impl AsRef<[u8]>]) -> Result<Option<Self>, String> {
+    pub fn from_byte_vocab(vocab: &[impl AsRef<[u8]>]) -> Result<Option<Self>> {
         let byte_remapping = vocab[..256]
             .iter()
             .map(|b| {
                 let b = b.as_ref();
                 if b.len() != 1 {
-                    return Err(format!(
+                    anyhow!(
                         "Byte remapping failed because vocab entry for byte is not length 1: {:?}",
                         b
-                    ));
+                    );
                 }
                 Ok(b[0])
             })
-            .collect::<Result<Vec<u8>, String>>()?;
+            .collect::<Result<Vec<u8>>>()?;
 
         // Only use the byte remapping if it's not the identity mapping
         let byte_remapping = byte_remapping
@@ -63,10 +66,10 @@ impl ByteRemapping {
 
 pub struct Tokenizer {
     merges: HashMap<(TokenId, TokenId), TokenId>, // Maps pairs of token ids to merged token id
-    vocab: Vec<Rc<[u8]>>,                         // Maps token ids to byte sequences
-    vocab_inv: HashMap<Rc<[u8]>, TokenId>,        // Maps byte sequences to token ids
+    vocab: Vec<Arc<[u8]>>,                        // Maps token ids to byte sequences
+    vocab_inv: HashMap<Arc<[u8]>, TokenId>,       // Maps byte sequences to token ids
     byte_remapping: Option<ByteRemapping>, // Remaps bytes, because some tokenizers do this for some reason
-    pretoken_cache: HashMap<Rc<[u8]>, Rc<[TokenId]>, rustc_hash::FxBuildHasher>,
+    pretoken_cache: HashMap<Arc<[u8]>, Arc<[TokenId]>, rustc_hash::FxBuildHasher>,
 }
 
 /// Tokenize a single pretoken by repeatedly applying BPE merges in order.
@@ -101,7 +104,7 @@ impl Tokenizer {
         vocab: Vec<Vec<u8>>,
         byte_remapping: Option<ByteRemapping>,
     ) -> Self {
-        let vocab = vocab.into_iter().map(Into::into).collect::<Vec<Rc<_>>>();
+        let vocab = vocab.into_iter().map(Into::into).collect::<Vec<Arc<_>>>();
         let vocab_inv = vocab
             .iter()
             .cloned()
@@ -119,9 +122,12 @@ impl Tokenizer {
     /// Given a list of tokens in rank order (by merge order), reconstructs the merges map and returns a Tokenizer.
     /// This process is necessary to load some tokenizers found in tiktoken.
     /// There are a few exceptions to this being correct, so make sure that this is only used on tokenizers that don't package merges.
-    pub fn from_ranks(vocab: Vec<Vec<u8>>) -> Result<Self, String> {
+    pub fn from_ranks(vocab: Vec<Vec<u8>>) -> Result<Self> {
         let mut merges = HashMap::new();
-        let vocab = vocab.into_iter().map(Into::into).collect::<Vec<Rc<[u8]>>>();
+        let vocab = vocab
+            .into_iter()
+            .map(Into::into)
+            .collect::<Vec<Arc<[u8]>>>();
         let vocab_inv = vocab
             .iter()
             .cloned()
@@ -171,15 +177,17 @@ impl Tokenizer {
     pub fn memoized_encode<'i>(
         &mut self,
         pretoken_iter: impl Iterator<Item = Pretoken<'i>>,
-    ) -> impl Iterator<Item = Rc<[TokenId]>> {
+    ) -> impl Iterator<Item = Arc<[TokenId]>> {
         let pretoken_cache = &mut self.pretoken_cache;
         pretoken_iter.map(|pretoken: Pretoken| {
-            pretoken_cache
-                .entry(pretoken.as_ref().into())
-                .or_insert_with(|| {
-                    Self::encode_pretoken(&self.byte_remapping, &self.merges, pretoken).into()
-                })
-                .clone()
+            let found_value = pretoken_cache.get(pretoken.as_ref());
+            if let Some(v) = found_value {
+                return v.clone();
+            }
+            let inserted_value: Arc<[TokenId]> =
+                Self::encode_pretoken(&self.byte_remapping, &self.merges, pretoken).into();
+            pretoken_cache.insert(pretoken.as_ref().into(), inserted_value.clone());
+            inserted_value
         })
     }
 
@@ -196,31 +204,6 @@ impl Tokenizer {
     }
 }
 
-pub fn load_tiktoken(file_path: impl AsRef<Path>) -> Result<Tokenizer, String> {
-    use base64::prelude::*;
-    use std::io::Read;
-    let mut buf = String::new();
-    std::fs::File::open(file_path)
-        .expect("Didn't find file")
-        .read_to_string(&mut buf)
-        .map_err(|e| format!("Failed to read tokenizer file: {e}"))?;
-
-    let vocab: Vec<Vec<u8>> = buf
-        .lines()
-        .enumerate()
-        .map(|(i, line)| {
-            let (base64_token, id_str) = line.split_once(' ').unwrap();
-            let id = id_str.trim().parse::<u32>().unwrap();
-            assert_eq!(id, i as u32);
-            let token_bytes: Vec<u8> = BASE64_STANDARD.decode(base64_token).unwrap();
-            token_bytes
-        })
-        .collect();
-
-    // Reorder based on
-
-    Tokenizer::from_ranks(vocab)
-}
 // impl Tokenizer {
 //     pub fn new(merges: HashMap<(u32, u32), u32>) -> Self {
 //         Tokenizer { merges }
@@ -302,11 +285,21 @@ pub fn load_tiktoken(file_path: impl AsRef<Path>) -> Result<Tokenizer, String> {
 //         .collect()
 // }
 
+impl Debug for Tokenizer {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Tokenizer")
+            .field("vocab_size", &self.vocab.len())
+            .field("merges_count", &self.merges.len())
+            .field("byte_remapping", &self.byte_remapping.is_some())
+            .finish()
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use std::io::Read;
-
     use super::*;
+    use crate::load_tokenizer::tiktoken::load_tiktoken;
+    use std::io::Read;
 
     #[test]
     fn test_merges_from_vocab() {
