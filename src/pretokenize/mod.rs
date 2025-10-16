@@ -10,6 +10,7 @@ use std::cmp::min;
 use std::collections::HashMap;
 
 mod pretoken;
+pub mod pretoken_combinator;
 mod pretokenize_traits;
 mod simd;
 mod unicode;
@@ -27,7 +28,7 @@ pub enum PretokenizerState {
     Finish, // Ran out of tokens
 }
 
-struct UTF8Iterator<'a> {
+pub struct UTF8Iterator<'a> {
     bytes: DocRef<'a>,
     pos: usize,
 }
@@ -55,7 +56,7 @@ enum ApostropheResult {
 struct OutOfBytesError {}
 
 impl<'a> UTF8Iterator<'a> {
-    fn new(doc: DocRef<'a>) -> Self {
+    pub fn new(doc: DocRef<'a>) -> Self {
         Self { bytes: doc, pos: 0 }
     }
 
@@ -77,6 +78,7 @@ impl<'a> UTF8Iterator<'a> {
         Some((cp, len))
     }
 
+    // #[inline(never)]
     pub fn start_check(&mut self) -> Result<StartResult, OutOfBytesError> {
         if self.pos >= self.bytes.0.len() {
             return Err(OutOfBytesError {});
@@ -108,6 +110,7 @@ impl<'a> UTF8Iterator<'a> {
         }
     }
 
+    // #[inline(never)]
     fn whitespace_check(&mut self) -> Result<WhitespaceResult, OutOfBytesError> {
         if self.pos >= self.bytes.len() {
             return Err(OutOfBytesError {});
@@ -137,6 +140,7 @@ impl<'a> UTF8Iterator<'a> {
         }
     }
 
+    // #[inline(never)]
     fn letter_check(&mut self) -> Result<(), OutOfBytesError> {
         loop {
             if self.pos >= self.bytes.len() {
@@ -163,6 +167,7 @@ impl<'a> UTF8Iterator<'a> {
         }
     }
 
+    // #[inline(never)]
     fn number_check(&mut self) -> Result<(), OutOfBytesError> {
         loop {
             if self.pos >= self.bytes.len() {
@@ -188,6 +193,7 @@ impl<'a> UTF8Iterator<'a> {
             }
         }
     }
+    // #[inline(never)]
     fn other_check(&mut self) -> Result<(), OutOfBytesError> {
         loop {
             if self.pos >= self.bytes.len() {
@@ -218,6 +224,7 @@ impl<'a> UTF8Iterator<'a> {
             }
         }
     }
+    // #[inline(never)]
     pub fn apostrophe_check(&mut self) -> Result<ApostropheResult, OutOfBytesError> {
         if self.pos >= self.bytes.len() {
             return Err(OutOfBytesError {});
@@ -451,6 +458,16 @@ pub struct PretokenizerIter<'a> {
     iter: UTF8Iterator<'a>,
     starting: usize,
     state: PretokenizerState,
+}
+
+impl<'a> PretokenizerIter<'a> {
+    pub fn new(input: &'a [u8]) -> PretokenizerIter<'a> {
+        PretokenizerIter {
+            iter: UTF8Iterator::new(input.into()),
+            starting: 0,
+            state: PretokenizerState::Start,
+        }
+    }
 }
 
 impl<'a> Iterator for PretokenizerIter<'a> {
