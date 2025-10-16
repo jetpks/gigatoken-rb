@@ -11,7 +11,8 @@ use itertools::Itertools;
 use rayon::prelude::*;
 use winnow::Parser;
 use winnow::combinator::{
-    alt, delimited, dispatch, fail, iterator, not, opt, peek, preceded, repeat, terminated, trace,
+    alt, delimited, dispatch, fail, iterator, not, opt, peek, preceded, repeat, repeat_till,
+    terminated, trace,
 };
 use winnow::prelude::*;
 use winnow::token::{any, one_of, take, take_until, take_while};
@@ -20,13 +21,6 @@ fn contraction<'a>(input: &mut &'a str) -> ModalResult<()> {
     ('\'', alt(("s", "d", "m", "t", "ll", "ve", "re")))
         .void()
         .parse_next(input)
-}
-
-fn codepoint_and_length(slice: &[u8]) -> (char, usize) {
-    let as_str = unsafe { std::str::from_utf8_unchecked(slice) };
-    let codepoint = as_str.chars().next().unwrap();
-    let len = codepoint.len_utf8();
-    (codepoint, len)
 }
 
 // fn letter<'a>(input: &mut &'a str) -> ModalResult<()> {
@@ -55,13 +49,24 @@ fn number_run<'a>(input: &mut &'a str) -> ModalResult<()> {
 fn whitespace_run<'a>(input: &mut &'a str) -> ModalResult<()> {
     trace(
         "whitespace_run",
-        (
-            repeat::<_, (), (), _, _>(1.., one_of(unicode::is_separator_complete).void()),
-            peek(not(one_of(unicode::is_separator_complete))),
+        repeat_till::<_, (), (), _, _, _, _>(
+            1..,
+            one_of(unicode::is_separator_complete).void(),
+            peek((
+                one_of(unicode::is_separator_complete),
+                one_of(|c| !unicode::is_separator_complete(c)),
+            ))
+            .void(),
         ),
     )
     .void()
     .parse_next(input)
+}
+
+fn single_whitespace(input: &mut &str) -> ModalResult<()> {
+    trace("single_whitespace", one_of(unicode::is_separator_complete))
+        .void()
+        .parse_next(input)
 }
 
 fn other_run<'a>(input: &mut &'a str) -> ModalResult<()> {
@@ -80,6 +85,7 @@ fn pretoken<'a>(input: &mut &'a str) -> ModalResult<&'a str> {
         number_run,
         other_run,
         whitespace_run,
+        single_whitespace,
     ))
     .take()
     .parse_next(input)
@@ -129,5 +135,63 @@ mod tests {
         let input = "Hello, world!";
         let pretokens = parse_pretokens(input.as_bytes()).unwrap();
         eprintln!("{:?}", pretokens);
+    }
+
+    #[test]
+    fn combinator_compare() {
+        let input =
+            std::fs::read_to_string("/Users/marcel/data/TinyStoriesV2-GPT4-valid.txt").unwrap();
+        let input_bytes = input.as_bytes();
+        let standard_iterator = crate::pretokenize::pretokenize_as_iter(input_bytes);
+        let mut combinator_iterator = pretokens_iterator(&input);
+        for eorb in standard_iterator.zip_longest(&mut combinator_iterator) {
+            match eorb {
+                itertools::EitherOrBoth::Both(a, b) => {
+                    if a.0 != b.as_bytes() {
+                        eprintln!("Mismatch: {:?} != {:?}", String::from_utf8_lossy(a.0), b);
+
+                        // Find text before and after the mismatch by comparing pointers from a.0 and input_bytes
+                        let a_start = a.0.as_ptr() as usize;
+                        let b_start = b.as_ptr() as usize;
+                        let input_start = input_bytes.as_ptr() as usize;
+                        let a_offset = a_start - input_start;
+
+                        let region = &input_bytes
+                            [a_offset.saturating_sub(32)..min(input_bytes.len(), a_offset + 32)];
+                        eprintln!("Context: {:?}", String::from_utf8_lossy(region));
+
+                        assert!(false);
+                    }
+                }
+                itertools::EitherOrBoth::Left(a) => {
+                    eprintln!("Left only: {:?}", String::from_utf8_lossy(a.0));
+
+                    // Find text before and after the mismatch by comparing pointers from a.0 and input_bytes
+                    let a_start = a.0.as_ptr() as usize;
+                    let input_start = input_bytes.as_ptr() as usize;
+                    let a_offset = a_start - input_start;
+
+                    let region = &input_bytes
+                        [a_offset.saturating_sub(32)..min(input_bytes.len(), a_offset + 32)];
+                    eprintln!("Context: {:?}", String::from_utf8_lossy(region));
+
+                    assert!(false);
+                }
+                itertools::EitherOrBoth::Right(b) => {
+                    eprintln!("Right only: {:?}", b);
+
+                    // Find text before and after the mismatch by comparing pointers from b and input_bytes
+                    let b_start = b.as_ptr() as usize;
+                    let input_start = input_bytes.as_ptr() as usize;
+                    let b_offset = b_start - input_start;
+
+                    let region = &input_bytes
+                        [b_offset.saturating_sub(32)..min(input_bytes.len(), b_offset + 32)];
+                    eprintln!("Context: {:?}", String::from_utf8_lossy(region));
+
+                    assert!(false);
+                }
+            }
+        }
     }
 }
