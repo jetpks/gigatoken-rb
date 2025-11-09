@@ -9,7 +9,7 @@ pub fn load_tiktoken(file_path: impl AsRef<Path>) -> Result<Tokenizer> {
     use std::io::Read;
     let mut buf = String::new();
     std::fs::File::open(&file_path)
-        .with_context(|| format!("Failed to read {:?}", file_path.as_ref()))?
+        .with_context(|| format!("Failed to read {}", file_path.as_ref().display()))?
         .read_to_string(&mut buf)?;
 
     let vocab: Vec<Vec<u8>> = buf

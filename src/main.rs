@@ -1,3 +1,6 @@
+#![feature(test)]
+#![feature(portable_simd)]
+
 use indicatif::ProgressIterator;
 
 use crate::token::TokenId;
@@ -38,11 +41,11 @@ pub fn main() {
     // );
 
     // Tokenize a file using a tiktoken tokenizer
-    let mut tokenizer =
-        load_tokenizer::tiktoken::load_tiktoken("/Users/marcel/data/tokenizers/r50k_base.tiktoken")
-            .unwrap();
+    let data_dir = std::env::home_dir().unwrap().join("data");
+    let dir = data_dir.join("tokenizers/r50k_base.tiktoken");
+    let mut tokenizer = load_tokenizer::tiktoken::load_tiktoken(dir).unwrap();
     // Memmap the file and treat it as a slice of bytes
-    let path = "/Users/marcel/data/TinyStoriesV2-GPT4-train.txt";
+    let path = data_dir.join("TinyStoriesV2-GPT4-train.txt");
     let file = std::fs::File::open(path).unwrap();
     let bytes_memmapped = unsafe { memmap2::Mmap::map(&file) }.unwrap();
     let pretoken_iter = pretokenize::pretokenize_as_iter(bytes_memmapped.as_ref());

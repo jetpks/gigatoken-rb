@@ -1,3 +1,6 @@
+#![feature(test)]
+#![feature(portable_simd)]
+
 pub(crate) mod bpe;
 pub(crate) mod bpe_train;
 pub(crate) mod input;
