@@ -6,7 +6,7 @@ use toker_rs::pretokenize::{PretokenizerIter, pretoken_combinator::pretokens_ite
 
 use rand::{self, Rng};
 
-pub fn state_machine_pretokenize(input: &[u8]) -> Vec<&[u8]> {
+fn state_machine_pretokenize(input: &[u8]) -> Vec<&[u8]> {
     let mut iter = PretokenizerIter::new(input);
     let mut v = vec![];
     iter.map(|pretoken| pretoken).for_each(|pretoken| {
@@ -15,7 +15,7 @@ pub fn state_machine_pretokenize(input: &[u8]) -> Vec<&[u8]> {
     v
 }
 
-pub fn winnow_pretokenize(input: &[u8]) -> Vec<&[u8]> {
+fn winnow_pretokenize(input: &[u8]) -> Vec<&[u8]> {
     let mut iter = pretokens_iterator(unsafe { std::str::from_utf8_unchecked(input) });
     let mut v = vec![];
     iter.for_each(|pretoken| {
@@ -24,6 +24,8 @@ pub fn winnow_pretokenize(input: &[u8]) -> Vec<&[u8]> {
     // assert!(iter.finish().is_ok());
     v
 }
+
+
 
 pub fn criterion_benchmark(c: &mut Criterion) {
     // c.bench_function("fib 20", |b| b.iter(|| fibonacci(black_box(20))));
