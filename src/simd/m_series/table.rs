@@ -156,6 +156,7 @@ mod tests {
 
     #[bench]
     fn bench_scalar_lookup(b: &mut Bencher) {
+        // 223 µs/iter = 4.48 GB/s
         const TABLE_SIZE: u16 = 65_535;
         let mut table = vec![0_u8; TABLE_SIZE as usize];
         rand::rng().fill_bytes(&mut table);
@@ -178,6 +179,7 @@ mod tests {
 
     #[bench]
     fn bench_regular_lookup(b: &mut Bencher) {
+        // 529 µs/iter = 1.89 GB/s
         const TABLE_SIZE: u16 = 65_535;
         // const TABLE_SIZE: u16 = 1024;
         let mut table = vec![0_u8; TABLE_SIZE as usize];
@@ -199,6 +201,7 @@ mod tests {
 
     #[bench]
     fn bench_tbx_lookup(b: &mut Bencher) {
+        // 161 µs/iter = 6.20 GB/s
         const TABLE_SIZE: u8 = 128;
         let mut table = [0_u8; TABLE_SIZE as usize];
         rand::rng().fill(&mut table);
