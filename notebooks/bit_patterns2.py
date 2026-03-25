@@ -17,9 +17,9 @@ def _():
         N = 1
         Z = 2
         O = 3
+
         def __str__(self):
             return self.name
-
 
     @dataclass(eq=False)
     class Lanes:
@@ -32,7 +32,7 @@ def _():
 
         def shr(self, n: int) -> Lanes:
             return Lanes([None] * n + self.l[:-n])
-        
+
         def shl(self, n: int) -> Lanes:
             return Lanes(self.l[n:] + [None] * n)
 
@@ -56,14 +56,17 @@ def _():
             return Lanes([f(*lane) for lane in zip(*laness)])
 
     def cp_class(cp: int) -> int:
-        if cp == ord('\n'):
+        if cp == ord("\n"):
             return CLASS.Z
         if 0xD800 <= cp <= 0xDFFF:  # surrogates
             return CLASS.O
         c0 = category(chr(cp))[0]
-        if c0 == 'L': return CLASS.L
-        if c0 == 'N': return CLASS.N
-        if c0 == 'Z': return CLASS.Z
+        if c0 == "L":
+            return CLASS.L
+        if c0 == "N":
+            return CLASS.N
+        if c0 == "Z":
+            return CLASS.Z
         return CLASS.O
 
     print(Lanes.zero(8))
@@ -76,30 +79,33 @@ def _(Lanes, cp_class, dataclass, defaultdict):
     class OrganizedBytes:
         source_str: str
         bytewise_data: dict[str, list]
+
         def __getitem__(self, key):
             return self.bytewise_data[key]
+
         def __setitem__(self, key, item):
             assert len(item) == len(next(iter(self.bytewise_data.values())))
             self.bytewise_data[key] = item
+
         def __str__(self):
             bytewise_idx = 0
             bytewise_printed = defaultdict(list[str])
             longest = 2
-        
+
             for c in self.source_str:
                 # bytes = self.bytewise_data['bytes']
-                local_bytes = c.encode('utf-8')
-            
-                bytewise_printed['char'].append(repr(c)[1:-1])
-                bytewise_printed['char'].extend([''] * (len(local_bytes) - 1))
-            
+                local_bytes = c.encode("utf-8")
+
+                bytewise_printed["char"].append(repr(c)[1:-1])
+                bytewise_printed["char"].extend([""] * (len(local_bytes) - 1))
+
                 for i, b in enumerate(local_bytes):
                     idx = bytewise_idx + i
                     # bytewise_printed['bytes'].append(f"{b:02X}")
                     for k, v in self.bytewise_data.items():
                         value = v[idx]
                         match k:
-                            case _ if (k[0] == 'b' and k[1].isnumeric()) or k == 'bytes':
+                            case _ if (k[0] == "b" and k[1].isnumeric()) or k == "bytes":
                                 str_rep = f"{value:02X}" if value is not None else "NaN"
                             case _:
                                 if isinstance(value, bool):
@@ -115,22 +121,25 @@ def _(Lanes, cp_class, dataclass, defaultdict):
                 output.append(f"{k:<{longest_key_name}}   ")
                 for item in v:
                     output.append(f"{item:<{longest}} ")
-                output.append('\n')
-            return ''.join(output)
-            
+                output.append("\n")
+            return "".join(output)
 
     def classify_bytes(s: str):
         bytes, classes = [], []
         for c in s:
             cp = ord(c)
-            b = c.encode('utf-8')
+            b = c.encode("utf-8")
             bytes.extend(b)
             cl = cp_class(cp)
             classes.extend([cl] * len(b))
-        return OrganizedBytes(s, bytewise_data={
-            'bytes': Lanes(bytes),
-            'class': Lanes(classes),
-        })
+        return OrganizedBytes(
+            s,
+            bytewise_data={
+                "bytes": Lanes(bytes),
+                "class": Lanes(classes),
+            },
+        )
+
     classified = classify_bytes("a  test've\n\nwith aål123 and t's")
     print(classified)
     return OrganizedBytes, classified
@@ -142,9 +151,9 @@ def _(CLASS, Lanes, OrganizedBytes, classified):
 
     def simd_boundaries(o: OrganizedBytes) -> OrganizedBytes:
         o = deepcopy(o)
-        b0 = o['bytes']
+        b0 = o["bytes"]
         b1 = b0.shl(1)
-        c0 = o['class']
+        c0 = o["class"]
         c1 = c0.shl(1)
 
         # There is a class boundary between current and next character
@@ -158,18 +167,14 @@ def _(CLASS, Lanes, OrganizedBytes, classified):
 
         # Otherwise the last whitespace character should stay separate
         con2, con3 = handle_contraction(b0, c0)
-    
-    
 
-    
-        o['c1'] = c1
-        o['class_boundary01'] = class_boundary01
-        o['class_boundary_whitespace01'] = class_boundary_whitespace01
-        o['merge_space'] = merge_space
-        o['con2'] = con2
-        o['con3'] = con3
-    
-    
+        o["c1"] = c1
+        o["class_boundary01"] = class_boundary01
+        o["class_boundary_whitespace01"] = class_boundary_whitespace01
+        o["merge_space"] = merge_space
+        o["con2"] = con2
+        o["con3"] = con3
+
         print(o)
 
     def handle_contraction(b0, c0) -> tuple[Lanes, Lanes]:
@@ -183,7 +188,7 @@ def _(CLASS, Lanes, OrganizedBytes, classified):
                 return None
             if c0 == CLASS.Z or c0 == CLASS.O:
                 return False
-            is_valid = b1 == ord("'") and chr(b2) in 'sdmt'
+            is_valid = b1 == ord("'") and chr(b2) in "sdmt"
             if is_valid:
                 print(locals())
             return is_valid
@@ -195,8 +200,8 @@ def _(CLASS, Lanes, OrganizedBytes, classified):
                 return False
             if chr(b1) != "'":
                 return False
-            pair = f'{chr(b2)}{chr(b3)}'
-            is_valid = pair in ('ve', 're', 'll')
+            pair = f"{chr(b2)}{chr(b3)}"
+            is_valid = pair in ("ve", "re", "ll")
             if is_valid:
                 print(locals())
             return is_valid
@@ -206,15 +211,13 @@ def _(CLASS, Lanes, OrganizedBytes, classified):
 
         return matched2, matched3
 
-    
-
     simd_boundaries(classified)
     return
 
 
 @app.cell
 def _(category):
-    category('\n')
+    category("\n")
     return
 
 

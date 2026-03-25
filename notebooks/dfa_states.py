@@ -19,6 +19,7 @@ def _():
 
     class CLASS(IntEnum):
         """2 bit enum representing the character class of a code point"""
+
         L = 0
         N = 1
         Z = 2
@@ -29,17 +30,19 @@ def _():
             return self.name
 
         def as_bits(self):
-            return tuple([int(b) for b in f'{self.value:02b}'])
+            return tuple([int(b) for b in f"{self.value:02b}"])
 
     def cp_class(cp: int) -> int:
         if 0xD800 <= cp <= 0xDFFF:  # surrogates
             return CLASS.O
         c0 = category(chr(cp))[0]
-        if c0 == 'L': return CLASS.L
-        if c0 == 'N': return CLASS.N
-        if c0 == 'Z': return CLASS.Z
+        if c0 == "L":
+            return CLASS.L
+        if c0 == "N":
+            return CLASS.N
+        if c0 == "Z":
+            return CLASS.Z
         return CLASS.O
-
 
     def get_bits(b):
         return [int(i) for i in f"{b:08b}"]
@@ -52,7 +55,7 @@ def _():
 
         @classmethod
         def from_utf32(cls, cp: int, valid_set: set | None = None) -> Codepoint:
-            bytes = tuple(chr(cp).encode('utf-8', 'surrogatepass'))
+            bytes = tuple(chr(cp).encode("utf-8", "surrogatepass"))
             clss = cp_class(cp)
             if valid_set is not None and cp not in valid_set:
                 clss = CLASS.I
@@ -72,8 +75,8 @@ def _():
             return (*s, self.cls)
 
         def __repr__(self):
-            bytes_str = ' '.join(f'{b:02X}' for b in self.bytes)
-            return f'{chr(self.cp)}[U+{self.cp:X}, {bytes_str}, {self.cls.name}]'
+            bytes_str = " ".join(f"{b:02X}" for b in self.bytes)
+            return f"{chr(self.cp)}[U+{self.cp:X}, {bytes_str}, {self.cls.name}]"
 
         def __str__(self):
             return repr(self)
@@ -84,32 +87,31 @@ def _():
         def __hash__(self):
             return hash(self.cp)
 
-    def get_codepoints(filename='/Users/marcel/data/TinyStoriesV2-GPT4-train.txt'):
+    def get_codepoints(filename="/Users/marcel/data/TinyStoriesV2-GPT4-train.txt"):
         text = Path(filename).read_text()
         # for c in tqdm(Path(filename).read_text()):
         #     s.add(ord(c))
         s = set(text)
-    
+
         return sorted((ord(c) for c in s))
-    
 
     def most_frequent_codepoints(prop: float):
         # Load from file
         from json import load
+
         with open("/Users/marcel/data/cc_codepoint_counts.json", "r") as f:
             counter = load(f)
         by_freq = sorted([(int(k), v) for k, v in counter.items()], key=lambda x: x[1], reverse=True)
         total_count = len(by_freq)
-        codepoints = [cp for cp, count in by_freq[:int(total_count * prop)]]
+        codepoints = [cp for cp, count in by_freq[: int(total_count * prop)]]
         cp_set = set(codepoints)
         return [Codepoint.from_utf32(cp, cp_set) for cp in range(0x110000)]
-
 
     def _codepoints() -> tuple[list[Codepoint], list[list[Codepoint]]]:
         """Enumerate all Unicode code points"""
         res = []
         for cp in range(0x110000):
-        # for cp in get_codepoints(filename="/Users/marcel/data/owt_valid.txt"):
+            # for cp in get_codepoints(filename="/Users/marcel/data/owt_valid.txt"):
             res.append(Codepoint.from_utf32(cp))
 
         by_length: list[list[Codepoint]] = [[] for _ in range(5)]
@@ -117,6 +119,7 @@ def _():
             by_length[len(cp.bytes)].append(cp)
 
         return res, by_length
+
     codepoints, cp_by_length = _codepoints()
 
     # def cp_class(cp: int) -> int:
@@ -128,9 +131,8 @@ def _():
     #     if c0 == 'Z': return CLASS_Z
     #     return CLASS_O
 
-
     # codepoints = most_frequent_codepoints(0.2)
-    print(f'{len(codepoints)=}')
+    print(f"{len(codepoints)=}")
     return CLASS, Codepoint, codepoints, dataclass, defaultdict, mo
 
 
@@ -166,9 +168,7 @@ def _(CLASS, Codepoint, codepoints, defaultdict):
         def __init__(self, full_entry: tuple[int | CLASS, ...]):
             self.pairs: tuple[tuple[int, ...], CLASS] = [full_entry[:-1], full_entry[-1]]
 
-
-
-    def general_merge(to_bits: int, codepoints: list[Codepoint]=codepoints):
+    def general_merge(to_bits: int, codepoints: list[Codepoint] = codepoints):
         # Group code points by their first n_bits
         by_first_section = defaultdict(list)
         for cp in codepoints:
@@ -192,8 +192,7 @@ def _(CLASS, Codepoint, codepoints, defaultdict):
 
             n_partitions = max(len(suffix_set) for suffix_set in distinct_class_suffixes.values())
             partition_lengths.append(n_partitions)
-        
-        
+
             merged[frozenset(s)].append(first_section)
 
         # return len(merged)
@@ -211,7 +210,6 @@ def _(CLASS, Codepoint, codepoints, defaultdict):
 def _(codepoints, dataclass):
     from typing import Any, Dict, Hashable, Iterable, List, Optional, Tuple, Set
 
-
     @dataclass(slots=True)
     class Node:
         # Children are indices into `nodes` list; -1 means missing.
@@ -220,7 +218,6 @@ def _(codepoints, dataclass):
         # terminal_class is the class label if some string ends exactly here; else None.
         terminal_class: Optional[Hashable] = None
         depth: int = 0
-
 
     def build_trie(strings_and_classes: Iterable[Tuple[str, Hashable]]) -> List[Node]:
         """
@@ -257,13 +254,9 @@ def _(codepoints, dataclass):
                 nodes[cur].terminal_class = cls
             else:
                 if nodes[cur].terminal_class != cls:
-                    raise ValueError(
-                        f"Conflicting classes for bitstring {bitstr!r}: "
-                        f"{nodes[cur].terminal_class!r} vs {cls!r}"
-                    )
+                    raise ValueError(f"Conflicting classes for bitstring {bitstr!r}: {nodes[cur].terminal_class!r} vs {cls!r}")
 
         return nodes
-
 
     def minimize_suffix_subtrees(nodes: List[Node]) -> Tuple[List[int], Dict[Tuple[Any, int, int], int]]:
         """
@@ -293,7 +286,6 @@ def _(codepoints, dataclass):
 
         return state_id, sig2id
 
-
     def min_states_after_k_bits(strings_and_classes: Iterable[Tuple[str, Hashable]], L: int) -> Dict[int, int]:
         """
         Compute S_k = minimum number of states needed after reading exactly k bits,
@@ -314,7 +306,6 @@ def _(codepoints, dataclass):
 
         return {k: len(depth_to_states[k]) for k in range(L + 1)}
 
-
     def min_states_at_k(strings_and_classes: Iterable[Tuple[str, Hashable]], k: int) -> int:
         """
         Convenience wrapper to compute only S_k for a specific k.
@@ -326,13 +317,8 @@ def _(codepoints, dataclass):
             return 0
         return min_states_after_k_bits(pairs, L)[k]
 
-
     # Example:
-    data = [
-        (seq[:-1] + tuple([0] * (32 - len(seq[:-1]))), seq[-1])
-        for seq in [cp.as_bit_sequence() for cp in codepoints]
-        if len(seq[:-1]) < 32
-    ]
+    data = [(seq[:-1] + tuple([0] * (32 - len(seq[:-1]))), seq[-1]) for seq in [cp.as_bit_sequence() for cp in codepoints] if len(seq[:-1]) < 32]
     L = 32
     print(set(d[1] for d in data))
 
@@ -352,7 +338,6 @@ def _():
     from dataclasses import dataclass
     from typing import Dict, Hashable, Iterable, List, Optional, Sequence, Tuple
 
-
     # -----------------------------
     # Bit utilities
     # -----------------------------
@@ -360,7 +345,6 @@ def _():
     def bits_to_int(bitstr: str) -> int:
         """bitstr is '0'/'1' length L, MSB is bitstr[0]."""
         return int(bitstr, 2)
-
 
     def project_bits(x: int, positions: Sequence[int], L: int) -> int:
         """
@@ -372,7 +356,6 @@ def _():
             out = (out << 1) | ((x >> (L - 1 - p)) & 1)
         return out
 
-
     def choose_random_partition(L: int, b1: int, b2: int, rng: random.Random) -> Tuple[List[int], List[int], List[int]]:
         """
         Randomly split bit positions [0..L-1] into three disjoint groups
@@ -381,10 +364,9 @@ def _():
         pos = list(range(L))
         rng.shuffle(pos)
         g1 = sorted(pos[:b1])
-        g2 = sorted(pos[b1:b1 + b2])
-        g3 = sorted(pos[b1 + b2:])
+        g2 = sorted(pos[b1 : b1 + b2])
+        g3 = sorted(pos[b1 + b2 :])
         return g1, g2, g3
-
 
     # -----------------------------
     # Conflict construction + greedy coloring
@@ -400,7 +382,6 @@ def _():
         for _, r, c in items:
             seen[r].add(c)
         return max((len(s) for s in seen.values()), default=0)
-
 
     def build_conflict_adjacency(items: Iterable[Tuple[int, int, Hashable]]) -> Dict[int, set]:
         """
@@ -437,7 +418,6 @@ def _():
                             adj[v].add(u)
         return adj
 
-
     def greedy_color_with_cap(adj: Dict[int, set], max_colors: int) -> Optional[Dict[int, int]]:
         """
         Greedy coloring (degree-descending) with early abort if colors exceed max_colors.
@@ -462,7 +442,6 @@ def _():
             color[v] = c
         return color
 
-
     # -----------------------------
     # Two-iteration feasibility + search for minimal B
     # -----------------------------
@@ -470,12 +449,11 @@ def _():
     @dataclass(frozen=True)
     class TwoPassSolution:
         B: int
-        first_bits: List[int]          # positions of bits used in pass 1 (size B)
-        state_bits: int                # s = 2B - L
-        state_count: int               # <= 2^s
+        first_bits: List[int]  # positions of bits used in pass 1 (size B)
+        state_bits: int  # s = 2B - L
+        state_count: int  # <= 2^s
         # pass1_state_of_a: mapping from a (pass1 pattern) -> state id (color)
         pass1_state_of_a: Dict[int, int]
-
 
     def try_two_pass_for_subset(
         xs: Sequence[int],
@@ -527,7 +505,6 @@ def _():
             pass1_state_of_a=coloring,
         )
 
-
     def find_min_B_two_pass(
         bitstrings_and_classes: Sequence[Tuple[str, Hashable]],
         L: int,
@@ -567,7 +544,6 @@ def _():
 
         return None
 
-
     # -----------------------------
     # Three-iteration feasibility + search for minimal B
     # -----------------------------
@@ -575,16 +551,15 @@ def _():
     @dataclass(frozen=True)
     class ThreePassSolution:
         B: int
-        g1: List[int]     # pass1 input bit positions (size b1)
-        g2: List[int]     # pass2 input bit positions (size b2)
-        g3: List[int]     # pass3 input bit positions (size b3 = L-b1-b2)
-        s1: int           # pass1 state bits = B - b2
-        s2: int           # pass2 state bits = B - b3
-        states1: int      # used states at stage1
-        states2: int      # used states at stage2
-        pass1_state_of_a1: Dict[int, int]     # a1 -> state1
-        pass2_state_of_u: Dict[int, int]      # u=(state1,g2pattern) -> state2
-
+        g1: List[int]  # pass1 input bit positions (size b1)
+        g2: List[int]  # pass2 input bit positions (size b2)
+        g3: List[int]  # pass3 input bit positions (size b3 = L-b1-b2)
+        s1: int  # pass1 state bits = B - b2
+        s2: int  # pass2 state bits = B - b3
+        states1: int  # used states at stage1
+        states2: int  # used states at stage2
+        pass1_state_of_a1: Dict[int, int]  # a1 -> state1
+        pass2_state_of_u: Dict[int, int]  # u=(state1,g2pattern) -> state2
 
     def try_three_pass_for_partition(
         xs: Sequence[int],
@@ -676,7 +651,6 @@ def _():
             pass2_state_of_u=color2,
         )
 
-
     def find_min_B_three_pass(
         bitstrings_and_classes: Sequence[Tuple[str, Hashable]],
         L: int,
@@ -729,7 +703,6 @@ def _():
                         return best
 
         return None
-
 
     # -----------------------------
     # Example usage (replace with your data)

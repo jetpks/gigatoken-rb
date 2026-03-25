@@ -11,19 +11,20 @@ def _():
 
 @app.cell
 def _():
-    ord('ø')
+    ord("ø")
     return
 
 
 @app.cell
 def _(category):
-    category('Ø')
+    category("Ø")
     return
 
 
 @app.cell
 def _():
     from unicodedata import category
+
     codepoints = []
     invalid = 0
     for cp in range(0x110000):
@@ -31,12 +32,12 @@ def _():
             continue
         ch = chr(cp)
         cat = category(ch)
-        if cat == 'Cn':
+        if cat == "Cn":
             invalid += 1
             continue
         category_group = cat[0]
-        if category_group not in ('L', 'N', 'Z'):
-            category_group = 'O'
+        if category_group not in ("L", "N", "Z"):
+            category_group = "O"
         codepoints.append((ch, category_group))
     return category, codepoints, invalid
 
@@ -51,7 +52,7 @@ app._unparsable_cell(
     r"""
     category_group_runs =
     """,
-    name="_"
+    name="_",
 )
 
 
@@ -89,7 +90,6 @@ def _():
         NUMBER = auto()
         SEPARATOR = auto()
         OTHER = auto()
-
 
     return
 

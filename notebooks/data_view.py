@@ -19,9 +19,7 @@ def _():
 
 
 @app.function
-def cp_length_blocks(
-    data, block_size: int = 256, threshold_length: int = 1, show_errors: bool = False
-):
+def cp_length_blocks(data, block_size: int = 256, threshold_length: int = 1, show_errors: bool = False):
     successes = 0
     total = 0
     for window_start in range(0, len(data), block_size):
@@ -50,9 +48,7 @@ def cp_length_blocks(
 
 @app.cell
 def _():
-    def proportion_matches(
-        data, fail_condition: callable, block_size: int = 64, show_errors: bool = False
-    ):
+    def proportion_matches(data, fail_condition: callable, block_size: int = 64, show_errors: bool = False):
         successes = 0
         total = 0
         for window_start in range(0, len(data), block_size):
@@ -124,12 +120,8 @@ def _(cc, proportion_matches):
     def longer_than_3(byte):
         return byte >= 0b11110000
 
-    print(
-        "Proportion 2 or shorter characters", proportion_matches(cc, longer_than_2, 256)
-    )
-    print(
-        "Proportion 3 or shorter characters", proportion_matches(cc, longer_than_3, 256)
-    )
+    print("Proportion 2 or shorter characters", proportion_matches(cc, longer_than_2, 256))
+    print("Proportion 3 or shorter characters", proportion_matches(cc, longer_than_3, 256))
     return
 
 

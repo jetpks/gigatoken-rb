@@ -9,7 +9,7 @@ app._unparsable_cell(
     import marimo as mo
     import 
     """,
-    name="_"
+    name="_",
 )
 
 

@@ -34,9 +34,12 @@ def _():
         if 0xD800 <= cp <= 0xDFFF:  # UTF-16 surrogates -> O
             return O
         cat = unicodedata.category(chr(cp))
-        if cat[0] == 'L': return L
-        if cat == 'Nd':  return N
-        if cat[0] == 'Z':return Z
+        if cat[0] == "L":
+            return L
+        if cat == "Nd":
+            return N
+        if cat[0] == "Z":
+            return Z
         return O
 
     def nibble(cp: int, shift: int) -> int:
@@ -44,9 +47,9 @@ def _():
 
     # Initial bank definitions and allowed refinement shifts (in top-down order)
     BANK_KINDS = [
-        dict(name="len2",  low=0x0080,   high=0x0800,   refine_shifts=[8, 4]),      # n2, then n1
-        dict(name="len3",  low=0x0800,   high=0x10000,  refine_shifts=[12, 8]),     # n3, then n2
-        dict(name="plane", low=0x10000,  high=0x110000, refine_shifts=[16, 12, 8]), # plane, then n3, then n2
+        dict(name="len2", low=0x0080, high=0x0800, refine_shifts=[8, 4]),  # n2, then n1
+        dict(name="len3", low=0x0800, high=0x10000, refine_shifts=[12, 8]),  # n3, then n2
+        dict(name="plane", low=0x10000, high=0x110000, refine_shifts=[16, 12, 8]),  # plane, then n3, then n2
     ]
 
     @dataclass
@@ -68,6 +71,7 @@ def _():
         steps: List[StepTables]  # top -> bottom
         root_shape: int
         depth: int
+
     return (
         BANK_KINDS,
         Bank,
@@ -99,10 +103,14 @@ def _(
     ref_class,
 ):
     def bank_step_shifts(bank: Bank) -> List[int]:
-        if bank.kind == "len2":  full = [8, 4, 0]
-        elif bank.kind == "len3":  full = [12, 8, 4, 0]
-        elif bank.kind == "plane": full = [12, 8, 4, 0]  # within a plane
-        else: raise ValueError
+        if bank.kind == "len2":
+            full = [8, 4, 0]
+        elif bank.kind == "len3":
+            full = [12, 8, 4, 0]
+        elif bank.kind == "plane":
+            full = [12, 8, 4, 0]  # within a plane
+        else:
+            raise ValueError
         fixed = set(bank.refine_shifts)
         return [s for s in full if s not in fixed]
 
@@ -111,7 +119,8 @@ def _(
 
     def iter_prefixes(bank: Bank, used_shifts: List[int]):
         # Generate all combinations for the specified shifts, honoring fixed bank nibble values
-        fixed_map = {s:v for s,v in zip(bank.refine_shifts, bank.key)}
+        fixed_map = {s: v for s, v in zip(bank.refine_shifts, bank.key)}
+
         def rec(i, acc):
             if i == len(used_shifts):
                 yield tuple(acc)
@@ -119,25 +128,26 @@ def _(
             s = used_shifts[i]
             if s in fixed_map:
                 acc.append(fixed_map[s])
-                yield from rec(i+1, acc)
+                yield from rec(i + 1, acc)
                 acc.pop()
             else:
                 for v in range(16):
                     acc.append(v)
-                    yield from rec(i+1, acc)
+                    yield from rec(i + 1, acc)
                     acc.pop()
+
         yield from rec(0, [])
 
     def compose_cp_from_prefix(bank: Bank, used_shifts: List[int], prefix: Tuple[int, ...], last_shift: int, last_val: int) -> int:
         cp = 0
         # Apply *all* fixed nibbles (including plane at shift 16 if present)
         for s, v in zip(bank.refine_shifts, bank.key):
-            cp |= (v << s)
+            cp |= v << s
         # Apply chosen higher-nibble prefix
         for s, v in zip(used_shifts, prefix):
-            cp |= (v << s)
+            cp |= v << s
         # Apply the row's nibble
-        cp |= (last_val << last_shift)
+        cp |= last_val << last_shift
         return cp
 
     # --- Core table builder for a bank (refines if any step has too many shapes) ---
@@ -146,14 +156,14 @@ def _(
         shifts = bank_step_shifts(bank)
         depth = len(shifts)
         used = shifts[:-1]
-        last = shifts[-1] if depth>0 else 0
+        last = shifts[-1] if depth > 0 else 0
 
         # Bottom rows (over the last nibble)
         bottom_rows = {}
         for pref in iter_prefixes(bank, used):
             row = []
             for n in range(16):
-                cp = compose_cp_from_prefix(bank, used, pref, last, n) if depth>0 else 0
+                cp = compose_cp_from_prefix(bank, used, pref, last, n) if depth > 0 else 0
                 if not (bank.low <= cp < bank.high):
                     cls = O
                 else:
@@ -168,12 +178,13 @@ def _(
         for pref, row in bottom_rows.items():
             rid = row_to_sid.get(row)
             if rid is None:
-                rid = len(row_to_sid); row_to_sid[row] = rid
+                rid = len(row_to_sid)
+                row_to_sid[row] = rid
             sid_of_prefix[pref] = rid
         shapes_levels.append({sid: row for row, sid in row_to_sid.items()})
 
         # Build upper levels
-        for lvl in range(2, depth+1):
+        for lvl in range(2, depth + 1):
             used_up = shifts[:-(lvl)]
             # For each parent prefix (higher nibbles), build a row where entries are either a leaf class 0..3
             # (if the child row is uniform), or 4+child_shape_id
@@ -193,7 +204,9 @@ def _(
             for pp, row in row_map.items():
                 rid = new_row_to_sid.get(row)
                 if rid is None:
-                    rid = len(new_row_to_sid); new_row_to_sid[row] = rid; new_shapes[rid] = row
+                    rid = len(new_row_to_sid)
+                    new_row_to_sid[row] = rid
+                    new_shapes[rid] = row
                 new_sid_of_prefix[pp] = rid
             shapes_levels.append(new_shapes)
             sid_of_prefix = new_sid_of_prefix
@@ -207,8 +220,7 @@ def _(
         to_use = [s for s in allowed if s not in bank.refine_shifts]
         if any(c > max_shapes_per_step for c in counts) and to_use:
             split_shift = to_use[0]
-            children = [Bank(bank.kind, bank.key + (val,), bank.refine_shifts + (split_shift,), bank.low, bank.high)
-                        for val in range(16)]
+            children = [Bank(bank.kind, bank.key + (val,), bank.refine_shifts + (split_shift,), bank.low, bank.high) for val in range(16)]
             return None, children
 
         # Emit per-step grouped 64-entry LUTs (≤4 shapes/group → 64 entries: (local_shape<<4)|nibble)
@@ -216,10 +228,10 @@ def _(
         for shape_rows in shapes_levels[::-1]:
             S = len(shape_rows)
             groups = math.ceil(S / 4)
-            group_luts = [[O]*64 for _ in range(groups)]
+            group_luts = [[O] * 64 for _ in range(groups)]
             for sid, row in shape_rows.items():
                 g, loc = divmod(sid, 4)
-                base = (loc << 4)
+                base = loc << 4
                 lut = group_luts[g]
                 for n in range(16):
                     lut[base | n] = row[n]
@@ -229,8 +241,7 @@ def _(
     def build_tables_for_bank(bank: Bank, max_shapes_per_step=12):
         # Always split 'plane' first by plane id if it's not already fixed (prevents bogus "all O" rows)
         if bank.kind == "plane" and 16 not in bank.refine_shifts:
-            children = [Bank(bank.kind, bank.key + (val,), bank.refine_shifts + (16,), bank.low, bank.high)
-                        for val in range(16)]
+            children = [Bank(bank.kind, bank.key + (val,), bank.refine_shifts + (16,), bank.low, bank.high) for val in range(16)]
             return None, children
         return build_tables_for_bank_with_plane_split(bank, max_shapes_per_step)
 
@@ -266,13 +277,13 @@ def _(
 ):
     # --- Runtime simulator using the LUTs (simulates vperm + 1–4 tables per step with mask blend) ---
 
-    def classify_with_tables(cp: int, banks: Dict[Tuple, Tuple[Bank,BankTables]]) -> int:
+    def classify_with_tables(cp: int, banks: Dict[Tuple, Tuple[Bank, BankTables]]) -> int:
         # ASCII fast path (computed, no tables)
         if cp < 0x80:
             c = chr(cp)
-            if 'A' <= c <= 'Z' or 'a' <= c <= 'z':
+            if "A" <= c <= "Z" or "a" <= c <= "z":
                 return L
-            if '0' <= c <= '9':
+            if "0" <= c <= "9":
                 return N
             if cp == 0x20:
                 return Z
@@ -280,12 +291,15 @@ def _(
 
         # Pick bank (linear scan is fine for PoC; production would index)
         for (k_kind, refine_shifts, key, low, high), (bank, bt) in banks.items():
-            if not (low <= cp < high): continue
+            if not (low <= cp < high):
+                continue
             ok = True
             for s, v in zip(refine_shifts, key):
                 if nibble(cp, s) != v:
-                    ok = False; break
-            if not ok: continue
+                    ok = False
+                    break
+            if not ok:
+                continue
 
             # Walk nibble steps (top → bottom)
             shape = bt.root_shape
@@ -293,7 +307,7 @@ def _(
             for step_idx, step in enumerate(bt.steps):
                 n = nibble(cp, shifts[step_idx])
                 g, loc = divmod(shape, 4)
-                code = step.group_luts[g][(loc<<4) | n]
+                code = step.group_luts[g][(loc << 4) | n]
                 if code < 4:
                     return code
                 shape = code - 4
@@ -302,6 +316,7 @@ def _(
 
         # Fallback (shouldn't happen)
         return ref_class(cp)
+
     return (classify_with_tables,)
 
 
@@ -318,8 +333,10 @@ def _(build_all_banks, classify_with_tables, ref_class):
     max_groups_per_step = max(len(step.group_luts) for _, bt in banks.values() for step in bt.steps)
     max_shapes_per_step = max(step.num_shapes for _, bt in banks.values() for step in bt.steps)
 
-    print(f"Banks: {num_banks}, Steps: {total_steps}, LUTs: {total_luts}, ~{lut_bytes} bytes of tables, "
-          f"max groups/step: {max_groups_per_step}, max shapes/step: {max_shapes_per_step}")
+    print(
+        f"Banks: {num_banks}, Steps: {total_steps}, LUTs: {total_luts}, ~{lut_bytes} bytes of tables, "
+        f"max groups/step: {max_groups_per_step}, max shapes/step: {max_shapes_per_step}"
+    )
 
     # Verify equality for every code point
     mismatches = 0
@@ -342,7 +359,7 @@ app._unparsable_cell(
         r = ref_class(cp)
         if
     """,
-    name="_"
+    name="_",
 )
 
 

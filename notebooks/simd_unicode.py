@@ -18,6 +18,7 @@ def _(CLASS_L, CLASS_N, CLASS_O, CLASS_Z):
 
     class CLASS(IntEnum):
         """2 bit enum representing the character class of a code point"""
+
         L = 0
         N = 1
         Z = 2
@@ -27,17 +28,19 @@ def _(CLASS_L, CLASS_N, CLASS_O, CLASS_Z):
             return self.name
 
         def as_bits(self):
-            return tuple([int(b) for b in f'{self.value:02b}'])
+            return tuple([int(b) for b in f"{self.value:02b}"])
 
     def cp_class(cp: int) -> int:
         if 0xD800 <= cp <= 0xDFFF:  # surrogates
             return CLASS.O
         c0 = category(chr(cp))[0]
-        if c0 == 'L': return CLASS.L
-        if c0 == 'N': return CLASS.N
-        if c0 == 'Z': return CLASS.Z
+        if c0 == "L":
+            return CLASS.L
+        if c0 == "N":
+            return CLASS.N
+        if c0 == "Z":
+            return CLASS.Z
         return CLASS.O
-
 
     def get_bits(b):
         return [int(i) for i in f"{b:08b}"]
@@ -53,7 +56,7 @@ def _(CLASS_L, CLASS_N, CLASS_O, CLASS_Z):
 
         @classmethod
         def from_utf32(cls, cp: int) -> Codepoint:
-            bytes = tuple(chr(cp).encode('utf-8', 'surrogatepass'))
+            bytes = tuple(chr(cp).encode("utf-8", "surrogatepass"))
             clss = cp_class(cp)
             return cls(cp, bytes, clss)
 
@@ -80,8 +83,8 @@ def _(CLASS_L, CLASS_N, CLASS_O, CLASS_Z):
             return (*get_bits_utf32(self.cp), cls)
 
         def __repr__(self):
-            bytes_str = ' '.join(f'{b:02X}' for b in self.bytes)
-            return f'{chr(self.cp)}[U+{self.cp:X}, {bytes_str}, {self.cls.name}]'
+            bytes_str = " ".join(f"{b:02X}" for b in self.bytes)
+            return f"{chr(self.cp)}[U+{self.cp:X}, {bytes_str}, {self.cls.name}]"
 
         def __str__(self):
             return repr(self)
@@ -91,7 +94,6 @@ def _(CLASS_L, CLASS_N, CLASS_O, CLASS_Z):
 
         def __hash__(self):
             return hash(self.cp)
-
 
     def _codepoints():
         res = []
@@ -105,6 +107,7 @@ def _(CLASS_L, CLASS_N, CLASS_O, CLASS_Z):
             by_length[len(cp.bytes)].append(cp)
 
         return res, by_length
+
     codepoints, cp_by_length = _codepoints()
     codepoints3_with_emoji = [cp for cp in codepoints if len(cp.bytes) <= 3 or is_emoji(chr(cp.cp))]
 
@@ -112,11 +115,13 @@ def _(CLASS_L, CLASS_N, CLASS_O, CLASS_Z):
         if 0xD800 <= cp <= 0xDFFF:  # surrogates
             return CLASS_O
         c0 = category(chr(cp))[0]
-        if c0 == 'L': return CLASS_L
-        if c0 == 'N': return CLASS_N
-        if c0 == 'Z': return CLASS_Z
+        if c0 == "L":
+            return CLASS_L
+        if c0 == "N":
+            return CLASS_N
+        if c0 == "Z":
+            return CLASS_Z
         return CLASS_O
-
 
     print(len(codepoints))
     print(len(codepoints3_with_emoji))
@@ -176,7 +181,7 @@ def _(CLASS, codepoints, defaultdict, mo):
             seq = cp.as_bit_sequence(binary=binary, reverse=False)
             # seq = tuple([*seq[:-1][::-1], seq[-1]])
             if limit_to_length:
-                assert len(seq) == 8 * limit_to_length + 1 #, f'Expected length , got {len(seq)}'
+                assert len(seq) == 8 * limit_to_length + 1  # , f'Expected length , got {len(seq)}'
             by_first_section[seq[:to_bits]].append(seq[to_bits:])
 
         # We now have (first section) -> [last section]
@@ -202,7 +207,7 @@ def _(CLASS, codepoints, defaultdict, mo):
         # Top at 164 values with no binary
         # print(f'{i = }', end='')
         n_states = general_merge(to_bits=i, limit_to_length=None, codepoints=codepoints)  # You need 164 values for the intermediate state
-        print(f'You need {n_states} values for the intermediate state at {i}')
+        print(f"You need {n_states} values for the intermediate state at {i}")
         # print('-'*30)
     # general_merge(to_bits=26, limit_to_length=4, binary=None)  # You need 164 values for the intermediate state
     # general_merge(to_bits=32, limit_to_length=4, binary=CLASS.L)  # You need 164 values for the intermediate state
@@ -290,8 +295,8 @@ def _(cp_by_length, defaultdict, tqdm, trange):
 @app.cell
 def _(Lanes, len_tbl, resolve_lead_u8):
     def classify_bytes():
-        s = 'Here is some tex2t tࠀhat uses ²ünîcøde 𐍅 brrr'
-        bytes = s.encode('utf-8')
+        s = "Here is some tex2t tࠀhat uses ²ünîcøde 𐍅 brrr"
+        bytes = s.encode("utf-8")
         b0 = Lanes([e for e in bytes])
 
         b1 = b0 << 1
@@ -306,17 +311,17 @@ def _(Lanes, len_tbl, resolve_lead_u8):
         print(b0)
         print(b1)
         print(b2)
-        print(f'{b0   = !s}')
-        print(f'{b1   = !s}')
-        print(f'{i0   = !s}')
-        print(f'{i1   = !s}')
-        text = ''.join([f'{c:<{len(c.encode('utf-8') * 3)}}' for c in s])
-        print(f'{text = !s}')
+        print(f"{b0   = !s}")
+        print(f"{b1   = !s}")
+        print(f"{i0   = !s}")
+        print(f"{i1   = !s}")
+        text = "".join([f"{c:<{len(c.encode('utf-8') * 3)}}" for c in s])
+        print(f"{text = !s}")
         # print(f'{kind = !s}')
         # print(f'{ident= !s}')
         fcls = Lanes([resolve_lead_u8(b0e, b1e, b2e, b3e) for b0e, b1e, b2e, b3e in zip(b0, b1, b2, b3)])
-        print(f'{fcls = !s}')
-        print(f'{lens = !s}')
+        print(f"{fcls = !s}")
+        print(f"{lens = !s}")
 
     classify_bytes()
     return
@@ -325,6 +330,7 @@ def _(Lanes, len_tbl, resolve_lead_u8):
 @app.cell
 def _():
     import marimo as mo
+
     return (mo,)
 
 
@@ -343,21 +349,20 @@ def _(codepoints):
             if cls != previous_class:
                 ranges.append((idx - last_range_start, previous_class))
                 if idx - last_range_start < 5:
-                    print(f'Range {[codepoints[l] for l in range(last_range_start, idx)]}')
+                    print(f"Range {[codepoints[l] for l in range(last_range_start, idx)]}")
                 last_range_start = idx
                 range_count += 1
                 previous_class = cls
         print(range_count)
         print(ranges)
+
     # run_ranges()
     return
 
 
 @app.cell
 def _(mo):
-    mo.md(
-        r"""### Code to construct real tables from the merges we hypothesized above"""
-    )
+    mo.md(r"""### Code to construct real tables from the merges we hypothesized above""")
     return
 
 
@@ -379,6 +384,7 @@ def _(codepoints, defaultdict):
             for prefix, suffixes in with_shared_prefix.items():
                 frozen_suffixes = frozenset(suffixes)
                 previous_prefix = prefix[:-1]
+
     # construct_tables()
     return
 
@@ -392,14 +398,15 @@ def _(CLASS, IntEnum, codepoints3_with_emoji, dataclass, defaultdict):
     class MinimizedDFA:
         start: int
         transitions: Dict[Tuple[int, int], int]  # (state, symbol) -> next_state
-        outputs: Dict[int, Optional[CLASS]]      # state -> CLASS (or None for non-terminal)
+        outputs: Dict[int, Optional[CLASS]]  # state -> CLASS (or None for non-terminal)
         alphabet: Tuple[int, ...] = (0, 1)
 
         @property
         def states(self) -> Set[int]:
             s = {self.start}
             for (q, _), r in self.transitions.items():
-                s.add(q); s.add(r)
+                s.add(q)
+                s.add(r)
             return s
 
         def classify(self, bits: Sequence[int]) -> Optional[CLASS]:
@@ -422,24 +429,20 @@ def _(CLASS, IntEnum, codepoints3_with_emoji, dataclass, defaultdict):
                     lines.append(f"  --{a}--> {self.transitions[(q, a)]}")
             return "\n".join(lines)
 
-    def _hopcroft_minimize(
-        start: int,
-        transitions: Dict[Tuple[int, int], int],
-        outputs: Dict[int, Optional[CLASS]],
-        alphabet: Tuple[int, ...]
-    ) -> MinimizedDFA:
+    def _hopcroft_minimize(start: int, transitions: Dict[Tuple[int, int], int], outputs: Dict[int, Optional[CLASS]], alphabet: Tuple[int, ...]) -> MinimizedDFA:
         # Build state set
         states: Set[int] = set()
         states.add(start)
         for (q, _), r in transitions.items():
-            states.add(q); states.add(r)
+            states.add(q)
+            states.add(r)
 
         # Initial partition: by output label (including None)
         by_label: Dict[Optional[CLASS], Set[int]] = defaultdict(set)
         for q in states:
             by_label[outputs.get(q)].add(q)
         P: List[Set[int]] = [s for s in by_label.values() if s]  # blocks
-        W: List[Set[int]] = [set(block) for block in P]          # worklist
+        W: List[Set[int]] = [set(block) for block in P]  # worklist
 
         # Precompute predecessors for each symbol
         pred: Dict[int, Dict[int, Set[int]]] = {a: defaultdict(set) for a in alphabet}
@@ -490,18 +493,10 @@ def _(CLASS, IntEnum, codepoints3_with_emoji, dataclass, defaultdict):
                 tgt_old = transitions[(rep, a)]
                 new_transitions[(i, a)] = block_index[tgt_old]
 
-        return MinimizedDFA(
-            start=new_start,
-            transitions=new_transitions,
-            outputs=new_outputs,
-            alphabet=alphabet
-        )
+        return MinimizedDFA(start=new_start, transitions=new_transitions, outputs=new_outputs, alphabet=alphabet)
 
     # ---- Builder & Minimizer ----
-    def build_minimized_classifier(
-        samples: Iterable[Tuple[Tuple[int, ...], CLASS]],
-        alphabet: Tuple[int, ...] = (0, 1)
-    ) -> MinimizedDFA:
+    def build_minimized_classifier(samples: Iterable[Tuple[Tuple[int, ...], CLASS]], alphabet: Tuple[int, ...] = (0, 1)) -> MinimizedDFA:
         """
         Build a minimal DFA (Moore machine) that recognizes exactly the given sequences
         and outputs their CLASS at terminal states. All other sequences go to a sink.
@@ -579,18 +574,15 @@ def _(CLASS, IntEnum, codepoints3_with_emoji, dataclass, defaultdict):
 
     # ---- Example usage (remove or adapt in your codebase) ----
     # Toy set
-    bit_sequences = [
-        cp.as_bit_sequence()
-        for cp in codepoints3_with_emoji
-    ]
+    bit_sequences = [cp.as_bit_sequence() for cp in codepoints3_with_emoji]
     samples = [
         (bits[:-1], bits[-1])  # (bit sequence, CLASS)
         for bits in bit_sequences
     ]
     dfa = optimize_classifier(samples)
     print(dfa.describe())
-    print("Classify (1,0):", dfa.classify((1,0)))
-    print("Classify (1,1):", dfa.classify((1,1)))  # -> None (not in set)
+    print("Classify (1,0):", dfa.classify((1, 0)))
+    print("Classify (1,1):", dfa.classify((1, 1)))  # -> None (not in set)
     return
 
 

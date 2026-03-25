@@ -8,6 +8,7 @@ app = marimo.App(width="medium")
 def _():
     import tokenizers
     from pathlib import Path
+
     return (Path,)
 
 
@@ -24,7 +25,7 @@ def _(r50k_string):
     data = []
     tokens = []
     for line in r50k_string.splitlines():
-        t_b64, i = line.split(' ')
+        t_b64, i = line.split(" ")
         t = b64decode(t_b64)
         i = int(i)
         tokens.append(t)
@@ -34,6 +35,7 @@ def _(r50k_string):
 @app.cell
 def _(tokens):
     import polars as pl
+
     df = pl.DataFrame(data=[[repr(t) for t in tokens]]).with_row_index()
     df
     return

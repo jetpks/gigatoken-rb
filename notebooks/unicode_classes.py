@@ -17,6 +17,7 @@ def _():
 
     class CLASS(IntEnum):
         """2 bit enum representing the character class of a code point"""
+
         L = 0
         N = 1
         Z = 2
@@ -26,20 +27,22 @@ def _():
             return self.name
 
         def as_bits(self):
-            return tuple([int(b) for b in f'{self.value:02b}'])
+            return tuple([int(b) for b in f"{self.value:02b}"])
 
     def cp_class(cp: int) -> int:
         if 0xD800 <= cp <= 0xDFFF:  # surrogates
             return CLASS.O
         c0 = category(chr(cp))[0]
-        if c0 == 'L': return CLASS.L
-        if c0 == 'N': return CLASS.N
-        if c0 == 'Z': return CLASS.Z
+        if c0 == "L":
+            return CLASS.L
+        if c0 == "N":
+            return CLASS.N
+        if c0 == "Z":
+            return CLASS.Z
         return CLASS.O
 
     def get_bits(b):
         return [int(i) for i in f"{b:08b}"]
-
 
     @dataclass(slots=True)
     class Codepoint:
@@ -49,7 +52,7 @@ def _():
 
         @classmethod
         def from_utf32(cls, cp: int) -> Codepoint:
-            bytes = tuple(chr(cp).encode('utf-8', 'surrogatepass'))
+            bytes = tuple(chr(cp).encode("utf-8", "surrogatepass"))
             clss = cp_class(cp)
             return cls(cp, bytes, clss)
 
@@ -67,8 +70,8 @@ def _():
             return (*(bit for b in self.bytes for bit in get_bits(b)), cls)
 
         def __repr__(self):
-            bytes_str = ' '.join(f'{b:02X}' for b in self.bytes)
-            return f'{chr(self.cp)}[U+{self.cp:X}, {bytes_str}, {self.cls.name}]'
+            bytes_str = " ".join(f"{b:02X}" for b in self.bytes)
+            return f"{chr(self.cp)}[U+{self.cp:X}, {bytes_str}, {self.cls.name}]"
 
         def __str__(self):
             return repr(self)
@@ -82,7 +85,6 @@ def _():
         def __hash__(self):
             return hash(self.cp)
 
-
     def _codepoints():
         res = []
         for cp in range(0x110000):
@@ -93,6 +95,7 @@ def _():
             by_length[len(cp.bytes)].append(cp)
 
         return res, by_length
+
     codepoints, cp_by_length = _codepoints()
     return Codepoint, category
 
@@ -112,9 +115,10 @@ def _(Codepoint, category):
 def _(EMOJI_DATA, category):
     # Which emojis are not length 4, and which categories are they in?
     from collections import Counter, defaultdict
+
     by_cat = defaultdict(list)
     for f in EMOJI_DATA:
-        if len(f[0].encode('utf-8')) < 4:
+        if len(f[0].encode("utf-8")) < 4:
             continue
         cat = category(f[0])
         by_cat[cat].append(f)
