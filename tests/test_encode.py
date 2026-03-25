@@ -12,9 +12,7 @@ def tiktoken_r50k():
 def toker_r50k():
     from toker.toker_rs import BPETokenizer
 
-    return BPETokenizer.from_tiktoken(
-        "/Users/marcel/data/tokenizers/r50k_base.tiktoken"
-    )
+    return BPETokenizer.from_tiktoken("/Users/marcel/data/tokenizers/r50k_base.tiktoken")
 
 
 # def test_use_tiktoken_model(tiktoken_r50k):

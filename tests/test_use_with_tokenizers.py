@@ -9,9 +9,7 @@ from transformers import AutoTokenizer, PreTrainedTokenizerFast
 # print(tokenizer.encode("Hello, world! This is a test. Let's see how it works."))
 
 if __name__ == "__main__":
-    tokenizer = AutoTokenizer.from_pretrained(
-        str(Path("tests/scripts/unbox_tokenizer").resolve())
-    )
+    tokenizer = AutoTokenizer.from_pretrained(str(Path("tests/scripts/unbox_tokenizer").resolve()))
 
     encoded = tokenizer.encode("Hello, world! This is a test. Let's see how it works.")
     decoded = tokenizer.decode(encoded)

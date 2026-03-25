@@ -59,9 +59,7 @@ def test_pretokenizer():
     hf_iterator = ByteLevel(add_prefix_space=False).pre_tokenize_str(file_loaded)
     it = pretokenizer(file_loaded.encode("utf-8"))
     print("Starting loop")
-    for i, (pretoken, (hf_pretoken, position)) in enumerate(
-        zip(it, tqdm(hf_iterator), strict=True)
-    ):
+    for i, (pretoken, (hf_pretoken, position)) in enumerate(zip(it, tqdm(hf_iterator), strict=True)):
         hf_pretoken = decode_to_bytes(hf_pretoken)
         assert pretoken == hf_pretoken, f"{pretoken} != {hf_pretoken} at {position}"
     # assert tokens == [

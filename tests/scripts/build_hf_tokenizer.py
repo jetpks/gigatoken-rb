@@ -18,20 +18,14 @@ def ceildiv(a: int, b: int) -> int:
 def build_hf_tokenizer():
     tokenizer = Tokenizer(models.BPE())
     # tokenizer.normalizer = normalizers.NFKC()
-    tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(
-        add_prefix_space=False, use_regex=True
-    )
+    tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False, use_regex=True)
     trainer = trainers.BpeTrainer(
         vocab_size=32000,
         special_tokens=[],
         initial_alphabet=pre_tokenizers.ByteLevel.alphabet(),
     )
 
-    split = (
-        Path("../../data/TinyStoriesV2-GPT4-train.txt")
-        .read_text()
-        .split("<|endoftext|>")
-    )
+    split = Path("../../data/TinyStoriesV2-GPT4-train.txt").read_text().split("<|endoftext|>")
     tokenizer.train_from_iterator(
         split,
         trainer=trainer,
@@ -49,9 +43,7 @@ def build_hf_tokenizer_from_parquet():
     texts = df.select(pl.col("text"))
 
     tokenizer = Tokenizer(models.BPE())
-    tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(
-        add_prefix_space=False, use_regex=True
-    )
+    tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False, use_regex=True)
     trainer = trainers.BpeTrainer(
         vocab_size=32000,
         special_tokens=[],
@@ -61,15 +53,7 @@ def build_hf_tokenizer_from_parquet():
     batch_size = 1024 * 1024
 
     tokenizer.train_from_iterator(
-        (
-            item
-            for row in (
-                texts.slice(i * batch_size, batch_size).collect()
-                for i in range(ceildiv(length, batch_size))
-            )
-            for item in row[:, 0].to_list()
-            if item is not None
-        ),
+        (item for row in (texts.slice(i * batch_size, batch_size).collect() for i in range(ceildiv(length, batch_size))) for item in row[:, 0].to_list() if item is not None),
         trainer=trainer,
         length=length,
     )

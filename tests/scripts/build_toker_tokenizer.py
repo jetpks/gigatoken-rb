@@ -96,9 +96,7 @@ def save_toker(result):
             "merges": merges,
         },
     }
-    with (Path(__file__).parent / f"toker_tokenization_{vocab_size}.json").open(
-        "w"
-    ) as f:
+    with (Path(__file__).parent / f"toker_tokenization_{vocab_size}.json").open("w") as f:
         import json
 
         json.dump(d, f, indent=2, ensure_ascii=False)
@@ -124,9 +122,7 @@ def build_hf_tokenizer():
 
     tokenizer = Tokenizer(models.BPE())
     tokenizer.normalizer = None
-    tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(
-        add_prefix_space=False, use_regex=True
-    )
+    tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False, use_regex=True)
     trainer = trainers.BpeTrainer(
         vocab_size=vocab_size,
         special_tokens=[],
@@ -139,9 +135,7 @@ def build_hf_tokenizer():
         trainer=trainer,
         length=len(split),
     )
-    tokenizer.save(
-        str(Path(__file__).parent / f"hf_tokenizer_ts_valid_{vocab_size}.json")
-    )
+    tokenizer.save(str(Path(__file__).parent / f"hf_tokenizer_ts_valid_{vocab_size}.json"))
     return tokenizer
 
 
@@ -152,9 +146,7 @@ def build_compare():
     table = Table()
     table.add_row(
         Pretty(toker_result[0]),
-        Pretty(
-            {v: k for k, v in sorted(hf_result.get_vocab().items(), key=lambda x: x[1])}
-        ),
+        Pretty({v: k for k, v in sorted(hf_result.get_vocab().items(), key=lambda x: x[1])}),
     )
     get_console().print(table)
 

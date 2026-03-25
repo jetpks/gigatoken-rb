@@ -1,5 +1,6 @@
 # URL sources: https://github.com/openai/tiktoken/blob/main/tiktoken_ext/openai_public.py
 
+
 def r50k_base():
     mergeable_ranks = load_tiktoken_bpe(
         "https://openaipublic.blob.core.windows.net/encodings/r50k_base.tiktoken",
