@@ -1,23 +1,34 @@
 use crate::input::Document;
+use sonic_rs::JsonValueTrait;
 
 struct JsonLinesIter<'a> {
     slice: &'a [u8],
     position: usize,
+    text_fieldname: &'a str, // The fieldname in each JSON object that contains the text to be tokenized.
 }
 
 /// Iterate documents in a .jsonl file
 impl<'a> Iterator for JsonLinesIter<'a> {
-    type Item = Document<'static>; // Will always be owned
+    type Item = Document<'static>; // Will always be owned because the Json needs to be parsed
     fn next(&mut self) -> Option<Self::Item> {
+        // Skip any trailing newlines between records
+        while self.position < self.slice.len() && self.slice[self.position] == b'\n' {
+            self.position += 1;
+        }
         if self.position >= self.slice.len() {
             return None;
         }
-        let next_newline = self.slice[self.position..]
-            .iter()
-            .position(|&b| b == b'\n')?;
-        let line = &self.slice[self.position..self.position + next_newline];
-        // Parse JSON
-        todo!()
+
+        // Find the end of this line
+        let line_end = memchr::memchr(b'\n', &self.slice[self.position..])
+            .map(|i| self.position + i)
+            .unwrap_or(self.slice.len());
+        let line = &self.slice[self.position..line_end];
+        self.position = line_end + 1;
+
+        let value = sonic_rs::get_from_slice(line, &[self.text_fieldname]).ok()?;
+        let text = value.as_str()?;
+        Some(Document::from(text.as_bytes().to_vec()))
     }
 }
 
@@ -26,6 +37,4 @@ struct JsonLinesSource<R> {
     position: usize,
 }
 
-impl<R> JsonLinesSource<R> where R: std::io::BufRead {
-    
-}
+impl<R> JsonLinesSource<R> where R: std::io::BufRead {}
