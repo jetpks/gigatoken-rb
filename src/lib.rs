@@ -40,13 +40,6 @@ fn train_bpe<'py>(
         bpe_train::PretokenizeableSpec::Bytes(in_data.extract::<&[u8]>()?)
     } else if let Ok(path) = in_data.extract::<PathBuf>() {
         println!("Input is a path");
-        // let path = in_data.extract::<&str>()?;
-        // if path.len() > 200 {
-        //     eprintln!(
-        //         "Path is quite long ({} characters), maybe you meant to pass in data and not a path? Use bytes for data.",
-        //         path.len()
-        //     );
-        // }
         if let Some(ext) = path.extension()
             && ext == "parquet"
         {
@@ -99,205 +92,6 @@ fn train_bpe<'py>(
     Ok((vocab_py?, merges_py))
 }
 
-// #[pyclass]
-// struct RustTokenizer {
-//     vocab: HashMap<u16, Vec<u8>>,
-//     vocab_inv_bytes: Vec<Option<u16>>,
-//     merges: HashMap<(u16, u16), u16>,
-//     special_tokens_inv: HashMap<Vec<u8>, u16>,
-//     special_regex: Option<FastRegex>,
-//     re: Regex,
-// }
-
-// #[pymethods]
-// impl RustTokenizer {
-//     #[new]
-//     fn __new__(
-//         vocab: HashMap<u16, Vec<u8>>,
-//         merges: Vec<(Vec<u8>, Vec<u8>)>,
-//         mut special_tokens: Vec<String>,
-//     ) -> Self {
-//         special_tokens.sort_by_key(|x| -(x.len() as isize));
-//         let special_regex = if special_tokens.is_empty() {
-//             None
-//         } else {
-//             Some(
-//                 FastRegex::new(
-//                     special_tokens
-//                         .iter()
-//                         .map(|s| regex::escape(s.as_str()))
-//                         .join("|")
-//                         .as_str(),
-//                 )
-//                 .unwrap(),
-//             )
-//         };
-//         let mut vocab_inv_bytes = vec![None; 256];
-//         vocab.iter().for_each(|(&k, v)| {
-//             if v.len() == 1 {
-//                 vocab_inv_bytes[v[0] as usize] = Some(k);
-//             }
-//         });
-
-//         let merges: HashMap<(u16, u16), u16> = merges
-//             .iter()
-//             .map(|(e1, e2)| {
-//                 let mut merged = e1.clone();
-//                 merged.append(&mut e2.clone());
-//                 let e1_token = vocab.iter().find(|(_, v)| *v == e1).unwrap().0;
-//                 let e2_token = vocab.iter().find(|(_, v)| *v == e2).unwrap().0;
-//                 let merged_token = vocab.iter().find(|(_, v)| *v == &merged).unwrap().0;
-//                 ((*e1_token, *e2_token), *merged_token)
-//             })
-//             .collect();
-
-//         let vocab_inv = vocab
-//             .iter()
-//             .map(|(k, v)| {
-//                 let v = v.as_slice();
-//                 (v.to_owned(), *k)
-//             })
-//             .collect::<HashMap<_, _>>();
-
-//         let special_tokens_inv = special_tokens
-//             .iter()
-//             .map(|v| {
-//                 let v = v.as_bytes();
-//                 (v.to_owned(), vocab_inv[v])
-//             })
-//             .collect::<HashMap<_, _>>();
-
-//         Self {
-//             vocab,
-//             vocab_inv_bytes,
-//             merges,
-//             special_regex,
-//             special_tokens_inv,
-//             re: Regex::new(
-//                 r"'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+",
-//             )
-//             .unwrap(),
-//         }
-//     }
-
-//     fn encode<'py>(
-//         &self,
-//         py: Python<'py>,
-//         text: Bound<'py, PyBytes>,
-//     ) -> PyResult<Bound<'py, PyArray1<u16>>> {
-//         if text.as_bytes().is_empty() {
-//             return Ok(PyArray1::from_vec(py, vec![]));
-//         }
-//         let text = unsafe { std::str::from_utf8_unchecked(text.as_bytes()) };
-//         let n_threads = if text.len() > 100_000 {
-//             rayon::current_num_threads()
-//         } else {
-//             1
-//         };
-//         let chunk_size = text.len().div_ceil(n_threads);
-
-//         let mut boundaries = vec![0];
-//         for i in 1..n_threads {
-//             let mut loc = i * chunk_size;
-//             while text.get(loc..).is_none() {
-//                 loc += 1;
-//             }
-//             let loc = self
-//                 .special_regex
-//                 .as_ref()
-//                 .and_then(|r| r.find(&text[loc..]))
-//                 .map(|r| r.end() + loc)
-//                 .or_else(|| text[loc..].find(".\n").map(|x| x + 1 + loc));
-//             if let Some(loc) = loc {
-//                 boundaries.push(loc); // Found a good place to chunk
-//             }
-//         }
-//         boundaries.push(text.len());
-
-//         let boundaries = boundaries
-//             .into_iter()
-//             .collect::<HashSet<usize>>()
-//             .into_iter()
-//             .sorted()
-//             .collect::<Vec<usize>>();
-//         let chunk_ranges: Vec<Range<usize>> = boundaries
-//             .into_iter()
-//             .sorted()
-//             .tuple_windows()
-//             .map(|(start, end)| start..end)
-//             .collect();
-
-//         println!(
-//             "Min chunk size: {}, max chunk size: {}",
-//             chunk_ranges.iter().map(|r| r.len()).min().unwrap(),
-//             chunk_ranges.iter().map(|r| r.len()).max().unwrap()
-//         );
-
-//         let words_chunks: Vec<_> = chunk_ranges
-//             .into_par_iter()
-//             .map(|range| {
-//                 let chunk = &text[range.clone()];
-//                 let mut offset = 0;
-//                 let mut tokens = vec![];
-//                 if let Some(special_regex) = &self.special_regex {
-//                     for snip in special_regex.find_iter(chunk) {
-//                         let text = &chunk[offset..snip.start()];
-//                         let encoding =
-//                             bpe::encode(&self.re, &self.vocab_inv_bytes, &self.merges, text);
-//                         tokens.extend(encoding.into_iter());
-//                         let special_token = *self
-//                             .special_tokens_inv
-//                             .get(snip.as_str().as_bytes())
-//                             .unwrap_or_else(|| {
-//                                 panic!("Special token not found: {}", snip.as_str())
-//                             });
-//                         tokens.push(special_token);
-//                         offset = snip.end();
-//                     }
-//                 }
-//                 if offset < chunk.len() {
-//                     let encoding = bpe::encode(
-//                         &self.re,
-//                         &self.vocab_inv_bytes,
-//                         &self.merges,
-//                         &chunk[offset..],
-//                     );
-//                     tokens.extend(encoding);
-//                 }
-//                 tokens
-//             })
-//             .collect();
-
-//         println!("Gathering to a single vector");
-//         let words = crate::utils::parallel_concat(&words_chunks);
-
-//         println!("Assembling to numpy array");
-//         let words_arr = PyArray1::from_vec(py, words);
-//         println!("Returning from Rust");
-
-//         Ok(words_arr)
-//     }
-
-//     fn decode<'py>(&self, _py: Python<'py>, tokens: Vec<u16>) -> PyResult<String> {
-//         let tokens = bpe::decode(&tokens, &self.vocab);
-//         let tokens = String::from_utf8_lossy(&tokens).into_owned();
-//         Ok(tokens)
-//     }
-// }
-
-// #[pyclass]
-// struct Pretokenizer {
-//     filename: String,
-// }
-
-// #[pymethods]
-// impl Pretokenizer {
-//     fn __iter__<'py>(slf: PyRef<'py, Self>) -> PyResult<Bound<'py, PretokenizerIter<'py>>> {
-//         let pretokenizer_iter = PretokenizerIter::new(slf.bytes.as_bytes(slf.py()));
-//         Ok(Py::new(slf.py(), pretokenizer_iter)?)
-//     }
-// }
-
 #[pyclass]
 struct BPETokenizer {
     tokenizer: Tokenizer,
@@ -328,6 +122,48 @@ impl BPETokenizer {
             }
         }
         Ok(v)
+    }
+    fn __repr__(&self) -> PyResult<String> {
+        Ok(format!("{:?}", self.tokenizer))
+    }
+}
+
+#[pyclass]
+struct LlamaTokenizer {
+    tokenizer: bpe::SentencePieceBPE,
+}
+
+#[pymethods]
+impl LlamaTokenizer {
+    #[staticmethod]
+    fn from_hf(path: &str) -> PyResult<Self> {
+        Ok(Self {
+            tokenizer: load_tokenizer::hf::load_hf_tokenizer(path)?,
+        })
+    }
+
+    fn encode(&self, input: &str) -> PyResult<Vec<u32>> {
+        let normalized = bpe::SentencePieceBPE::normalize(input);
+        Ok(self
+            .tokenizer
+            .encode(&normalized)
+            .into_iter()
+            .map(|t| t.into())
+            .collect())
+    }
+
+    fn encode_no_normalize(&self, input: &str) -> PyResult<Vec<u32>> {
+        Ok(self
+            .tokenizer
+            .encode(input)
+            .into_iter()
+            .map(|t| t.into())
+            .collect())
+    }
+
+    fn decode(&self, tokens: Vec<u32>) -> PyResult<Vec<u8>> {
+        let token_ids: Vec<crate::token::TokenId> = tokens.into_iter().map(Into::into).collect();
+        Ok(self.tokenizer.decode(&token_ids))
     }
 
     fn __repr__(&self) -> PyResult<String> {
@@ -389,6 +225,7 @@ fn toker_rs<'py>(_py: Python, m: &Bound<'py, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(train_bpe, m)?)?;
     m.add_class::<PretokenizerIter>()?;
     m.add_class::<BPETokenizer>()?;
+    m.add_class::<LlamaTokenizer>()?;
     m.add_function(wrap_pyfunction!(pretokenizer, m)?)?;
     m.add_function(wrap_pyfunction!(pretokenized_counts, m)?)?;
     Ok(())
