@@ -206,6 +206,51 @@ impl BPETokenizer {
         }
         Ok(v)
     }
+
+    /// Encode all documents from a FileSource in parallel.
+    /// Everything happens in Rust: mmap, JSONL parse, pretokenize, BPE merge.
+    fn encode_file(&self, file_source: FileSource) -> PyResult<Vec<Vec<u32>>> {
+        use input::jsonl::JsonLinesSlice;
+        use rayon::prelude::*;
+
+        let spec = input::file_source::FileSourceSpec {
+            paths: file_source.paths,
+            field: file_source.field,
+            separator: file_source.separator,
+        };
+        let files = spec.mmap_files().map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("{}", e))
+        })?;
+
+        let mut all_results: Vec<Vec<u32>> = Vec::new();
+        for (mmap, boundaries, _content) in &files {
+            let bytes = mmap.as_bytes();
+            let chunk_results: Vec<Vec<Vec<u32>>> = boundaries
+                .par_windows(2)
+                .map(|w| {
+                    let chunk = &bytes[w[0]..w[1]];
+                    let mut tokenizer = self.tokenizer.fork();
+                    JsonLinesSlice::new(chunk, spec.field())
+                        .map(|doc| {
+                            let iter = tokenizer.memoized_encode(pretokenize_as_iter(doc.as_ref()));
+                            let mut v = vec![];
+                            for arc in iter {
+                                for &e in arc.into_iter() {
+                                    v.push(e.into())
+                                }
+                            }
+                            v
+                        })
+                        .collect()
+                })
+                .collect();
+            for chunk in chunk_results {
+                all_results.extend(chunk);
+            }
+        }
+        Ok(all_results)
+    }
+
     fn __repr__(&self) -> PyResult<String> {
         Ok(format!("{:?}", self.tokenizer))
     }
@@ -226,19 +271,57 @@ impl LlamaTokenizer {
     }
 
     fn encode(&self, input: &str) -> PyResult<Vec<u32>> {
-        let normalized = bpe::SentencePieceBPE::normalize(input);
         Ok(self
             .tokenizer
-            .encode(&normalized)
+            .encoder()
+            .encode_raw(input)
             .into_iter()
             .map(|t| t.into())
             .collect())
     }
 
+    /// Encode all documents from a FileSource in parallel.
+    fn encode_file(&self, file_source: FileSource) -> PyResult<Vec<Vec<u32>>> {
+        use input::jsonl::JsonLinesSlice;
+        use rayon::prelude::*;
+
+        let spec = input::file_source::FileSourceSpec {
+            paths: file_source.paths,
+            field: file_source.field,
+            separator: file_source.separator,
+        };
+        let files = spec.mmap_files().map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("{}", e))
+        })?;
+
+        let mut all_results: Vec<Vec<u32>> = Vec::new();
+        for (mmap, boundaries, _content) in &files {
+            let bytes = mmap.as_bytes();
+            let chunk_results: Vec<Vec<Vec<u32>>> = boundaries
+                .par_windows(2)
+                .map(|w| {
+                    let chunk = &bytes[w[0]..w[1]];
+                    let mut encoder = self.tokenizer.encoder();
+                    JsonLinesSlice::new(chunk, spec.field())
+                        .map(|doc| {
+                            let text = unsafe { std::str::from_utf8_unchecked(doc.as_ref()) };
+                            encoder.encode_raw(text).into_iter().map(|t| t.into()).collect()
+                        })
+                        .collect()
+                })
+                .collect();
+            for chunk in chunk_results {
+                all_results.extend(chunk);
+            }
+        }
+        Ok(all_results)
+    }
+
     fn encode_no_normalize(&self, input: &str) -> PyResult<Vec<u32>> {
         Ok(self
             .tokenizer
-            .encode(input)
+            .encoder()
+            .encode_normalized(input)
             .into_iter()
             .map(|t| t.into())
             .collect())
