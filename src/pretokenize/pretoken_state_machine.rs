@@ -2,17 +2,26 @@ use crate::input::DocRef;
 use crate::pretokenize::pretoken::Pretoken;
 use crate::pretokenize::unicode;
 
+/// Toggle pretokenizer implementation at compile time.
+/// `true`  = winnow combinator   (`pretoken_combinator.rs`)
+/// `false` = hand-rolled state machine (this file)
+const USE_COMBINATOR: bool = true;
+
+// ---------------------------------------------------------------------------
+// State-machine implementation
+// ---------------------------------------------------------------------------
+
 #[derive(Clone, Debug)]
 pub enum PretokenizerState {
-    Start,   // Not matched anything yet
-    Nonchar, // Matched some non-alphanumeric and non-whitespace characters, continue until something matching
+    Start,
+    Nonchar,
     Apostrophe,
     AsciiSpace,
     Whitespace(u8),
     Letter,
     Number,
-    Save,   // Save the current token and start a new one
-    Finish, // Ran out of tokens
+    Save,
+    Finish,
 }
 
 pub struct UTF8Iterator<'a> {
@@ -54,8 +63,6 @@ impl<'a> UTF8Iterator<'a> {
         }
     }
 
-    /// Returns the next codepoint as a char (u32) and its length in bytes.
-    /// We need the length to rewind if it needs to be reprocessed.
     fn next_codepoint_and_length(&mut self) -> Option<(char, usize)> {
         let cp = unsafe { str::from_utf8_unchecked(&self.bytes[self.pos..]) }
             .chars()
@@ -65,7 +72,6 @@ impl<'a> UTF8Iterator<'a> {
         Some((cp, len))
     }
 
-    // #[inline(never)]
     fn start_check(&mut self) -> Result<StartResult, OutOfBytesError> {
         if self.pos >= self.bytes.0.len() {
             return Err(OutOfBytesError {});
@@ -97,7 +103,6 @@ impl<'a> UTF8Iterator<'a> {
         }
     }
 
-    // #[inline(never)]
     fn whitespace_check(&mut self) -> Result<WhitespaceResult, OutOfBytesError> {
         if self.pos >= self.bytes.len() {
             return Err(OutOfBytesError {});
@@ -127,7 +132,6 @@ impl<'a> UTF8Iterator<'a> {
         }
     }
 
-    // #[inline(never)]
     fn letter_check(&mut self) -> Result<(), OutOfBytesError> {
         loop {
             if self.pos >= self.bytes.len() {
@@ -147,14 +151,13 @@ impl<'a> UTF8Iterator<'a> {
                 let (next_codepoint, len) =
                     self.next_codepoint_and_length().ok_or(OutOfBytesError {})?;
                 if !unicode::is_letter(next_codepoint) {
-                    self.pos -= len; // Rewind
+                    self.pos -= len;
                     return Ok(());
                 }
             }
         }
     }
 
-    // #[inline(never)]
     fn number_check(&mut self) -> Result<(), OutOfBytesError> {
         loop {
             if self.pos >= self.bytes.len() {
@@ -174,14 +177,13 @@ impl<'a> UTF8Iterator<'a> {
                 let (next_codepoint, len) =
                     self.next_codepoint_and_length().ok_or(OutOfBytesError {})?;
                 if !unicode::is_number(next_codepoint) {
-                    self.pos -= len; // Rewind
+                    self.pos -= len;
                     return Ok(());
                 }
             }
         }
     }
 
-    // #[inline(never)]
     fn other_check(&mut self) -> Result<(), OutOfBytesError> {
         loop {
             if self.pos >= self.bytes.len() {
@@ -191,7 +193,6 @@ impl<'a> UTF8Iterator<'a> {
             if byte.is_ascii() {
                 match byte {
                     b'0'..=b'9' | b'A'..=b'Z' | b'a'..=b'z' | b' ' | 9..=13 => {
-                        // Matches anything (not apostrophe though)
                         return Ok(());
                     }
                     _ => {
@@ -207,13 +208,12 @@ impl<'a> UTF8Iterator<'a> {
                     || unicode::is_whitespace(next_codepoint)
                 {
                     self.pos -= len;
-                    return Ok(()); // We matched a letter or number, so we stop here
+                    return Ok(());
                 }
             }
         }
     }
 
-    // #[inline(never)]
     fn apostrophe_check(&mut self) -> Result<ApostropheResult, OutOfBytesError> {
         if self.pos >= self.bytes.len() {
             return Err(OutOfBytesError {});
@@ -226,7 +226,6 @@ impl<'a> UTF8Iterator<'a> {
             }
             b'l' | b'v' | b'r' => {
                 if self.pos + 1 >= self.bytes.len() {
-                    // Not enough bytes for a two-letter contraction ('ll, 've, 're)
                     return Ok(ApostropheResult::NotMatched);
                 }
                 let next_byte = self.bytes[self.pos + 1];
@@ -243,17 +242,22 @@ impl<'a> UTF8Iterator<'a> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// PretokenizerIter — unified type that dispatches based on USE_COMBINATOR
+// ---------------------------------------------------------------------------
+
 pub struct PretokenizerIter<'a> {
-    iter: UTF8Iterator<'a>,
-    starting: usize,
+    bytes: &'a [u8],
+    pos: usize,
+    // State-machine fields (unused when USE_COMBINATOR is true, optimised away)
     state: PretokenizerState,
 }
 
 impl<'a> PretokenizerIter<'a> {
     pub fn new(input: &'a [u8]) -> PretokenizerIter<'a> {
         PretokenizerIter {
-            iter: UTF8Iterator::new(input.into()),
-            starting: 0,
+            bytes: input,
+            pos: 0,
             state: PretokenizerState::Start,
         }
     }
@@ -263,14 +267,47 @@ impl<'a> Iterator for PretokenizerIter<'a> {
     type Item = Pretoken<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        if USE_COMBINATOR {
+            self.next_combinator()
+        } else {
+            self.next_state_machine()
+        }
+    }
+}
+
+impl<'a> PretokenizerIter<'a> {
+    // ---- Combinator path ----
+
+    #[inline]
+    fn next_combinator(&mut self) -> Option<Pretoken<'a>> {
+        if self.pos >= self.bytes.len() {
+            return None;
+        }
+        let mut input = unsafe { std::str::from_utf8_unchecked(&self.bytes[self.pos..]) };
+        let before_len = input.len();
+        let tok = crate::pretokenize::pretoken_combinator::pretoken_next(&mut input)?;
+        self.pos += before_len - input.len();
+        Some(tok)
+    }
+
+    // ---- State-machine path ----
+
+    #[inline]
+    fn next_state_machine(&mut self) -> Option<Pretoken<'a>> {
+        let mut iter = UTF8Iterator {
+            bytes: self.bytes.into(),
+            pos: self.pos,
+        };
+        let starting = self.pos;
+        let mut cur_starting = starting;
+
         let (state_after, new_pretoken) = loop {
             self.state = match self.state {
-                PretokenizerState::Start => match self.iter.start_check() {
+                PretokenizerState::Start => match iter.start_check() {
                     Ok(StartResult::Apostrophe) => {
-                        if self.starting == self.iter.pos - 1 {
+                        if cur_starting == iter.pos - 1 {
                             PretokenizerState::Apostrophe
                         } else {
-                            // Only treat as apostrophe if we don't have a preceding space
                             PretokenizerState::Nonchar
                         }
                     }
@@ -282,34 +319,36 @@ impl<'a> Iterator for PretokenizerIter<'a> {
                     Err(OutOfBytesError {}) => PretokenizerState::Finish,
                 },
                 PretokenizerState::Save => {
-                    let saved_tokens = &self.iter.bytes[self.starting..self.iter.pos];
-                    self.starting = self.iter.pos;
+                    let saved_tokens = &self.bytes[cur_starting..iter.pos];
+                    cur_starting = iter.pos;
                     break (PretokenizerState::Start, saved_tokens);
                 }
-                PretokenizerState::Apostrophe => match self.iter.apostrophe_check() {
+                PretokenizerState::Apostrophe => match iter.apostrophe_check() {
                     Ok(ApostropheResult::Matched) => PretokenizerState::Save,
                     Ok(ApostropheResult::NotMatched) => PretokenizerState::Nonchar,
                     Err(OutOfBytesError {}) => PretokenizerState::Finish,
                 },
-                PretokenizerState::Nonchar => match self.iter.other_check() {
+                PretokenizerState::Nonchar => match iter.other_check() {
                     Ok(_) => PretokenizerState::Save,
                     Err(OutOfBytesError {}) => PretokenizerState::Finish,
                 },
-                PretokenizerState::Letter => match self.iter.letter_check() {
+                PretokenizerState::Letter => match iter.letter_check() {
                     Ok(_) => PretokenizerState::Save,
                     Err(OutOfBytesError {}) => PretokenizerState::Finish,
                 },
-                PretokenizerState::Number => match self.iter.number_check() {
+                PretokenizerState::Number => match iter.number_check() {
                     Ok(_) => PretokenizerState::Save,
                     Err(OutOfBytesError {}) => PretokenizerState::Finish,
                 },
-                PretokenizerState::Whitespace(prev_wslen) => match self.iter.whitespace_check() {
+                PretokenizerState::Whitespace(prev_wslen) => match iter.whitespace_check() {
                     Ok(WhitespaceResult::AsciiSpace) => PretokenizerState::AsciiSpace,
-                    Ok(WhitespaceResult::Whitespace(wslen)) => PretokenizerState::Whitespace(wslen),
+                    Ok(WhitespaceResult::Whitespace(wslen)) => {
+                        PretokenizerState::Whitespace(wslen)
+                    }
                     Ok(WhitespaceResult::Neither) => {
                         let saved_token =
-                            &self.iter.bytes[self.starting..self.iter.pos - (prev_wslen as usize)];
-                        self.starting = self.iter.pos - (prev_wslen as usize);
+                            &self.bytes[cur_starting..iter.pos - (prev_wslen as usize)];
+                        cur_starting = iter.pos - (prev_wslen as usize);
                         if saved_token.is_empty() {
                             PretokenizerState::Save
                         } else {
@@ -318,54 +357,52 @@ impl<'a> Iterator for PretokenizerIter<'a> {
                     }
                     Err(OutOfBytesError {}) => PretokenizerState::Finish,
                 },
-                PretokenizerState::AsciiSpace => match self.iter.whitespace_check() {
+                PretokenizerState::AsciiSpace => match iter.whitespace_check() {
                     Ok(WhitespaceResult::AsciiSpace) => PretokenizerState::AsciiSpace,
-                    Ok(WhitespaceResult::Whitespace(wslen)) => PretokenizerState::Whitespace(wslen),
+                    Ok(WhitespaceResult::Whitespace(wslen)) => {
+                        PretokenizerState::Whitespace(wslen)
+                    }
                     Ok(WhitespaceResult::Neither) => {
-                        let saved_token = &self.iter.bytes[self.starting..self.iter.pos - 1];
+                        let saved_token = &self.bytes[cur_starting..iter.pos - 1];
                         if saved_token.is_empty() {
-                            self.starting = self.iter.pos - 1;
+                            cur_starting = iter.pos - 1;
                             PretokenizerState::Start
                         } else {
-                            self.starting = self.iter.pos - 1;
+                            cur_starting = iter.pos - 1;
                             break (PretokenizerState::Start, saved_token);
                         }
                     }
                     Err(OutOfBytesError {}) => {
-                        let saved_token = &self.iter.bytes[self.starting..self.iter.pos];
-                        self.starting = self.iter.pos;
+                        let saved_token = &self.bytes[cur_starting..iter.pos];
+                        cur_starting = iter.pos;
                         break (PretokenizerState::Finish, saved_token);
                     }
                 },
                 PretokenizerState::Finish => {
-                    let saved_token = &self.iter.bytes[self.starting..self.iter.pos];
-                    self.starting = self.iter.pos;
+                    let saved_token = &self.bytes[cur_starting..iter.pos];
+                    cur_starting = iter.pos;
                     break (PretokenizerState::Finish, saved_token);
                 }
             }
         };
         self.state = state_after;
+        self.pos = cur_starting;
         if new_pretoken.is_empty() {
             return None;
         }
         Some(Pretoken(new_pretoken))
     }
-}
 
-impl<'a> PretokenizerIter<'a> {
     pub fn replace_bytes<'b>(&self, bytes: &'b [u8]) -> PretokenizerIter<'b> {
-        let iter = self.iter.replace_bytes(bytes);
         PretokenizerIter {
-            iter,
-            starting: self.starting,
+            bytes,
+            pos: self.pos,
             state: self.state.clone(),
         }
     }
 }
 
 impl PretokenizerIter<'static> {
-    // If we contain a 'static, assume it's a dummy.
-    // This is needed only for PyO3 bindings.
     pub fn py_next<'a>(&mut self, bytes: &'a [u8]) -> Option<&'a [u8]> {
         let mut py_self = self.replace_bytes(bytes);
         let result = py_self.next();
@@ -375,9 +412,5 @@ impl PretokenizerIter<'static> {
 }
 
 pub fn pretokenize_as_iter(bytes: &[u8]) -> PretokenizerIter<'_> {
-    PretokenizerIter {
-        iter: UTF8Iterator::new(bytes.into()),
-        starting: 0,
-        state: PretokenizerState::Start,
-    }
+    PretokenizerIter::new(bytes)
 }
