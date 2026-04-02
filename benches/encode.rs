@@ -6,7 +6,7 @@ use std::time::Instant;
 
 fn main() {
     let tokenizer_path =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/scripts/gpt2_tokenizer.json");
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("data/gpt2_tokenizer.json");
     eprintln!("Loading GPT-2 tokenizer from {tokenizer_path:?}...");
     let tokenizer = load_hf_bpe(&tokenizer_path).expect("Could not load GPT-2 tokenizer");
 
