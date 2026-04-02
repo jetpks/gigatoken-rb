@@ -21,6 +21,7 @@ pub mod pretoken_combinator;
 pub mod pretoken_state_machine;
 pub(crate) mod pretokenize_traits;
 mod unicode;
+pub mod pretoken_simd;
 
 pub use options::PretokenizerType;
 pub use pretoken_state_machine::{PretokenizerIter, pretokenize_as_iter};

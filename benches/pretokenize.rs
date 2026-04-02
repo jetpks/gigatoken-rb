@@ -1,8 +1,14 @@
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
-use std::hint::black_box;
-use jeton_rs::pretokenize::{PretokenizerIter, pretoken_combinator::pretokens_iterator};
-#[cfg(all(target_arch = "x86_64", target_feature = "avx512bw", target_feature = "avx512vl"))]
+#[cfg(all(
+    target_arch = "x86_64",
+    target_feature = "avx512bw",
+    target_feature = "avx512vl"
+))]
 use jeton_rs::pretokenize::pretoken_avx512::Avx512PretokenizerIter;
+use jeton_rs::pretokenize::{
+    PretokenizerIter, pretoken_combinator::pretokens_iterator, pretoken_simd::SimdPretokIter,
+};
+use std::hint::black_box;
 
 const TARGET_BENCH_SIZE: usize = 100_000_000; // ~100 MB
 
@@ -43,10 +49,20 @@ fn pretokenize_benches(c: &mut Criterion) {
         });
     });
 
-    #[cfg(all(target_arch = "x86_64", target_feature = "avx512bw", target_feature = "avx512vl"))]
+    #[cfg(all(
+        target_arch = "x86_64",
+        target_feature = "avx512bw",
+        target_feature = "avx512vl"
+    ))]
     group.bench_function("avx512", |b| {
         b.iter(|| {
             let count = Avx512PretokenizerIter::new(&input).count();
+            black_box(count);
+        });
+    });
+    group.bench_function("simd", |b| {
+        b.iter(|| {
+            let count = SimdPretokIter::new(&input).count();
             black_box(count);
         });
     });
