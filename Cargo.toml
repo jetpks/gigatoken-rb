@@ -50,6 +50,9 @@ lto = false
 codegen-units = 1
 strip = "none"
 split-debuginfo = "packed"
+# Frame pointers make Instruments' stack unwinding reliable. Mangling is left at
+# the toolchain default (v0); `cargo instruments` demangles v0 symbols itself.
+rustflags = ["-C", "force-frame-pointers=yes"]
 
 [profile.profiling.package."*"]
 debug = 2
