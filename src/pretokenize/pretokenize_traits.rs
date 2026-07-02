@@ -55,7 +55,7 @@ where
     fn pretoken_count(self) -> HashMap<Pretoken<'a>, usize, S> {
         let mut hashmap = HashMap::default();
         self.map(|doc| (pretokenize_as_iter(doc.0.as_ref()), doc.1))
-            .for_each(|(pretoken_iter, count): (crate::pretokenize::FastPretokenizer, usize)| {
+            .for_each(|(pretoken_iter, count): (crate::pretokenize::FastR50kPretokenizer, usize)| {
                 pretoken_iter.for_each(|pretoken| {
                     hashmap
                         .entry(pretoken)

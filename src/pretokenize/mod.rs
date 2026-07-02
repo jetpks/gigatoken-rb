@@ -1,11 +1,14 @@
-//! Pretokenization: split documents into pretokens following the GPT-2 regex.
+//! Pretokenization: split documents into pretokens following a tokenizer's
+//! pretokenization regex.
 //!
-//! The production implementation is `pretoken_fast::FastPretokenizer`; the
-//! state-machine, combinator, and SIMD variants are kept as references and
-//! benchmark baselines.
+//! The production implementations live in `fast` (one submodule per scheme:
+//! `fast::r50k` for GPT-2, `fast::cl100k` for GPT-4, ...), selected via
+//! [`PretokenizerType`]. The state-machine, combinator, and SIMD variants are
+//! kept as references and benchmark baselines.
 //!
 //! The main entry points are:
-//! - `pretokenize_as_iter`: iterate pretokens of a `&[u8]`
+//! - `pretokenize_as_iter`: iterate pretokens of a `&[u8]` (r50k scheme)
+//! - `PretokenizerType::pretokenize`: iterate pretokens of any scheme
 //! - `Pretokenize` trait: `doc.pretokens()` on any `&[u8]`
 //! - `pretokenize_par_bytes`: parallel pretokenization with document splitting and counting
 
@@ -17,29 +20,29 @@ use crate::input::Resource;
 use rayon::prelude::*;
 use std::collections::HashMap;
 
+pub mod fast;
 mod options;
 mod pretoken;
 mod pretoken_chunks;
 #[cfg(all(target_arch = "x86_64", target_feature = "avx512bw", target_feature = "avx512vl"))]
 pub mod pretoken_avx512;
 pub mod pretoken_combinator;
-pub mod pretoken_fast;
 pub mod pretoken_state_machine;
 pub(crate) mod pretokenize_traits;
 mod unicode;
 pub mod pretoken_simd;
 
-pub use options::PretokenizerType;
-pub use pretoken_fast::FastPretokenizer;
+pub use fast::{FastCl100kPretokenizer, FastR50kPretokenizer};
+pub use options::{FastPretokenizerDispatch, PretokenizerType};
 pub use pretoken_state_machine::PretokenizerIter;
 
 /// Default document separator used in common training corpora.
 pub const DEFAULT_SEPARATOR: &[u8] = b"<|endoftext|>";
 
-/// Iterate the pretokens of `bytes` using the production pretokenizer.
+/// Iterate the pretokens of `bytes` using the production (r50k) pretokenizer.
 #[inline]
-pub fn pretokenize_as_iter(bytes: &[u8]) -> FastPretokenizer<'_> {
-    FastPretokenizer::new(bytes)
+pub fn pretokenize_as_iter(bytes: &[u8]) -> FastR50kPretokenizer<'_> {
+    FastR50kPretokenizer::new(bytes)
 }
 
 // ---------------------------------------------------------------------------
@@ -48,11 +51,11 @@ pub fn pretokenize_as_iter(bytes: &[u8]) -> FastPretokenizer<'_> {
 
 /// Anything that can be split into a stream of pretokens.
 pub trait Pretokenize {
-    fn pretokens(&self) -> FastPretokenizer<'_>;
+    fn pretokens(&self) -> FastR50kPretokenizer<'_>;
 }
 
 impl Pretokenize for [u8] {
-    fn pretokens(&self) -> FastPretokenizer<'_> {
+    fn pretokens(&self) -> FastR50kPretokenizer<'_> {
         pretokenize_as_iter(self)
     }
 }

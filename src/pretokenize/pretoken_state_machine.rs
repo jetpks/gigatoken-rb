@@ -1,6 +1,6 @@
 //! Hand-rolled state-machine pretokenizer. Kept as a reference implementation
 //! and benchmark baseline; the production pretokenizer is
-//! `pretoken_fast::FastPretokenizer` (see `pretokenize_as_iter`).
+//! `fast::r50k::FastR50kPretokenizer` (see `pretokenize_as_iter`).
 use crate::input::DocRef;
 use crate::pretokenize::pretoken::Pretoken;
 use crate::pretokenize::unicode;

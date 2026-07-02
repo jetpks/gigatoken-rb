@@ -1,5 +1,5 @@
 use jeton_rs::load_tokenizer::hf::load_hf_bpe;
-use jeton_rs::pretokenize::pretoken_fast::FastPretokenizer;
+use jeton_rs::pretokenize::FastR50kPretokenizer;
 use rayon::prelude::*;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -29,7 +29,7 @@ fn main() {
             || tokenizer.fork(),
             |tok, &line| {
                 let mut n = 0usize;
-                tok.memoized_encode(FastPretokenizer::new(line), |tokens| {
+                tok.memoized_encode(FastR50kPretokenizer::new(line), |tokens| {
                     n += tokens.len();
                 });
                 n

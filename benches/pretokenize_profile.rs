@@ -1,8 +1,8 @@
-//! Profiling target for the `FastPretokenizer` hot loop in isolation: a plain
+//! Profiling target for the `FastR50kPretokenizer` hot loop in isolation: a plain
 //! single-pass `main` (no criterion, no BPE encode) that `black_box`es every
 //! yielded pretoken slice, so the slice production can't be optimized away.
 
-use jeton_rs::pretokenize::pretoken_fast::FastPretokenizer;
+use jeton_rs::pretokenize::FastR50kPretokenizer;
 use std::hint::black_box;
 use std::time::Instant;
 
@@ -68,7 +68,7 @@ fn main() {
     let mut total_tokens: usize = 0;
     // Hand each real pretoken slice to black_box so the bounds computation can't
     // be optimized down to a counter.
-    let mut iter = FastPretokenizer::new(buf);
+    let mut iter = FastR50kPretokenizer::new(buf);
     while let Some(pretoken) = iter.next() {
         black_box(pretoken);
         total_tokens += 1;

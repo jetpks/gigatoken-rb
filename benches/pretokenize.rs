@@ -6,7 +6,8 @@ use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 ))]
 use jeton_rs::pretokenize::pretoken_avx512::Avx512PretokenizerIter;
 use jeton_rs::pretokenize::{
-    pretoken_combinator::pretokens_iterator, pretoken_fast::FastPretokenizer, PretokenizerIter,
+    pretoken_combinator::pretokens_iterator, FastCl100kPretokenizer, FastR50kPretokenizer,
+    PretokenizerIter,
 };
 use jeton_rs::pretokenize::pretoken_simd::SimdPretokIter;
 use std::hint::black_box;
@@ -74,7 +75,7 @@ fn pretokenize_benches(c: &mut Criterion) {
 
     group.bench_function("fast_scalar", |b| {
         b.iter(|| {
-            let mut iter = FastPretokenizer::new(&input);
+            let mut iter = FastR50kPretokenizer::new(&input);
             let mut count = 0;
             while iter.next().is_some() {
                 count += 1;
@@ -83,9 +84,13 @@ fn pretokenize_benches(c: &mut Criterion) {
         });
     });
 
-    group.bench_function("fast_dual_cursor", |b| {
+    group.bench_function("cl100k_fast_scalar", |b| {
         b.iter(|| {
-            let count = FastPretokenizer::new(&input).count();
+            let mut iter = FastCl100kPretokenizer::new(&input);
+            let mut count = 0;
+            while iter.next().is_some() {
+                count += 1;
+            }
             black_box(count);
         });
     });
@@ -99,6 +104,20 @@ fn pretokenize_benches(c: &mut Criterion) {
         b.iter(|| {
             let text = unsafe { std::str::from_utf8_unchecked(&input) };
             let count = re.find_iter(text).count();
+            black_box(count);
+        });
+    });
+
+    // Backtracking-compatible equivalent of the possessive cl100k pattern
+    let re_cl100k = fancy_regex::Regex::new(
+        r"'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s+$|\s*[\r\n]|\s+(?!\S)|\s+",
+    )
+    .unwrap();
+
+    group.bench_function("cl100k_regex", |b| {
+        b.iter(|| {
+            let text = unsafe { std::str::from_utf8_unchecked(&input) };
+            let count = re_cl100k.find_iter(text).count();
             black_box(count);
         });
     });

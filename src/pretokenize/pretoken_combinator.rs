@@ -487,7 +487,7 @@ mod tests {
 
             let mut fast: Vec<String> = Vec::new();
             let mut it =
-                crate::pretokenize::pretoken_fast::FastPretokenizer::new(case.as_bytes());
+                crate::pretokenize::fast::FastR50kPretokenizer::new(case.as_bytes());
             while let Some(p) = it.next() {
                 fast.push(String::from_utf8(p.as_ref().to_vec()).unwrap());
             }

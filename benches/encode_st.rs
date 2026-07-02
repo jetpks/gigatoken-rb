@@ -1,5 +1,5 @@
 use jeton_rs::load_tokenizer::hf::load_hf_bpe;
-use jeton_rs::pretokenize::pretoken_fast::FastPretokenizer;
+use jeton_rs::pretokenize::FastR50kPretokenizer;
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -53,7 +53,7 @@ fn main() {
     eprintln!("Encoding (single-threaded)...");
     let start = Instant::now();
     let mut total_tokens: usize = 0;
-    tokenizer.memoized_encode(FastPretokenizer::new(buf), |tokens| {
+    tokenizer.memoized_encode(FastR50kPretokenizer::new(buf), |tokens| {
         total_tokens += tokens.len();
     });
     let elapsed = start.elapsed().as_secs_f64();
