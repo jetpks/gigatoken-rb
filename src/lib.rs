@@ -347,7 +347,9 @@ impl SentencePieceTokenizer {
 
 #[pyclass]
 struct PretokenizerIter {
-    pretokenizer_iter: pretokenize::PretokenizerIter<'static>,
+    /// Byte offset into `bytes`; the pretokenizer is stateless beyond this, so
+    /// each `__next__` resumes a fresh `FastPretokenizer` at this position.
+    pos: usize,
     bytes: Py<PyBytes>,
 }
 
@@ -359,16 +361,17 @@ impl PretokenizerIter {
 
     fn __next__<'py>(&'py mut self, py: Python<'py>) -> Option<&'py [u8]> {
         let bytes: &'py [u8] = self.bytes.as_bytes(py);
-        let result: Option<&'py [u8]> = self.pretokenizer_iter.py_next(bytes);
-        result
+        let mut iter = pretokenize::FastPretokenizer::with_pos(bytes, self.pos);
+        let result = iter.next();
+        self.pos = iter.pos();
+        Some(result?.0)
     }
 }
 
 #[pyfunction]
 fn pretokenizer<'py>(text: Bound<'py, PyBytes>) -> PyResult<PretokenizerIter> {
-    let tokens_iter = pretokenize::pretokenize_as_iter((&[]).as_slice().into());
     Ok(PretokenizerIter {
-        pretokenizer_iter: tokens_iter,
+        pos: 0,
         bytes: text.into(),
     })
 }

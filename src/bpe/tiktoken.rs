@@ -2,7 +2,7 @@ use bumpalo::collections::CollectIn;
 use bumpalo::collections::Vec as BumpVec;
 use itertools::Itertools;
 
-use crate::bpe::{ByteRemapping, simple_bpe_merge};
+use crate::bpe::{ByteRemapping, MergeScratch, bpe_merge_symbols_with_scratch, simple_bpe_merge};
 use crate::pretokenize::Pretoken;
 use crate::token::TokenId;
 use eyre::Result;
@@ -33,6 +33,10 @@ pub struct Tokenizer {
     pretoken_cache: HashMap<u128, (u32, u32), rustc_hash::FxBuildHasher>,
     /// Fallback cache for pretokens longer than 15 bytes.
     pretoken_cache_long: HashMap<Box<[u8]>, (u32, u32), rustc_hash::FxBuildHasher>,
+    /// Scratch buffers reused across cache-missing pretokens so the merge loop
+    /// performs no per-pretoken allocations.
+    merge_scratch: MergeScratch,
+    symbol_scratch: Vec<TokenId>,
 }
 
 /// Pack a pretoken of ≤ 15 bytes into a `u128`: bytes in the low 15 lanes,
@@ -122,6 +126,8 @@ impl Tokenizer {
             token_arena: Vec::new(),
             pretoken_cache: HashMap::with_hasher(rustc_hash::FxBuildHasher {}),
             pretoken_cache_long: HashMap::with_hasher(rustc_hash::FxBuildHasher {}),
+            merge_scratch: MergeScratch::default(),
+            symbol_scratch: Vec::new(),
         }
     }
 
@@ -163,6 +169,8 @@ impl Tokenizer {
             token_arena: Vec::new(),
             pretoken_cache: HashMap::with_hasher(rustc_hash::FxBuildHasher {}),
             pretoken_cache_long: HashMap::with_hasher(rustc_hash::FxBuildHasher {}),
+            merge_scratch: MergeScratch::default(),
+            symbol_scratch: Vec::new(),
         })
     }
 
@@ -180,6 +188,8 @@ impl Tokenizer {
             token_arena: Vec::new(),
             pretoken_cache: HashMap::with_hasher(rustc_hash::FxBuildHasher {}),
             pretoken_cache_long: HashMap::with_hasher(rustc_hash::FxBuildHasher {}),
+            merge_scratch: MergeScratch::default(),
+            symbol_scratch: Vec::new(),
         }
     }
 
@@ -222,14 +232,22 @@ impl Tokenizer {
                 let start = offset as usize;
                 f(&self.token_arena[start..start + len as usize]);
             } else {
-                let tokens = Self::encode_pretoken(
-                    self.byte_remapping.as_ref(),
-                    &self.merges,
-                    pretoken,
-                );
+                // Encode into reusable scratch and append straight to the
+                // arena: no intermediate `Vec`, no `Cow` remap allocation.
+                let symbols = &mut self.symbol_scratch;
+                symbols.clear();
+                match self.byte_remapping.as_ref() {
+                    Some(br) => symbols.extend(
+                        bytes
+                            .iter()
+                            .map(|&b| TokenId::from(br.mapping[b as usize] as u32)),
+                    ),
+                    None => symbols.extend(bytes.iter().map(|&b| TokenId::from(b as u32))),
+                }
+                bpe_merge_symbols_with_scratch(&self.merges, symbols, &mut self.merge_scratch);
                 let offset = self.token_arena.len() as u32;
-                let len = tokens.len() as u32;
-                self.token_arena.extend_from_slice(&tokens);
+                let len = symbols.len() as u32;
+                self.token_arena.extend_from_slice(symbols);
                 match key {
                     Some(key) => {
                         self.pretoken_cache.insert(key, (offset, len));

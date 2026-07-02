@@ -1,6 +1,11 @@
-//! Pretokenization: split documents into pretokens using a GPT-2 regex state machine.
+//! Pretokenization: split documents into pretokens following the GPT-2 regex.
+//!
+//! The production implementation is `pretoken_fast::FastPretokenizer`; the
+//! state-machine, combinator, and SIMD variants are kept as references and
+//! benchmark baselines.
 //!
 //! The main entry points are:
+//! - `pretokenize_as_iter`: iterate pretokens of a `&[u8]`
 //! - `Pretokenize` trait: `doc.pretokens()` on any `&[u8]`
 //! - `pretokenize_par_bytes`: parallel pretokenization with document splitting and counting
 
@@ -25,10 +30,17 @@ mod unicode;
 pub mod pretoken_simd;
 
 pub use options::PretokenizerType;
-pub use pretoken_state_machine::{PretokenizerIter, pretokenize_as_iter};
+pub use pretoken_fast::FastPretokenizer;
+pub use pretoken_state_machine::PretokenizerIter;
 
 /// Default document separator used in common training corpora.
 pub const DEFAULT_SEPARATOR: &[u8] = b"<|endoftext|>";
+
+/// Iterate the pretokens of `bytes` using the production pretokenizer.
+#[inline]
+pub fn pretokenize_as_iter(bytes: &[u8]) -> FastPretokenizer<'_> {
+    FastPretokenizer::new(bytes)
+}
 
 // ---------------------------------------------------------------------------
 // Pretokenize trait — Layer 3
@@ -36,11 +48,11 @@ pub const DEFAULT_SEPARATOR: &[u8] = b"<|endoftext|>";
 
 /// Anything that can be split into a stream of pretokens.
 pub trait Pretokenize {
-    fn pretokens(&self) -> PretokenizerIter<'_>;
+    fn pretokens(&self) -> FastPretokenizer<'_>;
 }
 
 impl Pretokenize for [u8] {
-    fn pretokens(&self) -> PretokenizerIter<'_> {
+    fn pretokens(&self) -> FastPretokenizer<'_> {
         pretokenize_as_iter(self)
     }
 }

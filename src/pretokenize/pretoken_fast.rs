@@ -204,6 +204,20 @@ impl<'a> FastPretokenizer<'a> {
         Self { bytes, pos: 0 }
     }
 
+    /// Resume iteration at a byte offset previously returned by [`Self::pos`].
+    /// Used by the Python bindings, which re-borrow the underlying buffer on
+    /// every `__next__` call.
+    #[inline]
+    pub fn with_pos(bytes: &'a [u8], pos: usize) -> Self {
+        Self { bytes, pos }
+    }
+
+    /// Current position as a byte offset into the input.
+    #[inline]
+    pub fn pos(&self) -> usize {
+        self.pos
+    }
+
     #[inline(always)]
     fn scan_letters(&mut self) {
         self.pos = scan_letters_from(self.bytes, self.pos);
@@ -859,7 +873,6 @@ fn contraction_len_at(bytes: &[u8], pos: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pretokenize::pretokenize_as_iter;
 
     #[test]
     fn twopass_small_cases() {
@@ -1012,7 +1025,7 @@ mod tests {
         }
         let input = &all_bytes[..end];
 
-        let mut sm = pretokenize_as_iter(input);
+        let mut sm = crate::pretokenize::PretokenizerIter::new(input);
         let mut fast = FastPretokenizer::new(input);
         let mut idx = 0usize;
 
