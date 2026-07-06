@@ -84,6 +84,11 @@ harness = false
 test = false
 
 [[bench]]
+name = "encode_doc"
+harness = false
+test = false
+
+[[bench]]
 name = "pretokenize_profile"
 harness = false
 test = false

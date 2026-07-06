@@ -59,6 +59,134 @@ fn detect_format(path: &Path) -> (ContentFormat, Compression) {
 }
 
 // ---------------------------------------------------------------------------
+// DocFormat: how a file's bytes split into documents
+// ---------------------------------------------------------------------------
+
+/// How to split a file's bytes into documents. Carried by the Python
+/// `TextFileSource` / `JsonlFileSource` classes; compression is orthogonal
+/// and always detected from the file extension.
+#[derive(Debug, Clone)]
+pub enum DocFormat {
+    /// Plain text. With a separator, documents are the pieces between
+    /// occurrences; without one, the whole file is a single document.
+    Text { separator: Option<Vec<u8>> },
+    /// JSON Lines: one document per line, text taken from `field`.
+    Jsonl { field: String },
+}
+
+impl DocFormat {
+    /// Separator to split text documents on. Empty means "whole input is one
+    /// document", matching `DocumentIter`/`SeparatorReader` semantics.
+    fn separator(&self) -> &[u8] {
+        match self {
+            DocFormat::Text { separator } => separator.as_deref().unwrap_or(b""),
+            DocFormat::Jsonl { .. } => b"",
+        }
+    }
+}
+
+/// Default format for a bare path: JSONL (field "text") if the uncompressed
+/// name ends in .jsonl, otherwise plain text with the whole file as one
+/// document.
+pub fn detect_default_format(path: &Path) -> DocFormat {
+    match detect_format(path).0 {
+        ContentFormat::Jsonl => DocFormat::Jsonl {
+            field: "text".to_string(),
+        },
+        ContentFormat::PlainText => DocFormat::Text { separator: None },
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Loading and chunking files for parallel encoding
+// ---------------------------------------------------------------------------
+
+/// A file's full contents: mmapped when stored uncompressed, otherwise
+/// decompressed into memory (parallel chunking needs random access).
+pub enum LoadedFile {
+    Mmapped(MmappedFile),
+    Owned(Vec<u8>),
+}
+
+impl LoadedFile {
+    pub fn as_bytes(&self) -> &[u8] {
+        match self {
+            LoadedFile::Mmapped(m) => m.as_bytes(),
+            LoadedFile::Owned(v) => v,
+        }
+    }
+}
+
+/// Open a file for encoding: mmap if uncompressed, else decompress fully.
+pub fn load_file(path: &Path) -> Result<LoadedFile, std::io::Error> {
+    use std::io::Read;
+    let (_, compression) = detect_format(path);
+    Ok(match compression {
+        Compression::None => LoadedFile::Mmapped(MmappedFile::open(path)?),
+        Compression::Gzip => {
+            let mut buf = Vec::new();
+            decompress::open_gzip(path)?.read_to_end(&mut buf)?;
+            LoadedFile::Owned(buf)
+        }
+        Compression::Zstd => {
+            let mut buf = Vec::new();
+            decompress::open_zstd(path)?.read_to_end(&mut buf)?;
+            LoadedFile::Owned(buf)
+        }
+    })
+}
+
+/// Cut `bytes` into ranges of roughly `target` bytes, each ending on a
+/// document boundary so no document spans two chunks. A single range is
+/// returned when the input is smaller than `target` or has no boundaries
+/// (plain text without a separator is one document, which cannot be split
+/// without changing tokenization).
+pub fn chunk_ranges(
+    bytes: &[u8],
+    format: &DocFormat,
+    target: usize,
+) -> Vec<std::ops::Range<usize>> {
+    let len = bytes.len();
+    // `next_boundary(probe)` finds the first document boundary at or after
+    // `probe` and returns (chunk_end, next_chunk_start).
+    let cut = |next_boundary: &dyn Fn(usize) -> Option<(usize, usize)>| {
+        let mut out = Vec::new();
+        let mut start = 0;
+        while start < len {
+            let probe = start + target;
+            match (probe < len).then(|| next_boundary(probe)).flatten() {
+                Some((end, next_start)) => {
+                    out.push(start..end);
+                    start = next_start;
+                }
+                None => {
+                    out.push(start..len);
+                    break;
+                }
+            }
+        }
+        if out.is_empty() {
+            out.push(0..0); // empty file: one empty chunk, so files stay 1:1
+        }
+        out
+    };
+    match format {
+        DocFormat::Jsonl { .. } => cut(&|probe| {
+            memchr::memchr(b'\n', &bytes[probe..]).map(|off| (probe + off + 1, probe + off + 1))
+        }),
+        DocFormat::Text { separator: Some(sep) } if !sep.is_empty() => {
+            let finder = memchr::memmem::Finder::new(sep);
+            cut(&|probe| {
+                finder
+                    .find(&bytes[probe..])
+                    .map(|off| (probe + off, probe + off + sep.len()))
+            })
+        }
+        DocFormat::Text { .. } => vec![0..len],
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Per-file processing
 // ---------------------------------------------------------------------------
 
@@ -116,9 +244,7 @@ fn pretokenize_jsonl_par(
 /// Never buffers the entire decompressed file.
 fn pretokenize_streaming(
     reader: impl std::io::BufRead,
-    content: ContentFormat,
-    field: &str,
-    separator: &[u8],
+    format: &DocFormat,
 ) -> HashMap<Vec<u8>, usize, FxBuildHasher> {
     let mut counts: HashMap<Vec<u8>, usize, FxBuildHasher> = HashMap::default();
     let mut count_pretokens = |doc: &[u8]| {
@@ -127,14 +253,14 @@ fn pretokenize_streaming(
         }
     };
 
-    match content {
-        ContentFormat::Jsonl => {
+    match format {
+        DocFormat::Jsonl { field } => {
             for doc in JsonLinesReader::new(reader, field) {
                 count_pretokens(doc.as_ref());
             }
         }
-        ContentFormat::PlainText => {
-            for doc in SeparatorReader::new(reader, separator) {
+        DocFormat::Text { .. } => {
+            for doc in SeparatorReader::new(reader, format.separator()) {
                 count_pretokens(&doc);
             }
         }
@@ -144,29 +270,27 @@ fn pretokenize_streaming(
 
 fn pretokenize_file(
     path: &Path,
-    content: ContentFormat,
+    format: &DocFormat,
     compression: Compression,
-    field: &str,
-    separator: &[u8],
 ) -> Result<HashMap<Vec<u8>, usize, FxBuildHasher>, std::io::Error> {
-    eprintln!("Processing {:?} ({:?}, {:?})", path, content, compression);
+    eprintln!("Processing {:?} ({:?}, {:?})", path, format, compression);
 
     // Uncompressed files: memory-map for parallel processing
     if matches!(compression, Compression::None) {
         let resource = MmappedFile::open(path)?;
-        return Ok(match content {
-            ContentFormat::PlainText => {
-                pretokenize_plain_text_bytes(resource.as_bytes(), separator)
+        return Ok(match format {
+            DocFormat::Text { .. } => {
+                pretokenize_plain_text_bytes(resource.as_bytes(), format.separator())
             }
-            ContentFormat::Jsonl => pretokenize_jsonl_par(resource.as_bytes(), field),
+            DocFormat::Jsonl { field } => pretokenize_jsonl_par(resource.as_bytes(), field),
         });
     }
 
     // Compressed files: stream from reader (never fully in memory)
     Ok(match compression {
         Compression::None => unreachable!(),
-        Compression::Gzip => pretokenize_streaming(decompress::open_gzip(path)?, content, field, separator),
-        Compression::Zstd => pretokenize_streaming(decompress::open_zstd(path)?, content, field, separator),
+        Compression::Gzip => pretokenize_streaming(decompress::open_gzip(path)?, format),
+        Compression::Zstd => pretokenize_streaming(decompress::open_zstd(path)?, format),
     })
 }
 
@@ -268,8 +392,7 @@ impl<R: std::io::BufRead> Iterator for SeparatorReader<R> {
 
 pub struct FileSourceSpec {
     pub paths: Vec<PathBuf>,
-    pub field: String,
-    pub separator: Vec<u8>,
+    pub format: DocFormat,
 }
 
 /// Newline-aligned chunk boundaries for parallel JSONL processing.
@@ -290,61 +413,18 @@ fn jsonl_chunk_boundaries(bytes: &[u8], n_chunks: usize) -> Vec<usize> {
 }
 
 impl FileSourceSpec {
-    /// Mmap all files and return (mmap, boundaries, content_format) per file.
-    /// Each file's bytes are split into parallel chunks at newline boundaries.
-    /// The caller processes chunks with their own encoder.
-    ///
-    /// For uncompressed JSONL: mmap + parallel chunks.
-    /// Other formats are not yet supported for `document_chunks`.
-    pub fn mmap_files(
-        &self,
-    ) -> Result<Vec<(MmappedFile, Vec<usize>, ContentFormat)>, std::io::Error> {
-        self.paths
-            .iter()
-            .map(|p| {
-                let (content, compression) = detect_format(p);
-                if !matches!(compression, Compression::None) {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::Unsupported,
-                        format!("encode_file only supports uncompressed files, got {:?}", p),
-                    ));
-                }
-                let mmap = MmappedFile::open(p)?;
-                let n = rayon::current_num_threads();
-                let boundaries = jsonl_chunk_boundaries(mmap.as_bytes(), n);
-                Ok((mmap, boundaries, content))
-            })
-            .collect()
-    }
-
-    pub fn field(&self) -> &str {
-        &self.field
-    }
-
-    pub fn separator(&self) -> &[u8] {
-        &self.separator
-    }
-
     pub fn pretokenize(&self) -> Result<HashMap<Vec<u8>, usize, FxBuildHasher>, std::io::Error> {
-        let files: Vec<_> = self
-            .paths
-            .iter()
-            .map(|p| {
-                let (content, compression) = detect_format(p);
-                (p.clone(), content, compression)
-            })
-            .collect();
-
         eprintln!(
             "FileSource: processing {} files across {} threads",
-            files.len(),
+            self.paths.len(),
             rayon::current_num_threads()
         );
 
-        files
+        self.paths
             .par_iter()
-            .map(|(path, content, compression)| {
-                pretokenize_file(path, *content, *compression, &self.field, &self.separator)
+            .map(|path| {
+                let (_, compression) = detect_format(path);
+                pretokenize_file(path, &self.format, compression)
             })
             .try_reduce(HashMap::default, |mut acc, counts| {
                 if acc.is_empty() {

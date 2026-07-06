@@ -268,6 +268,14 @@ impl Tokenizer {
         self.added_first_bytes = first_bytes;
     }
 
+    /// Contents of the added tokens, for callers that split documents at
+    /// byte-level boundaries (see `pretokenize::safe_split_ranges`): added
+    /// tokens are matched atomically before pretokenization, so a split must
+    /// never cut an occurrence in half.
+    pub fn added_token_contents(&self) -> Vec<&[u8]> {
+        self.added_tokens.iter().map(|(c, _)| c.as_ref()).collect()
+    }
+
     /// Find the leftmost added-token occurrence at or after `from`, taking
     /// the longest token when several match at the same position. Returns
     /// `(start, end, id)`.

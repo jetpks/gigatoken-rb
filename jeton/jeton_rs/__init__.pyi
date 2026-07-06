@@ -1,17 +1,33 @@
 from os import PathLike
 from pathlib import Path
 
+import awkward as ak
 import numpy as np
 import numpy.typing as npt
 
 class FileSource:
+    """Base class for file sources; construct TextFileSource or JsonlFileSource."""
+
+    def __repr__(self) -> str: ...
+
+class TextFileSource(FileSource):
+    """Plain-text files. With `separator`, documents are the pieces between
+    separator occurrences; without one, each file is a single document."""
+
+    def __init__(
+        self,
+        paths: list[str | Path | PathLike[str]],
+        separator: bytes | None = None,
+    ) -> None: ...
+
+class JsonlFileSource(FileSource):
+    """JSON Lines files: one document per line, text taken from `field`."""
+
     def __init__(
         self,
         paths: list[str | Path | PathLike[str]],
         field: str = "text",
-        separator: bytes | None = None,
     ) -> None: ...
-    def __repr__(self) -> str: ...
 
 def train_bpe(
     in_data: bytes | Path | str | FileSource,
@@ -23,8 +39,21 @@ def train_bpe(
 
 class BPETokenizer:
     def __new__(cls) -> "BPETokenizer": ...
-    def encode(self, text: bytes) -> npt.NDArray[np.uint32]: ...
-    def encode_file(self, file_source: FileSource) -> list[npt.NDArray[np.uint32]]: ...
+    def encode(self, input: str | bytes) -> npt.NDArray[np.uint32]: ...
+    def encode_batch(
+        self, inputs: list[str] | list[bytes] | ak.Array
+    ) -> ak.Array: ...
+    def encode_files(
+        self,
+        source: FileSource
+        | str
+        | Path
+        | PathLike[str]
+        | list[str | Path | PathLike[str]],
+    ) -> ak.Array: ...
+    def decode(
+        self, tokens: list[int] | npt.NDArray[np.uint32] | ak.Array
+    ) -> bytes: ...
     @staticmethod
     def from_tiktoken(path: str | Path) -> "BPETokenizer": ...
     @staticmethod
@@ -36,7 +65,14 @@ class SentencePieceTokenizer:
     def from_hf(path: str | Path) -> "SentencePieceTokenizer": ...
     def encode(self, text: str) -> npt.NDArray[np.uint32]: ...
     def encode_no_normalize(self, text: str) -> npt.NDArray[np.uint32]: ...
-    def encode_file(self, file_source: FileSource) -> list[npt.NDArray[np.uint32]]: ...
+    def encode_files(
+        self,
+        source: FileSource
+        | str
+        | Path
+        | PathLike[str]
+        | list[str | Path | PathLike[str]],
+    ) -> ak.Array: ...
     def decode(self, tokens: list[int] | npt.NDArray[np.uint32]) -> bytes: ...
     def __repr__(self) -> str: ...
 

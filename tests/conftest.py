@@ -94,6 +94,15 @@ def qwen2_tokenizer_path() -> Path:
 
 
 @pytest.fixture(scope="session")
+def qwen3_5_tokenizer_path() -> Path:
+    """Path to Qwen3.5 tokenizer.json, downloaded from HF if absent."""
+    return _download_hf_tokenizer(
+        "Qwen/Qwen3.5-9B",
+        "qwen3_5_tokenizer.json",
+    )
+
+
+@pytest.fixture(scope="session")
 def deepseek_v3_tokenizer_path() -> Path:
     """Path to DeepSeek V3 tokenizer.json, downloaded from HF if absent."""
     return _download_hf_tokenizer(
