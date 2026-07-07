@@ -26,5 +26,12 @@ pub fn load_tiktoken(file_path: impl AsRef<Path>) -> Result<Tokenizer> {
         })
         .collect();
 
-    Tokenizer::from_ranks(rank_vocab)
+    let n_ranks = rank_vocab.len() as u32;
+    let mut tokenizer = Tokenizer::from_ranks(rank_vocab)?;
+    // Tiktoken vocab files carry no special tokens; GPT-2-family vocabs
+    // (gpt2/r50k) place <|endoftext|> at the id right after the mergeable
+    // ranks. Register it so tiktoken- and tokenizer.json-loaded tokenizers
+    // encode and decode identically.
+    tokenizer.add_special_token(b"<|endoftext|>".to_vec(), n_ranks.into());
+    Ok(tokenizer)
 }

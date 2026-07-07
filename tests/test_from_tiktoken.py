@@ -153,6 +153,18 @@ def test_url_like(r50k):
     _assert_same(tt, bpe, "https://example.com/path?query=value&other=123#fragment")
 
 
+def test_endoftext_added_token(r50k):
+    """<|endoftext|> encodes to id 50256 and round-trips, matching both
+    tiktoken with specials allowed and the tokenizer.json-loaded GPT-2."""
+    tt, bpe = r50k
+    text = "Hello world.<|endoftext|>Next document."
+    expected = tt.encode(text, allowed_special="all")
+    actual = bpe.encode(text.encode("utf-8")).tolist()
+    assert actual == expected
+    assert 50256 in actual
+    assert bpe.decode(actual) == text.encode("utf-8")
+
+
 def test_multiline_code(r50k):
     tt, bpe = r50k
     code = """class Foo:

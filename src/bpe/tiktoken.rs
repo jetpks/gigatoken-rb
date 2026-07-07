@@ -268,6 +268,27 @@ impl Tokenizer {
         self.added_first_bytes = first_bytes;
     }
 
+    /// Register one additional added token, extending the decode vocab when
+    /// its id lies outside the base ranks (mirrors the out-of-vocab
+    /// added-token handling in the HF loader).
+    pub fn add_special_token(&mut self, content: Vec<u8>, id: TokenId) {
+        let idx = id.0 as usize;
+        if idx >= self.vocab.len() {
+            self.vocab.resize(idx + 1, Arc::from(Vec::new().as_slice()));
+        }
+        if self.vocab[idx].is_empty() {
+            self.vocab[idx] = content.clone().into();
+            self.vocab_inv.insert(self.vocab[idx].clone(), id);
+        }
+        let mut added: Vec<(Vec<u8>, TokenId)> = self
+            .added_tokens
+            .iter()
+            .map(|(c, i)| (c.to_vec(), *i))
+            .collect();
+        added.push((content, id));
+        self.set_added_tokens(added);
+    }
+
     /// Contents of the added tokens, for callers that split documents at
     /// byte-level boundaries (see `pretokenize::safe_split_ranges`): added
     /// tokens are matched atomically before pretokenization, so a split must
@@ -409,6 +430,21 @@ impl Tokenizer {
     /// Get the number of pretokens currently in the cache.
     pub fn pretoken_cache_size(&self) -> usize {
         self.pretoken_cache.len() + self.pretoken_cache_long.len()
+    }
+
+    /// Detailed cache stats for memory accounting (temporary instrumentation):
+    /// (short_len, short_cap, long_len, long_cap, long_key_bytes, arena_len, arena_cap).
+    pub fn cache_mem_stats(&self) -> (usize, usize, usize, usize, usize, usize, usize) {
+        let long_key_bytes: usize = self.pretoken_cache_long.keys().map(|k| k.len()).sum();
+        (
+            self.pretoken_cache.len(),
+            self.pretoken_cache.capacity(),
+            self.pretoken_cache_long.len(),
+            self.pretoken_cache_long.capacity(),
+            long_key_bytes,
+            self.token_arena.len(),
+            self.token_arena.capacity(),
+        )
     }
 }
 
