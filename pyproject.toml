@@ -3,7 +3,7 @@ requires = ["maturin>=1.11,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "jeton"
+name = "gigatok"
 requires-python = ">=3.10"
 classifiers = [
     "Programming Language :: Rust",
@@ -16,7 +16,7 @@ dependencies = ["awkward>=2.8.9", "numpy>=1.24.4"]
 [tool.maturin]
 
 features = ["pyo3/extension-module"]
-module-name = "jeton.jeton_rs"
+module-name = "gigatok.gigatok_rs"
 
 
 [tool.uv]

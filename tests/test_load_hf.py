@@ -1,7 +1,7 @@
 import pytest
 from pytest import fixture, param
 
-from jeton._load.hf import load_hf_tokenizer
+from gigatok._load.hf import load_hf_tokenizer
 
 
 @pytest.mark.parametrize("name_or_path", ["openai-community/gpt2", "Qwen/Qwen2-1.5B-Instruct"])

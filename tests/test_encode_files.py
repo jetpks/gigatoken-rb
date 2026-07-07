@@ -9,8 +9,8 @@ from pathlib import Path
 
 import pytest
 
-from jeton import JsonlFileSource, TextFileSource
-from jeton.jeton_rs import BPETokenizer
+from gigatok import JsonlFileSource, TextFileSource
+from gigatok.gigatok_rs import BPETokenizer
 
 DOCS = [
     "The quick brown fox jumps over the lazy dog.",

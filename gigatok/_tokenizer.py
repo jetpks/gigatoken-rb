@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from jeton._load.hf import to_tokenizer_json
-from jeton.jeton_rs import BPETokenizer, SentencePieceTokenizer, load_hf_json
+from gigatok._load.hf import to_tokenizer_json
+from gigatok.gigatok_rs import BPETokenizer, SentencePieceTokenizer, load_hf_json
 
 _BACKEND_TYPES = (BPETokenizer, SentencePieceTokenizer)
 

@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 import tiktoken
 
-from jeton.jeton_rs import BPETokenizer
+from gigatok.gigatok_rs import BPETokenizer
 
 
 def tiktoken_cache_path(url: str) -> Path:
@@ -37,7 +37,7 @@ def r50k() -> tuple[tiktoken.Encoding, BPETokenizer]:
 def _assert_same(tt_enc, bpe_tok, text: str):
     expected = tt_enc.encode(text)
     actual = bpe_tok.encode(text.encode("utf-8")).tolist()
-    assert actual == expected, f"Mismatch for {text!r}:\n  tiktoken: {expected}\n  jeton:    {actual}"
+    assert actual == expected, f"Mismatch for {text!r}:\n  tiktoken: {expected}\n  gigatok:    {actual}"
 
 
 SIMPLE_STRINGS = [
@@ -112,7 +112,7 @@ def test_paragraphs(r50k, text):
 
 
 def test_roundtrip_token_count(r50k):
-    """Token counts should match between tiktoken and jeton."""
+    """Token counts should match between tiktoken and gigatok."""
     tt, bpe = r50k
     text = "Here is a moderately long sentence with some numbers 42 and symbols @#$%."
     assert len(tt.encode(text)) == len(bpe.encode(text.encode("utf-8")))

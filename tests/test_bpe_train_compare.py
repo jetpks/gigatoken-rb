@@ -1,4 +1,4 @@
-"""Compare BPE training: Jeton vs HuggingFace tokenizers library.
+"""Compare BPE training: Gigatok vs HuggingFace tokenizers library.
 
 Trains both implementations on the same corpus and compares:
 - Vocabulary size and structure
@@ -11,7 +11,7 @@ import json
 import pytest
 from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
 
-from jeton import train_bpe
+from gigatok import train_bpe
 
 from conftest import GPT2_B2U, gpt2_bytes_to_unicode as bytes_to_unicode
 
@@ -84,8 +84,8 @@ def _train_hf(corpus: str, vocab_size: int) -> Tokenizer:
     return tok
 
 
-def _jeton_to_hf(vocab: dict, merges: list) -> Tokenizer:
-    """Convert Jeton training output into an HF Tokenizer."""
+def _gigatok_to_hf(vocab: dict, merges: list) -> Tokenizer:
+    """Convert Gigatok training output into an HF Tokenizer."""
     hf_vocab = {bytes_to_unicode(v): k for k, v in vocab.items()}
     hf_merges = [(bytes_to_unicode(a), bytes_to_unicode(b)) for a, b in merges]
     tok = Tokenizer(models.BPE(vocab=hf_vocab, merges=hf_merges))
@@ -100,7 +100,7 @@ def _jeton_to_hf(vocab: dict, merges: list) -> Tokenizer:
 
 
 @pytest.fixture(scope="module")
-def jeton_result():
+def gigatok_result():
     return train_bpe(CORPUS_BYTES, VOCAB_SIZE, [])
 
 
@@ -110,9 +110,9 @@ def hf_tokenizer():
 
 
 @pytest.fixture(scope="module")
-def jeton_as_hf(jeton_result):
-    vocab, merges = jeton_result
-    return _jeton_to_hf(vocab, merges)
+def gigatok_as_hf(gigatok_result):
+    vocab, merges = gigatok_result
+    return _gigatok_to_hf(vocab, merges)
 
 
 # ---------------------------------------------------------------------------
@@ -133,15 +133,15 @@ def _hf_merges(hf_tokenizer: Tokenizer) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-def test_vocab_size(jeton_result, hf_tokenizer):
-    vocab, _ = jeton_result
+def test_vocab_size(gigatok_result, hf_tokenizer):
+    vocab, _ = gigatok_result
     assert len(vocab) == VOCAB_SIZE
     assert hf_tokenizer.get_vocab_size() == VOCAB_SIZE
 
 
-def test_base_vocab_preserved(jeton_result, hf_tokenizer):
+def test_base_vocab_preserved(gigatok_result, hf_tokenizer):
     """First 256 tokens should be single bytes in both."""
-    vocab, _ = jeton_result
+    vocab, _ = gigatok_result
     for i in range(256):
         assert vocab[i] == bytes([i])
 
@@ -150,8 +150,8 @@ def test_base_vocab_preserved(jeton_result, hf_tokenizer):
         assert GPT2_B2U[b] in hf_vocab
 
 
-def test_merges_count(jeton_result, hf_tokenizer):
-    _, merges = jeton_result
+def test_merges_count(gigatok_result, hf_tokenizer):
+    _, merges = gigatok_result
     expected = VOCAB_SIZE - 256
     assert len(merges) == expected
 
@@ -164,29 +164,29 @@ def test_merges_count(jeton_result, hf_tokenizer):
 # ---------------------------------------------------------------------------
 
 
-def test_merges_identical(jeton_result, hf_tokenizer):
+def test_merges_identical(gigatok_result, hf_tokenizer):
     """With HF-compatible tie-breaking, all merges should match exactly."""
-    _, jeton_merges = jeton_result
+    _, gigatok_merges = gigatok_result
     hf_merges = _hf_merges(hf_tokenizer)
 
-    jeton_unicode = [
-        f"{bytes_to_unicode(a)} {bytes_to_unicode(b)}" for a, b in jeton_merges
+    gigatok_unicode = [
+        f"{bytes_to_unicode(a)} {bytes_to_unicode(b)}" for a, b in gigatok_merges
     ]
 
     first_divergence = None
-    for i, (jm, hm) in enumerate(zip(jeton_unicode, hf_merges)):
+    for i, (jm, hm) in enumerate(zip(gigatok_unicode, hf_merges)):
         if jm != hm:
             first_divergence = i
             break
 
     if first_divergence is not None:
-        j = jeton_unicode[first_divergence]
+        j = gigatok_unicode[first_divergence]
         h = hf_merges[first_divergence]
         pytest.fail(
-            f"Merge {first_divergence} differs: jeton={j!r}, hf={h!r}"
+            f"Merge {first_divergence} differs: gigatok={j!r}, hf={h!r}"
         )
 
-    assert len(jeton_unicode) == len(hf_merges)
+    assert len(gigatok_unicode) == len(hf_merges)
 
 
 # ---------------------------------------------------------------------------
@@ -203,11 +203,11 @@ _TEST_TEXTS = [
 ]
 
 
-def test_jeton_tokenizer_roundtrip(jeton_as_hf):
-    """Jeton-trained tokenizer encodes and decodes correctly."""
+def test_gigatok_tokenizer_roundtrip(gigatok_as_hf):
+    """Gigatok-trained tokenizer encodes and decodes correctly."""
     for text in _TEST_TEXTS:
-        encoded = jeton_as_hf.encode(text)
-        decoded = jeton_as_hf.decode(encoded.ids)
+        encoded = gigatok_as_hf.encode(text)
+        decoded = gigatok_as_hf.decode(encoded.ids)
         assert decoded == text, f"Roundtrip failed for {text!r}: got {decoded!r}"
 
 
@@ -219,27 +219,27 @@ def test_hf_tokenizer_roundtrip(hf_tokenizer):
         assert decoded == text, f"Roundtrip failed for {text!r}: got {decoded!r}"
 
 
-def test_encoding_identical(jeton_as_hf, hf_tokenizer):
+def test_encoding_identical(gigatok_as_hf, hf_tokenizer):
     """With identical merges, both tokenizers should split text into the same tokens.
 
-    The raw token IDs differ (Jeton uses byte-value IDs, HF uses unicode-codepoint-
+    The raw token IDs differ (Gigatok uses byte-value IDs, HF uses unicode-codepoint-
     rank IDs), but the tokenization boundaries and token content must be identical.
     """
     for text in _TEST_TEXTS:
-        jeton_enc = jeton_as_hf.encode(text)
+        gigatok_enc = gigatok_as_hf.encode(text)
         hf_enc = hf_tokenizer.encode(text)
-        jeton_tokens = jeton_enc.tokens
+        gigatok_tokens = gigatok_enc.tokens
         hf_tokens = hf_enc.tokens
-        assert jeton_tokens == hf_tokens, (
+        assert gigatok_tokens == hf_tokens, (
             f"Tokenization mismatch for {text!r}:\n"
-            f"  jeton: {jeton_tokens}\n"
+            f"  gigatok: {gigatok_tokens}\n"
             f"  hf:    {hf_tokens}"
         )
 
 
-def test_vocab_tokens_are_valid(jeton_result):
+def test_vocab_tokens_are_valid(gigatok_result):
     """Every merged token should be the concatenation of its merge components."""
-    vocab, merges = jeton_result
+    vocab, merges = gigatok_result
     for i, (left, right) in enumerate(merges):
         token_id = 256 + i  # byte tokens 0-255, then merges
         expected = left + right

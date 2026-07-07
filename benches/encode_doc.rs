@@ -8,8 +8,8 @@
 //!           ENCODE_MB=500 cargo bench --bench encode_doc
 //!           TOKENIZER_JSON=data/qwen3_5_tokenizer.json cargo bench --bench encode_doc
 
-use jeton_rs::load_tokenizer::hf::load_hf_bpe;
-use jeton_rs::pretokenize::safe_split_ranges;
+use gigatok_rs::load_tokenizer::hf::load_hf_bpe;
+use gigatok_rs::pretokenize::safe_split_ranges;
 use rayon::prelude::*;
 use std::path::PathBuf;
 use std::sync::Mutex;

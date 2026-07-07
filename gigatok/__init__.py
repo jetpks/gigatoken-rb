@@ -1,4 +1,4 @@
-from jeton.jeton_rs import (
+from gigatok.gigatok_rs import (
     FileSource,
     JsonlFileSource,
     TextFileSource,
@@ -6,8 +6,8 @@ from jeton.jeton_rs import (
     train_bpe,
 )
 
-from jeton._hf_compat import HFCompat
-from jeton._tokenizer import Tokenizer
+from gigatok._hf_compat import HFCompat
+from gigatok._tokenizer import Tokenizer
 
 __all__ = [
     "FileSource",

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from jeton import FileSource, JsonlFileSource, TextFileSource, train_bpe
+from gigatok import FileSource, JsonlFileSource, TextFileSource, train_bpe
 
 CORPUS_LINES = [
     "The quick brown fox jumps over the lazy dog.",

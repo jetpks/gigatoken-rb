@@ -14,7 +14,7 @@ from dataclasses import dataclass
 import pytest
 from tokenizers import Tokenizer
 
-from jeton.jeton_rs import BPETokenizer
+from gigatok.gigatok_rs import BPETokenizer
 
 
 @dataclass(frozen=True)
@@ -64,5 +64,5 @@ def hf_tok(tokenizer_path):
 
 
 @pytest.fixture(scope="session")
-def jeton_tok(tokenizer_path):
+def gigatok_tok(tokenizer_path):
     return BPETokenizer.from_hf(tokenizer_path)

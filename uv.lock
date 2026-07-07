@@ -857,7 +857,7 @@ wheels = [
 ]
 
 [[package]]
-name = "jeton"
+name = "gigatok"
 source = { editable = "." }
 dependencies = [
     { name = "awkward" },

@@ -1,12 +1,12 @@
-"""HFCompat: a jeton-backed drop-in for the HuggingFace `transformers`
+"""HFCompat: a gigatok-backed drop-in for the HuggingFace `transformers`
 fast-tokenizer API (PreTrainedTokenizerFast / TokenizersBackend)."""
 
 from __future__ import annotations
 
 import json
 
-from jeton._load.hf import to_tokenizer_json
-from jeton._tokenizer import Tokenizer
+from gigatok._load.hf import to_tokenizer_json
+from gigatok._tokenizer import Tokenizer
 
 _NAMED_SPECIAL_ATTRS = (
     "bos_token",
@@ -82,13 +82,13 @@ class BatchEncoding(dict):
 
 
 class HFCompat:
-    """Wrap a HuggingFace tokenizer as a jeton-accelerated object following
+    """Wrap a HuggingFace tokenizer as a gigatok-accelerated object following
     the `transformers` fast-tokenizer API (TokenizersBackend /
     PreTrainedTokenizerFast), so it can replace the original in existing
     code: `__call__`/`encode`/`decode`/`batch_decode`/`tokenize`/`convert_*`
     plus the vocab and special-token accessors.
 
-    Accepts the same sources as `jeton.Tokenizer`: a path to a
+    Accepts the same sources as `gigatok.Tokenizer`: a path to a
     tokenizer.json, a `tokenizers.Tokenizer`, or a `transformers` tokenizer
     (fast or slow). Named special-token attributes (eos_token, ...) are
     copied from the source tokenizer when it has them; otherwise they are
@@ -131,22 +131,22 @@ class HFCompat:
 
     @property
     def tokenizer(self) -> Tokenizer:
-        """The underlying jeton Tokenizer (numpy/awkward-native API)."""
+        """The underlying gigatok Tokenizer (numpy/awkward-native API)."""
         return self._tokenizer
 
     # -- encoding -----------------------------------------------------------
 
     def _check_call_args(self, text_pair, padding, truncation, max_length, return_tensors, kwargs):
         if text_pair is not None:
-            raise ValueError("jeton.HFCompat does not support sequence pairs")
+            raise ValueError("gigatok.HFCompat does not support sequence pairs")
         if padding:
-            raise NotImplementedError("jeton.HFCompat does not support padding")
+            raise NotImplementedError("gigatok.HFCompat does not support padding")
         if truncation or max_length is not None:
-            raise NotImplementedError("jeton.HFCompat does not support truncation")
+            raise NotImplementedError("gigatok.HFCompat does not support truncation")
         if return_tensors is not None:
-            raise NotImplementedError("jeton.HFCompat does not support return_tensors")
+            raise NotImplementedError("gigatok.HFCompat does not support return_tensors")
         if kwargs.get("is_split_into_words"):
-            raise NotImplementedError("jeton.HFCompat does not support pre-tokenized input")
+            raise NotImplementedError("gigatok.HFCompat does not support pre-tokenized input")
 
     def _check_post_processor(self):
         if self._post_processor_error is not None:
@@ -212,7 +212,7 @@ class HFCompat:
 
     def tokenize(self, text: str, pair=None, add_special_tokens: bool = False, **kwargs) -> list[str]:
         if pair is not None:
-            raise ValueError("jeton.HFCompat does not support sequence pairs")
+            raise ValueError("gigatok.HFCompat does not support sequence pairs")
         return self.convert_ids_to_tokens(self._encode_ids(text, add_special_tokens))
 
     # -- decoding -----------------------------------------------------------
@@ -333,7 +333,7 @@ class HFCompat:
 
     def num_special_tokens_to_add(self, pair: bool = False) -> int:
         if pair:
-            raise ValueError("jeton.HFCompat does not support sequence pairs")
+            raise ValueError("gigatok.HFCompat does not support sequence pairs")
         self._check_post_processor()
         return len(self._prefix_ids) + len(self._suffix_ids)
 

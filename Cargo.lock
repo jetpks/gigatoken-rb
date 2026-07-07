@@ -1091,6 +1091,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "gigatok"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "bumpalo",
+ "criterion",
+ "dashmap",
+ "eyre",
+ "fancy-regex",
+ "flate2",
+ "icu",
+ "icu_codepointtrie_builder",
+ "indicatif",
+ "itertools 0.15.0",
+ "memchr",
+ "memmap2",
+ "numpy",
+ "polars",
+ "priority-queue",
+ "pyo3",
+ "rand 0.10.0",
+ "rayon",
+ "regex",
+ "rustc-hash",
+ "serde",
+ "simdutf",
+ "sonic-rs",
+ "voracious_radix_sort",
+ "winnow",
+ "zerovec",
+ "zstd",
+]
+
+[[package]]
 name = "glob"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1874,40 +1908,6 @@ name = "ixdtf"
 version = "0.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2ceaf4c6c48465bead8cb6a0b7c4ee0c86ecbb31239032b9c66ab9a08d2f3ee1"
-
-[[package]]
-name = "jeton"
-version = "0.1.0"
-dependencies = [
- "base64",
- "bumpalo",
- "criterion",
- "dashmap",
- "eyre",
- "fancy-regex",
- "flate2",
- "icu",
- "icu_codepointtrie_builder",
- "indicatif",
- "itertools 0.15.0",
- "memchr",
- "memmap2",
- "numpy",
- "polars",
- "priority-queue",
- "pyo3",
- "rand 0.10.0",
- "rayon",
- "regex",
- "rustc-hash",
- "serde",
- "simdutf",
- "sonic-rs",
- "voracious_radix_sort",
- "winnow",
- "zerovec",
- "zstd",
-]
 
 [[package]]
 name = "jobserver"

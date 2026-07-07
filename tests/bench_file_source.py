@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Benchmark: single-threaded pretokenization of a .jsonl.zst file.
 
-Jeton (Rust, single-threaded) vs HuggingFace tokenizers ByteLevel pretokenizer.
+Gigatok (Rust, single-threaded) vs HuggingFace tokenizers ByteLevel pretokenizer.
 
 Run with: uv run python tests/bench_file_source.py
 """
@@ -37,9 +37,9 @@ def load_documents(path: str | Path, field: str, max_docs: int | None = None) ->
     return docs
 
 
-def bench_jeton_single_thread(docs: list[str], n_runs: int = 3):
-    """Pretokenize all documents with Jeton on a single thread."""
-    from jeton.jeton_rs import pretokenizer
+def bench_gigatok_single_thread(docs: list[str], n_runs: int = 3):
+    """Pretokenize all documents with Gigatok on a single thread."""
+    from gigatok.gigatok_rs import pretokenizer
 
     times = []
     total_pretokens = 0
@@ -101,23 +101,23 @@ def main():
     print(f" Runs:  {n_runs}")
     print()
 
-    jeton_times, jeton_tokens = bench_jeton_single_thread(docs, n_runs)
+    gigatok_times, gigatok_tokens = bench_gigatok_single_thread(docs, n_runs)
     hf_times, hf_tokens = bench_hf_single_thread(docs, n_runs)
 
-    jeton_best = min(jeton_times)
+    gigatok_best = min(gigatok_times)
     hf_best = min(hf_times)
-    speedup = hf_best / jeton_best if jeton_best > 0 else float("inf")
+    speedup = hf_best / gigatok_best if gigatok_best > 0 else float("inf")
 
     print(f" {'Implementation':<25} {'Best (s)':>10} {'MB/s':>10} {'Pretokens':>12} {'Speedup':>10}")
     print(f" {'-'*25} {'-'*10} {'-'*10} {'-'*12} {'-'*10}")
     print(f" {'HF ByteLevel':<25} {hf_best:>10.3f} {total_mb/hf_best:>10.1f} {hf_tokens:>12,} {'1.0x':>10}")
-    print(f" {'Jeton pretokenizer':<25} {jeton_best:>10.3f} {total_mb/jeton_best:>10.1f} {jeton_tokens:>12,} {speedup:>9.1f}x")
+    print(f" {'Gigatok pretokenizer':<25} {gigatok_best:>10.3f} {total_mb/gigatok_best:>10.1f} {gigatok_tokens:>12,} {speedup:>9.1f}x")
     print()
 
-    if jeton_tokens != hf_tokens:
-        print(f" NOTE: token counts differ (jeton={jeton_tokens:,}, hf={hf_tokens:,})")
+    if gigatok_tokens != hf_tokens:
+        print(f" NOTE: token counts differ (gigatok={gigatok_tokens:,}, hf={hf_tokens:,})")
     else:
-        print(f" Token counts match: {jeton_tokens:,}")
+        print(f" Token counts match: {gigatok_tokens:,}")
 
 
 if __name__ == "__main__":
