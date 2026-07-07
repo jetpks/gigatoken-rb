@@ -1,9 +1,9 @@
 """Verify gigatok encoding matches HuggingFace on curated DCLM data.
 
-The corpus (data/dclm_sample.jsonl.zst, ~20 MB) is DCLM-baseline documents
-selected for tokenizer-hostile content — CJK/RTL scripts, NFC-divergent text,
-emoji, control whitespace, code, unbroken 80+ char tokens, 128 KB+ documents —
-built by streaming the dataset from HuggingFace on first use (dclm_fixture.py).
+The corpus (~20 MB) is DCLM-baseline documents selected for tokenizer-hostile
+content — CJK/RTL scripts, NFC-divergent text, emoji, control whitespace,
+code, unbroken 80+ char tokens, 128 KB+ documents — from a shard downloaded
+into the HuggingFace cache on first use (dclm_fixture.py).
 """
 
 import re

@@ -1,16 +1,16 @@
 """Curated DCLM test corpus: ~20 MB of diverse, edge-case-heavy documents.
 
-Streams the head of one DCLM-baseline shard from HuggingFace (range requests
-via HfFileSystem, no full-shard download), classifies each document into
-edge-case categories (CJK, RTL/other scripts, NFC-divergent text, emoji,
-control whitespace, code, giant unbroken tokens, ...), fills a byte quota per
-category, and caches the selection at data/dclm_sample.jsonl.zst. The source
-revision, scan window, and selection rules are fixed, so every machine builds
-the identical fixture.
+Downloads one pinned DCLM-baseline shard into the standard HuggingFace cache
+(reused across runs and shared with other HF consumers — nothing is written
+to the repo), then classifies each document into edge-case categories (CJK,
+RTL/other scripts, NFC-divergent text, emoji, control whitespace, code, giant
+unbroken tokens, ...) and fills a byte quota per category. The shard revision
+and selection rules are fixed, so every machine selects the identical corpus.
 
-Build manually with: uv run python tests/dclm_fixture.py
+Print selection stats with: uv run python tests/dclm_fixture.py
 """
 
+import hashlib
 import io
 import json
 import re
@@ -18,23 +18,19 @@ import sys
 import unicodedata
 from pathlib import Path
 
-DATA_DIR = Path(__file__).resolve().parent.parent / "data"
-FIXTURE_PATH = DATA_DIR / "dclm_sample.jsonl.zst"
-
-HF_REPO = "datasets/mlfoundations/dclm-baseline-1.0"
+HF_REPO = "mlfoundations/dclm-baseline-1.0"
 HF_REVISION = "a3b142c183aebe5af344955ae20836eb34dcf69b"
 HF_SHARD = "global-shard_01_of_10/local-shard_0_of_10/shard_00000000_processed.jsonl.zst"
 
 TARGET_BYTES = 20_000_000  # total selection size (UTF-8 bytes of text)
-SCAN_LIMIT_BYTES = 500_000_000  # stop scanning the shard after this much text
 MAX_DOC_BYTES = 262_144  # skip anything larger outright
 
 # Codepoint classes that make text hard for tokenizers.
-_CJK_RE = re.compile(r"[　-ヿ㐀-䶿一-鿿가-힯豈-﫿＀-￯]")
+_CJK_RE = re.compile(r"[　-ヿ㐀-䶿一-鿿가-힯豈-﫿＀-￯]")
 _OTHER_SCRIPT_RE = re.compile(r"[Ͱ-ϿЀ-ӿ԰-֏֐-׿؀-ۿऀ-ॿ฀-๿]")
 _EMOJI_RE = re.compile(r"[←-⇿☀-➿⬀-⯿\U0001f000-\U0001faff]")
 _COMBINING_RE = re.compile(r"[̀-ͯ᪰-᫿⃐-⃿︠-︯]")
-_ODD_WS_RE = re.compile(r"[\t\r\x0b\f\x85\xa0​-‍  　﻿]| {8,}|\n{4,}")
+_ODD_WS_RE = re.compile(r"[\t\r\x0b\f\x85\xa0​-‍  　﻿]| {8,}|\n{4,}")
 _LONG_TOKEN_RE = re.compile(r"\S{80,}")
 _CODE_MARK_RE = re.compile(r"[{};]|\n[ \t]+\S|</\w|&\w+;")
 _DIGIT_RE = re.compile(r"[0-9]")
@@ -98,14 +94,17 @@ def _classify(text: str, nbytes: int) -> list[str]:
     return cats
 
 
-def _iter_shard_texts():
-    """Yield document texts from the pinned DCLM shard, streamed from HF."""
-    import zstandard
-    from huggingface_hub import HfFileSystem
+def download_shard() -> Path:
+    """Fetch the pinned DCLM shard into the HuggingFace cache (no-op when cached)."""
+    from huggingface_hub import hf_hub_download
 
-    fs = HfFileSystem()
-    path = f"{HF_REPO}@{HF_REVISION}/{HF_SHARD}"
-    with fs.open(path, "rb", block_size=16 * 2**20) as fh:
+    return Path(hf_hub_download(repo_id=HF_REPO, filename=HF_SHARD, repo_type="dataset", revision=HF_REVISION))
+
+
+def _iter_shard_texts(shard: Path):
+    import zstandard
+
+    with open(shard, "rb") as fh:
         reader = zstandard.ZstdDecompressor().stream_reader(fh)
         for line in io.TextIOWrapper(reader, encoding="utf-8"):
             if line.strip():
@@ -114,28 +113,26 @@ def _iter_shard_texts():
                     yield text
 
 
-def build_dclm_sample(dest: Path = FIXTURE_PATH, log=lambda msg: None) -> Path:
-    import hashlib
-
-    import zstandard
-
-    order = [cat for cat, _ in QUOTAS]
+def select_dclm_docs(log=lambda msg: None) -> list[tuple[str, str]]:
+    """Scan the shard and return the curated (category, text) selection."""
+    shard = download_shard()
     remaining = dict(QUOTAS)
-    selected: list[tuple[str, str]] = []  # (category, text)
+    selected: list[tuple[str, str]] = []
     spill: list[str] = []  # overflow docs kept to top up unfilled quotas
     spill_bytes = 0
     seen: set[bytes] = set()
     scanned = 0
     total = 0
 
-    for text in _iter_shard_texts():
-        nbytes = len(text.encode("utf-8"))
+    for text in _iter_shard_texts(shard):
+        raw = text.encode("utf-8")
+        nbytes = len(raw)
         scanned += nbytes
-        if scanned >= SCAN_LIMIT_BYTES or total >= TARGET_BYTES:
+        if total >= TARGET_BYTES:
             break
         if nbytes > MAX_DOC_BYTES:
             continue
-        h = hashlib.blake2b(text.encode("utf-8"), digest_size=16).digest()
+        h = hashlib.blake2b(raw, digest_size=16).digest()
         if h in seen:
             continue
         seen.add(h)
@@ -149,55 +146,35 @@ def build_dclm_sample(dest: Path = FIXTURE_PATH, log=lambda msg: None) -> Path:
             if spill_bytes < 8_000_000:
                 spill.append(text)
                 spill_bytes += nbytes
-        if scanned % (2**26) < nbytes:
-            log(f"scanned {scanned / 1e6:.0f} MB, selected {total / 1e6:.1f} MB")
 
-    # Quotas the scan window couldn't fill are topped up from ordinary
-    # overflow docs so the fixture still reaches ~20 MB.
+    # Quotas the shard couldn't fill are topped up from ordinary overflow
+    # docs so the corpus still reaches ~20 MB.
     for text in spill:
         if total >= TARGET_BYTES:
             break
         selected.append(("general", text))
         total += len(text.encode("utf-8"))
 
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.with_suffix(".tmp")
-    with open(tmp, "wb") as fh:
-        with zstandard.ZstdCompressor(level=10).stream_writer(fh) as writer:
-            for cat, text in selected:
-                writer.write(json.dumps({"text": text, "category": cat}, ensure_ascii=False).encode("utf-8"))
-                writer.write(b"\n")
-    tmp.replace(dest)
-
-    counts: dict[str, int] = {cat: 0 for cat in order}
-    for cat, _ in selected:
-        counts[cat] += 1
-    quota = dict(QUOTAS)
     log(f"selected {len(selected)} docs, {total / 1e6:.1f} MB (scanned {scanned / 1e6:.0f} MB)")
-    for cat in order:
-        log(f"  {cat}: {counts[cat]} docs, {(quota[cat] - remaining[cat]) / 1e6:.2f}/{quota[cat] / 1e6:.1f} MB")
-    return dest
+    for cat, quota in QUOTAS:
+        log(f"  {cat}: {sum(1 for c, _ in selected if c == cat)} docs, {(quota - remaining[cat]) / 1e6:.2f}/{quota / 1e6:.1f} MB")
+    return selected
 
 
-def ensure_dclm_sample(dest: Path = FIXTURE_PATH) -> Path:
-    """Return the fixture path, building it from HuggingFace on first use."""
-    if not dest.exists():
-        build_dclm_sample(dest, log=lambda msg: print(f"[dclm_fixture] {msg}", file=sys.stderr))
-    return dest
+_DOCS: list[str] | None = None
 
 
-def load_dclm_texts(path: Path = FIXTURE_PATH) -> list[str]:
-    import zstandard
-
-    texts = []
-    with open(path, "rb") as fh:
-        reader = zstandard.ZstdDecompressor().stream_reader(fh)
-        for line in io.TextIOWrapper(reader, encoding="utf-8"):
-            if line.strip():
-                texts.append(json.loads(line)["text"])
-    return texts
+def get_dclm_docs() -> list[str]:
+    """The curated document texts, selected once per process."""
+    global _DOCS
+    if _DOCS is None:
+        _DOCS = [text for _, text in select_dclm_docs(log=lambda msg: print(f"[dclm_fixture] {msg}", file=sys.stderr))]
+    return _DOCS
 
 
 if __name__ == "__main__":
-    dest = Path(sys.argv[1]) if len(sys.argv) > 1 else FIXTURE_PATH
-    build_dclm_sample(dest, log=print)
+    import time
+
+    start = time.perf_counter()
+    select_dclm_docs(log=print)
+    print(f"took {time.perf_counter() - start:.1f}s")

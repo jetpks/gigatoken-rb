@@ -160,20 +160,26 @@ def gpt2_unicode_to_bytes(s: str) -> bytes:
 
 
 @pytest.fixture(scope="session")
-def dclm_sample_path() -> Path:
-    """Curated ~20 MB DCLM sample (data/dclm_sample.jsonl.zst), built by
-    streaming the dataset from HuggingFace on first use — see dclm_fixture.py."""
+def dclm_docs() -> list[str]:
+    """Curated ~20 MB of DCLM documents, selected from a shard that is
+    downloaded into the HuggingFace cache on first use — see dclm_fixture.py."""
     import dclm_fixture
 
-    return dclm_fixture.ensure_dclm_sample()
+    return dclm_fixture.get_dclm_docs()
 
 
 @pytest.fixture(scope="session")
-def dclm_docs(dclm_sample_path) -> list[str]:
-    """The DCLM sample as a list of document texts."""
-    import dclm_fixture
+def dclm_sample_path(dclm_docs, tmp_path_factory) -> Path:
+    """The DCLM sample written to a session-temporary .jsonl.zst file."""
+    import zstandard
 
-    return dclm_fixture.load_dclm_texts(dclm_sample_path)
+    path = tmp_path_factory.mktemp("dclm") / "dclm_sample.jsonl.zst"
+    with open(path, "wb") as fh:
+        with zstandard.ZstdCompressor(level=3).stream_writer(fh) as writer:
+            for text in dclm_docs:
+                writer.write(json.dumps({"text": text}, ensure_ascii=False).encode("utf-8"))
+                writer.write(b"\n")
+    return path
 
 
 @pytest.fixture(scope="session")
