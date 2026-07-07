@@ -57,9 +57,36 @@ struct Model {
     #[serde(rename = "type")]
     model_type: String,
     vocab: HashMap<String, u32>,
+    #[serde(deserialize_with = "deserialize_merges")]
     merges: Vec<[String; 2]>,
     #[serde(default)]
     byte_fallback: bool,
+}
+
+/// Merges appear as `["a", "b"]` arrays in current tokenizer.json files and
+/// as `"a b"` strings in older ones; accept both.
+fn deserialize_merges<'de, D>(deserializer: D) -> Result<Vec<[String; 2]>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Merge {
+        Pair([String; 2]),
+        Legacy(String),
+    }
+    let raw = Vec::<Merge>::deserialize(deserializer)?;
+    raw.into_iter()
+        .map(|m| match m {
+            Merge::Pair(pair) => Ok(pair),
+            Merge::Legacy(s) => {
+                let (a, b) = s.split_once(' ').ok_or_else(|| {
+                    serde::de::Error::custom(format!("invalid merge entry: {s:?}"))
+                })?;
+                Ok([a.to_string(), b.to_string()])
+            }
+        })
+        .collect()
 }
 
 #[derive(Deserialize)]
@@ -91,17 +118,44 @@ fn token_str_to_bytes(s: &str) -> Vec<u8> {
 // Loader
 // ---------------------------------------------------------------------------
 
+/// A tokenizer loaded from HuggingFace `tokenizer.json` data: the model's
+/// `byte_fallback` flag decides which of the two supported styles applies.
+pub enum HfTokenizer {
+    Bpe(bpe::tiktoken::Tokenizer),
+    SentencePiece(SentencePieceBPE),
+}
+
+fn parse_tokenizer_json(data: &[u8]) -> Result<TokenizerJson> {
+    sonic_rs::from_slice(data).context("Failed to parse tokenizer JSON")
+}
+
+fn read_tokenizer_json(path: impl AsRef<Path>) -> Result<TokenizerJson> {
+    let path = path.as_ref();
+    let data =
+        std::fs::read(path).with_context(|| format!("Failed to read {}", path.display()))?;
+    parse_tokenizer_json(&data).with_context(|| format!("Failed to parse {}", path.display()))
+}
+
+/// Load a tokenizer from in-memory `tokenizer.json` contents, choosing the
+/// SentencePiece or ByteLevel BPE style from the model's `byte_fallback` flag.
+pub fn load_hf_slice(data: &[u8]) -> Result<HfTokenizer> {
+    let tj = parse_tokenizer_json(data)?;
+    if tj.model.byte_fallback {
+        Ok(HfTokenizer::SentencePiece(build_sentencepiece(&tj)?))
+    } else {
+        Ok(HfTokenizer::Bpe(build_bpe(&tj)?))
+    }
+}
+
 /// Load a HuggingFace `tokenizer.json` that uses SentencePiece-style BPE with
 /// byte fallback (e.g. Llama 2 / TinyLlama).
 ///
 /// Returns a [`SentencePieceBPE`] that preserves the original HF token IDs.
 pub fn load_hf_sentencepiece(path: impl AsRef<Path>) -> Result<SentencePieceBPE> {
-    let path = path.as_ref();
-    let data =
-        std::fs::read(path).with_context(|| format!("Failed to read {}", path.display()))?;
-    let tj: TokenizerJson = sonic_rs::from_slice(&data)
-        .with_context(|| format!("Failed to parse {}", path.display()))?;
+    build_sentencepiece(&read_tokenizer_json(path)?)
+}
 
+fn build_sentencepiece(tj: &TokenizerJson) -> Result<SentencePieceBPE> {
     ensure!(
         tj.model.model_type == "BPE",
         "Unsupported model type: {} (expected BPE)",
@@ -311,12 +365,10 @@ fn unicode_to_bytes(s: &str, u2b: &HashMap<char, u8>) -> Vec<u8> {
 ///
 /// Returns a [`bpe::tiktoken::Tokenizer`] with byte remapping.
 pub fn load_hf_bpe(path: impl AsRef<Path>) -> Result<bpe::tiktoken::Tokenizer> {
-    let path = path.as_ref();
-    let data =
-        std::fs::read(path).with_context(|| format!("Failed to read {}", path.display()))?;
-    let tj: TokenizerJson = sonic_rs::from_slice(&data)
-        .with_context(|| format!("Failed to parse {}", path.display()))?;
+    build_bpe(&read_tokenizer_json(path)?)
+}
 
+fn build_bpe(tj: &TokenizerJson) -> Result<bpe::tiktoken::Tokenizer> {
     ensure!(
         tj.model.model_type == "BPE",
         "Unsupported model type: {} (expected BPE)",

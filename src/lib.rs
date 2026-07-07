@@ -235,6 +235,60 @@ impl EncodeInput {
     }
 }
 
+/// Shared front-end of encode_batch: extract the documents (a list of str, a
+/// list of bytes, or an awkward Array of strings — whose flat buffer is used
+/// directly, with no per-document Python objects), run `encode` on the
+/// resolved byte slices with the GIL released, and hand the ragged result to
+/// Python as an awkward.Array.
+fn encode_batch_ragged<'py>(
+    py: Python<'py>,
+    inputs: &Bound<'py, PyAny>,
+    encode: impl Fn(&[&[u8]]) -> PyResult<(Vec<u32>, Vec<i64>)> + Send + Sync,
+) -> PyResult<Bound<'py, PyAny>> {
+    // Awkward input: encode straight from the flat content buffer.
+    if let Some((content, in_counts)) = extract_awkward_docs(inputs)? {
+        let content = content.readonly();
+        let bytes: &[u8] = content.as_slice()?;
+        let (flat, counts) = py.detach(|| -> PyResult<_> {
+            let mut docs = Vec::with_capacity(in_counts.len());
+            let mut pos = 0usize;
+            for &n in &in_counts {
+                docs.push(&bytes[pos..pos + n as usize]);
+                pos += n as usize;
+            }
+            encode(&docs)
+        })?;
+        return ragged_to_python(py, flat, counts);
+    }
+
+    let inputs: Vec<Bound<'py, PyAny>> = inputs.extract().map_err(|_| {
+        PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            "expected a list of str, a list of bytes, or an awkward Array of strings",
+        )
+    })?;
+    if inputs.is_empty() {
+        return ragged_to_python(py, vec![], vec![]);
+    }
+    let mut docs = Vec::with_capacity(inputs.len());
+    docs.push(extract_doc(&inputs[0])?);
+    for obj in &inputs[1..] {
+        let doc = extract_doc(obj)?;
+        if std::mem::discriminant(&doc) != std::mem::discriminant(&docs[0]) {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "all documents in a batch must be of the same type \
+                 (a list of str or a list of bytes)",
+            ));
+        }
+        docs.push(doc);
+    }
+
+    let (flat, counts) = py.detach(|| {
+        let slices: Vec<&[u8]> = docs.iter().map(|d| d.as_bytes()).collect();
+        encode(&slices)
+    })?;
+    ragged_to_python(py, flat, counts)
+}
+
 /// Extract one document, pointing path-holders at encode_files.
 fn extract_doc(obj: &Bound<'_, PyAny>) -> PyResult<EncodeInput> {
     if let Ok(s) = obj.extract::<PyBackedStr>() {
@@ -664,48 +718,7 @@ impl BPETokenizer {
         py: Python<'py>,
         inputs: Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        // Awkward input: encode straight from the flat content buffer.
-        if let Some((content, in_counts)) = extract_awkward_docs(&inputs)? {
-            let content = content.readonly();
-            let bytes: &[u8] = content.as_slice()?;
-            let (flat, counts) = py.detach(|| {
-                let mut docs = Vec::with_capacity(in_counts.len());
-                let mut pos = 0usize;
-                for &n in &in_counts {
-                    docs.push(&bytes[pos..pos + n as usize]);
-                    pos += n as usize;
-                }
-                self.encode_slices_ragged(&docs)
-            });
-            return ragged_to_python(py, flat, counts);
-        }
-
-        let inputs: Vec<Bound<'py, PyAny>> = inputs.extract().map_err(|_| {
-            PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                "expected a list of str, a list of bytes, or an awkward Array of strings",
-            )
-        })?;
-        if inputs.is_empty() {
-            return ragged_to_python(py, vec![], vec![]);
-        }
-        let mut docs = Vec::with_capacity(inputs.len());
-        docs.push(extract_doc(&inputs[0])?);
-        for obj in &inputs[1..] {
-            let doc = extract_doc(obj)?;
-            if std::mem::discriminant(&doc) != std::mem::discriminant(&docs[0]) {
-                return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                    "all documents in a batch must be of the same type \
-                     (a list of str or a list of bytes)",
-                ));
-            }
-            docs.push(doc);
-        }
-
-        let (flat, counts) = py.detach(|| {
-            let slices: Vec<&[u8]> = docs.iter().map(|d| d.as_bytes()).collect();
-            self.encode_slices_ragged(&slices)
-        });
-        ragged_to_python(py, flat, counts)
+        encode_batch_ragged(py, &inputs, |docs| Ok(self.encode_slices_ragged(docs)))
     }
 
     /// Encode all documents from files in parallel, releasing the GIL.
@@ -781,6 +794,68 @@ struct SentencePieceTokenizer {
     tokenizer: bpe::SentencePieceBPE,
 }
 
+impl SentencePieceTokenizer {
+    /// Shared core of encode_batch for pre-resolved document slices: group
+    /// whole documents into parallel chunks and encode each with its own
+    /// Encoder. SentencePiece merges can span the whole document, so
+    /// oversized documents are never split. Call with the GIL released.
+    fn encode_slices_ragged(&self, docs: &[&[u8]]) -> PyResult<(Vec<u32>, Vec<i64>)> {
+        use rayon::prelude::*;
+        let texts: Vec<&str> = docs
+            .iter()
+            .map(|d| {
+                std::str::from_utf8(d).map_err(|e| {
+                    PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                        "invalid UTF-8 in document: {e}"
+                    ))
+                })
+            })
+            .collect::<PyResult<_>>()?;
+        let total: usize = docs.iter().map(|d| d.len()).sum();
+        let target = chunk_target_bytes(total);
+        let mut chunks: Vec<Vec<&str>> = Vec::new();
+        let mut group: Vec<&str> = Vec::new();
+        let mut acc = 0usize;
+        for &text in &texts {
+            group.push(text);
+            acc += text.len();
+            if acc >= target {
+                chunks.push(std::mem::take(&mut group));
+                acc = 0;
+            }
+        }
+        if !group.is_empty() {
+            chunks.push(group);
+        }
+        let encode_group = |group: &Vec<&str>| -> ChunkTokens {
+            let mut encoder = self.tokenizer.encoder();
+            let mut ids: Vec<u32> = Vec::new();
+            let mut lens: Vec<i64> = Vec::new();
+            for text in group {
+                let before = ids.len();
+                ids.extend(
+                    encoder
+                        .encode_raw(text)
+                        .into_iter()
+                        .map(|t| -> u32 { t.into() }),
+                );
+                lens.push((ids.len() - before) as i64);
+            }
+            ChunkTokens {
+                ids,
+                lens,
+                continues: false,
+            }
+        };
+        let outs: Vec<ChunkTokens> = if chunks.len() <= 1 {
+            chunks.iter().map(encode_group).collect()
+        } else {
+            chunks.par_iter().map(encode_group).collect()
+        };
+        Ok(assemble_ragged(outs))
+    }
+}
+
 #[pymethods]
 impl SentencePieceTokenizer {
     #[staticmethod]
@@ -788,6 +863,17 @@ impl SentencePieceTokenizer {
         Ok(Self {
             tokenizer: load_tokenizer::hf::load_hf_sentencepiece(&path)?,
         })
+    }
+
+    /// Encode a batch of documents in parallel, releasing the GIL. Accepts
+    /// the same inputs and returns the same awkward.Array shape as
+    /// BPETokenizer.encode_batch. Documents must be valid UTF-8.
+    fn encode_batch<'py>(
+        &self,
+        py: Python<'py>,
+        inputs: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        encode_batch_ragged(py, &inputs, |docs| self.encode_slices_ragged(docs))
     }
 
     fn encode<'py>(&self, py: Python<'py>, input: &str) -> PyResult<Bound<'py, PyArray1<u32>>> {
@@ -909,6 +995,41 @@ impl SentencePieceTokenizer {
     }
 }
 
+/// Load a tokenizer from in-memory HuggingFace `tokenizer.json` contents
+/// (str or bytes). Returns a SentencePieceTokenizer when the model uses
+/// byte_fallback, a BPETokenizer otherwise — the same split as the two
+/// classes' from_hf constructors.
+#[pyfunction]
+fn load_hf_json(py: Python<'_>, data: Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    let backed_str;
+    let backed_bytes;
+    let bytes: &[u8] = if let Ok(s) = data.extract::<PyBackedStr>() {
+        backed_str = s;
+        backed_str.as_bytes()
+    } else if let Ok(b) = data.extract::<PyBackedBytes>() {
+        backed_bytes = b;
+        &backed_bytes
+    } else {
+        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+            "expected tokenizer.json contents as str or bytes, got {}",
+            data.get_type()
+        )));
+    };
+    match load_tokenizer::hf::load_hf_slice(bytes)? {
+        load_tokenizer::hf::HfTokenizer::Bpe(tokenizer) => Ok(Py::new(
+            py,
+            BPETokenizer {
+                tokenizer,
+                workers: WorkerPool::new(),
+            },
+        )?
+        .into_any()),
+        load_tokenizer::hf::HfTokenizer::SentencePiece(tokenizer) => {
+            Ok(Py::new(py, SentencePieceTokenizer { tokenizer })?.into_any())
+        }
+    }
+}
+
 #[pyclass]
 struct PretokenizerIter {
     /// Byte offset into `bytes`; the pretokenizer is stateless beyond this, so
@@ -970,5 +1091,6 @@ fn jeton_rs<'py>(_py: Python, m: &Bound<'py, PyModule>) -> PyResult<()> {
     m.add_class::<SentencePieceTokenizer>()?;
     m.add_function(wrap_pyfunction!(pretokenizer, m)?)?;
     m.add_function(wrap_pyfunction!(pretokenized_counts, m)?)?;
+    m.add_function(wrap_pyfunction!(load_hf_json, m)?)?;
     Ok(())
 }
