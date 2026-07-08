@@ -1,8 +1,26 @@
-//! Fast scalar pretokenizer for the GPT-2 (r50k_base) regex:
+//! Fast pretokenizer for the GPT-2 (r50k_base) regex:
 //! `'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+`
 //!
-//! Uses SWAR (u64) for letter runs + arithmetic predicates. The hot path
-//! (space + letters / bare letters) is fully inlined in `advance_pos`.
+//! On aarch64 the iterator runs a simdjson-style mask scanner: 64-byte
+//! batches are classified with NEON into per-byte u64 class masks, the
+//! token-boundary bits are derived with shifted-mask algebra in scalar
+//! registers (log step 17; the original vector-register algebra of step
+//! 15 measured the same and was retired for the simpler form), and the
+//! walker pops one bit per token — no per-token dispatch branches, which
+//! sidesteps the ~8 cy/token branch-miss floor of the scalar scanner
+//! (log step 13). Apostrophes get a contraction bit-fixup; batches with
+//! any non-ASCII (~21% of OWT) take `extended_masks`, which classifies
+//! every unicode char with the packed table so it joins the same
+//! algebra. Chars straddling a batch edge are resolved with lookahead
+//! and a prev-char walk-back, so bad zones (scalar re-derivation) remain
+//! only for edge-straddling whitespace, contractions at the batch edge,
+//! and invalid UTF-8 — ~0.4% of batches. Measured 2,460-2,600 MB/s on
+//! 1 GB OWT (pretokenize_profile, min-of-N interleaved; 2,132 at step
+//! 15, 983 for the scalar scanner).
+//!
+//! The scalar path (`advance_pos`, SWAR letter runs + arithmetic
+//! predicates) remains the reference implementation, the non-aarch64
+//! fallback, and the executor for bad zones and buffer tails.
 //!
 //! `advance_pos` is a pure free function (`(bytes, pos) -> end`) rather than
 //! a `&mut self` method: keeping the cursor in a register instead of writing
@@ -15,6 +33,7 @@
 //! benchmarked at 0.80-0.95x of this streaming version: the queue traffic and
 //! interleaved branch history cost more than the extra ILP recovers.
 
+use super::mask::{self, MaskScheme, MaskState};
 use super::{
     decode_cp, is_ascii_ws, is_digit, is_letter, scan_digits_from, scan_letters_from,
     scan_other_from,
@@ -26,15 +45,327 @@ use crate::pretokenize::Pretoken;
 // FastR50kPretokenizer
 // -----------------------------------------------------------------------
 
+/// Boundary and bad-zone bitmasks for `bytes[scan..scan+64]` (requires
+/// `scan + 64 <= bytes.len()`). Bit `k` of `usable` = a trustworthy token
+/// start at `scan + k`; `bad` marks bytes whose boundaries must be
+/// re-derived by `advance_pos`, and no token may be emitted across an
+/// unresolved bad zone.
+///
+/// NEON classifies the ASCII classes (letter, digit, space, whitespace:
+/// 4 movemasks; apostrophe and non-ASCII behind horizontal any-tests)
+/// and the boundary bits come from u64 shifted-mask algebra in scalar
+/// registers, as in `family::family_batch_masks`. Batches with any
+/// non-ASCII byte (~21% on OWT, mostly curly quotes) take
+/// [`extended_masks`]. Inlining that path here measured 0.98x, and
+/// `#[inline(never)]` on this whole function 0.94x — the split keeps the
+/// walker's register allocation clean (step 15's lesson) while the hot
+/// ASCII algebra stays inline.
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+fn batch_masks(bytes: &[u8], scan: usize) -> (u64, u64) {
+    use std::arch::aarch64::*;
+    let len = bytes.len();
+    if scan + 70 > len {
+        // Not enough lookahead for the batch-edge char classification
+        // (up to a 4-byte char starting at scan + 66); scalar batch.
+        return (0, u64::MAX);
+    }
+    unsafe {
+        let p = bytes.as_ptr().add(scan);
+        let zero = vdupq_n_u8(0);
+        let mut lv = [zero; 4];
+        let mut dv = [zero; 4];
+        let mut sv = [zero; 4];
+        let mut wsv = [zero; 4];
+        let mut hiv = [zero; 4];
+        let mut apv = [zero; 4];
+        for i in 0..4 {
+            let v = vld1q_u8(p.add(16 * i));
+            let lowered = vorrq_u8(v, vdupq_n_u8(0x20));
+            lv[i] = vcleq_u8(vsubq_u8(lowered, vdupq_n_u8(b'a')), vdupq_n_u8(25));
+            dv[i] = vcleq_u8(vsubq_u8(v, vdupq_n_u8(b'0')), vdupq_n_u8(9));
+            sv[i] = vceqq_u8(v, vdupq_n_u8(b' '));
+            wsv[i] = vorrq_u8(
+                sv[i],
+                vcleq_u8(vsubq_u8(v, vdupq_n_u8(9)), vdupq_n_u8(4)),
+            );
+            hiv[i] = vcltzq_s8(vreinterpretq_s8_u8(v));
+            apv[i] = vceqq_u8(v, vdupq_n_u8(b'\''));
+        }
+
+        let lb = mask::movemask64(lv[0], lv[1], lv[2], lv[3]);
+        let db = mask::movemask64(dv[0], dv[1], dv[2], dv[3]);
+        let s64 = mask::movemask64(sv[0], sv[1], sv[2], sv[3]);
+        let wsa = mask::movemask64(wsv[0], wsv[1], wsv[2], wsv[3]);
+        // Apostrophes only matter for the contraction fixup below.
+        let ap_any = vorrq_u8(vorrq_u8(apv[0], apv[1]), vorrq_u8(apv[2], apv[3]));
+        let ap64 = if vmaxvq_u8(ap_any) != 0 {
+            mask::movemask64(apv[0], apv[1], apv[2], apv[3])
+        } else {
+            0
+        };
+
+        // Any non-ASCII byte routes to the extended classifier, which
+        // reuses the ASCII masks computed above.
+        let hi_any = vorrq_u8(vorrq_u8(hiv[0], hiv[1]), vorrq_u8(hiv[2], hiv[3]));
+        if vmaxvq_u8(hi_any) != 0 {
+            let hi64 = mask::movemask64(hiv[0], hiv[1], hiv[2], hiv[3]);
+            return extended_masks(bytes, scan, lb, db, s64, wsa, hi64, ap64);
+        }
+
+        let ob = !(lb | db | wsa); // hi == 0 on this path
+
+        // Bit-0 carries from the char before the batch. This batch is
+        // pure ASCII, so a multi-byte prev char always ends exactly at
+        // the boundary and the walk-back gives true carries — no bad
+        // zone.
+        let (pl, pd, ps, pws, po) = if scan == 0 {
+            (0, 0, 0, 0, 0)
+        } else {
+            carries_at(bytes, scan)
+        };
+
+        let cont_same =
+            (lb & ((lb << 1) | pl)) | (db & ((db << 1) | pd)) | (ob & ((ob << 1) | po));
+        let after_sp = (s64 << 1) | ps;
+        let nb = !wsa & !cont_same & !after_sp;
+
+        // Ws-run split (`\s+(?!\S)`); bit 63 needs the real lookahead
+        // char. The ASCII case is branchless — "is byte 63 ws" is a
+        // ~20% coin flip on natural text, so testing it costs a
+        // mispredict every few batches. Only a non-ASCII lookahead
+        // byte (rare) branches, for the table-backed ws check.
+        let mut split_ok = wsa & (!wsa >> 1); // bit 63: shifted-in 0
+        let nb64 = bytes[scan + 64]; // in bounds: scan + 70 <= len
+        if nb64 < 0x80 {
+            split_ok |= (u64::from(!is_ascii_ws(nb64)) << 63) & wsa;
+        } else if wsa >> 63 != 0 && mask::nn_at_full(bytes, scan + 64) {
+            split_ok |= 1 << 63;
+        }
+        let pwsb = (wsa << 1) | pws;
+        let wsboundary = wsa & (!pwsb | split_ok);
+        let mut boundary = nb | wsboundary;
+
+        let mut bad = 0u64;
+
+        // Contraction fixup (see extended_masks for the rules).
+        if ap64 != 0 {
+            let mut cand = ap64 & boundary;
+            while cand != 0 {
+                let i = cand.trailing_zeros() as usize;
+                cand &= cand - 1;
+                if i >= 61 {
+                    bad |= u64::MAX << i;
+                    break;
+                }
+                let k = match bytes[scan + i + 1] {
+                    b's' | b'd' | b'm' | b't' => 2,
+                    b'l' if bytes[scan + i + 2] == b'l' => 3,
+                    b'v' if bytes[scan + i + 2] == b'e' => 3,
+                    b'r' if bytes[scan + i + 2] == b'e' => 3,
+                    _ => 0,
+                };
+                if k != 0 {
+                    boundary &= !(1u64 << (i + 1));
+                    boundary |= 1u64 << (i + k);
+                }
+            }
+        }
+        (boundary & !bad, bad)
+    }
+}
+
+/// Slow(er) path for batches containing non-ASCII: every unicode char in
+/// (or straddling into/out of) the batch is classified with the packed
+/// table via [`mask::classify_uni_chars`] — the same lookup the scalar
+/// path would do — and joins the per-byte effective class masks, so
+/// byte-adjacency == char-adjacency and the u64 boundary algebra applies
+/// unchanged. Takes the ASCII class masks the caller already computed
+/// (`ws64` = all ASCII whitespace).
+///
+/// Bad zones remain only for whitespace chars straddling a batch edge
+/// (their `\s+(?!\S)` bookkeeping crosses the boundary), stray
+/// continuation bytes (invalid UTF-8), and contractions at the batch
+/// edge. An earlier version pattern-matched common leads with ~95 vector
+/// ops (`mask::unicode_leads`) before falling back to per-char bad
+/// zones; the direct table loop (typical hi batch: 1-3 unicode chars,
+/// table hot in cache) plus edge-char resolution was worth ~13% end to
+/// end. `#[inline(never)]`: inlining this into the walker wrecks the
+/// clean path's register allocation (step 15).
+#[cfg(target_arch = "aarch64")]
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn extended_masks(
+    bytes: &[u8],
+    scan: usize,
+    l64: u64,
+    d64: u64,
+    s64: u64,
+    ws64: u64,
+    hi64: u64,
+    ap64: u64,
+) -> (u64, u64) {
+    let wsa = ws64;
+
+    // Bit-0 carries via the prev-char walk-back; a char straddling into
+    // this batch claims its continuation bytes with its class. Without
+    // this, every batch following a unicode char became a bad zone at
+    // bit 0, and a bad zone costs ~800 cycles in walker re-entries and
+    // cold scalar gaps.
+    let mut claim = mask::UniClasses::default();
+    let (pl, pd, ps, pws, po) = if scan == 0 {
+        (0, 0, 0, 0, 0)
+    } else if bytes[scan - 1] < 0x80 {
+        carries_at(bytes, scan)
+    } else {
+        let (cls, _lead, end) = mask::char_through(bytes, scan, unicode::class_of);
+        let chm = if end > scan { (1u64 << (end - scan)) - 1 } else { 0 };
+        claim.cont = chm;
+        match cls {
+            CharClass::Letter => {
+                claim.l = chm;
+                (1, 0, 0, 0, 0)
+            }
+            CharClass::Number => {
+                claim.n = chm;
+                (0, 1, 0, 0, 0)
+            }
+            CharClass::Other => {
+                claim.o = chm;
+                (0, 0, 0, 0, 1)
+            }
+            CharClass::Whitespace => {
+                // A ws char straddling in defers to the scalar path (its
+                // run-split bookkeeping needs the pre-batch extent) but
+                // still marks its true class for neighbors' algebra.
+                claim.ws = chm;
+                claim.resid = chm;
+                (0, 0, u64::from(bytes[scan - 1] == b' '), 1, 0)
+            }
+        }
+    };
+
+    let uni =
+        mask::classify_uni_chars::<true, false>(bytes, scan, hi64 & !claim.cont, unicode::class_of);
+
+    // Effective per-byte classes: every byte of a classified char carries
+    // the char's class, so the same algebra as the pure-ASCII path
+    // applies.
+    let lb = l64 | claim.l | uni.l;
+    let db = d64 | claim.n | uni.n;
+    let wsb = wsa | claim.ws | uni.ws;
+    let ob = !(l64 | d64 | wsa | hi64) | claim.o | uni.o;
+    let contm = claim.cont | uni.cont;
+    let resid = claim.resid | uni.resid;
+
+    let cont_same =
+        (lb & ((lb << 1) | pl)) | (db & ((db << 1) | pd)) | (ob & ((ob << 1) | po));
+    let after_sp = (s64 << 1) | ps;
+    let nb = !wsb & !cont_same & !after_sp & !contm;
+
+    // Ws-run split: char-length-aware "followed by non-ws" test. All ws
+    // chars whose lookahead crosses the batch edge look at byte 64: an
+    // ASCII ws at 63, a 2-byte ws led at 62, a 3-byte ws led at 61
+    // (later leads straddle out and are already bad zones). The ASCII
+    // case is branchless as in the fast path; multi-byte edge leads are
+    // rare enough to branch.
+    let nn = !wsb;
+    let mut split_ok = (wsa & (nn >> 1)) | (uni.w2 & (nn >> 2)) | (uni.w3 & (nn >> 3));
+    let ws_leads = wsa | uni.w2 | uni.w3;
+    let edge_mb = (uni.w2 & (1 << 62)) | (uni.w3 & (1 << 61));
+    let nb64 = bytes[scan + 64]; // in bounds: scan + 70 <= len
+    if nb64 < 0x80 && edge_mb == 0 {
+        split_ok = (split_ok & !(1 << 63)) | ((u64::from(!is_ascii_ws(nb64)) << 63) & wsa);
+    } else {
+        let edge = edge_mb | ((1 << 63) & wsa);
+        if edge != 0 {
+            if mask::nn_at_full(bytes, scan + 64) {
+                split_ok |= edge;
+            } else {
+                split_ok &= !edge;
+            }
+        }
+    }
+    let pwsb = (wsb << 1) | pws;
+    let wsboundary = ws_leads & (!pwsb | split_ok);
+    let mut boundary = nb | wsboundary;
+
+    let mut bad = resid | resid << 1 | resid >> 1;
+
+    // Contraction fixup: an apostrophe at a token start absorbs an
+    // s/d/m/t/ll/ve/re suffix. One that could reach past bit 63 defers
+    // to the scalar path (the next batch cannot see the moved boundary).
+    let mut cand = ap64 & boundary & !bad;
+    while cand != 0 {
+        let i = cand.trailing_zeros() as usize;
+        cand &= cand - 1;
+        if i >= 61 {
+            bad |= u64::MAX << i;
+            break;
+        }
+        let k = match bytes[scan + i + 1] {
+            b's' | b'd' | b'm' | b't' => 2,
+            b'l' if bytes[scan + i + 2] == b'l' => 3,
+            b'v' if bytes[scan + i + 2] == b'e' => 3,
+            b'r' if bytes[scan + i + 2] == b'e' => 3,
+            _ => 0,
+        };
+        if k != 0 {
+            boundary &= !(1u64 << (i + 1));
+            boundary |= 1u64 << (i + k);
+        }
+    }
+
+    (boundary & !bad, bad)
+}
+
+/// `(pl, pd, ps, pws, po)` boundary carries for the char ending at
+/// `scan - 1` (`scan > 0`), multi-byte aware via [`mask::char_through`].
+/// `ps` (the ` ?` absorb) is ASCII 0x20 only. The ASCII case (almost
+/// every call) is branchless — a class if-chain here is a per-batch
+/// mispredict on natural text.
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+fn carries_at(bytes: &[u8], scan: usize) -> (u64, u64, u64, u64, u64) {
+    let b = bytes[scan - 1];
+    if b < 0x80 {
+        let (l, d, w) = (is_letter(b), is_digit(b), is_ascii_ws(b));
+        let bit = |c: bool| u64::from(c);
+        return (bit(l), bit(d), bit(b == b' '), bit(w), bit(!l && !d && !w));
+    }
+    match mask::char_through(bytes, scan, unicode::class_of).0 {
+        CharClass::Letter => (1, 0, 0, 0, 0),
+        CharClass::Number => (0, 1, 0, 0, 0),
+        CharClass::Whitespace => (0, 0, 0, 1, 0),
+        CharClass::Other => (0, 0, 0, 0, 1),
+    }
+}
+pub(crate) struct R50kScheme;
+
+impl MaskScheme for R50kScheme {
+    #[inline(always)]
+    fn advance(bytes: &[u8], pos: usize) -> usize {
+        advance_pos(bytes, pos)
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[inline(always)]
+    fn batch_masks(bytes: &[u8], scan: usize) -> (u64, u64) {
+        batch_masks(bytes, scan)
+    }
+}
+
+/// On aarch64, iteration runs on the mask scanner above via the shared
+/// [`MaskState`] batch walker; elsewhere every token takes `advance_pos`.
 pub struct FastR50kPretokenizer<'a> {
     bytes: &'a [u8],
-    pos: usize,
+    state: MaskState,
 }
 
 impl<'a> FastR50kPretokenizer<'a> {
     #[inline]
     pub fn new(bytes: &'a [u8]) -> Self {
-        Self { bytes, pos: 0 }
+        Self::with_pos(bytes, 0)
     }
 
     /// Resume iteration at a byte offset previously returned by [`Self::pos`].
@@ -42,13 +373,13 @@ impl<'a> FastR50kPretokenizer<'a> {
     /// every `__next__` call.
     #[inline]
     pub fn with_pos(bytes: &'a [u8], pos: usize) -> Self {
-        Self { bytes, pos }
+        Self { bytes, state: MaskState::new(pos) }
     }
 
     /// Current position as a byte offset into the input.
     #[inline]
     pub fn pos(&self) -> usize {
-        self.pos
+        self.state.pos
     }
 }
 
@@ -57,12 +388,7 @@ impl<'a> Iterator for FastR50kPretokenizer<'a> {
 
     #[inline]
     fn next(&mut self) -> Option<Pretoken<'a>> {
-        let start = self.pos;
-        if start >= self.bytes.len() {
-            return None;
-        }
-        let end = advance_pos(self.bytes, start);
-        self.pos = end;
+        let (start, end) = self.state.next_span::<R50kScheme>(self.bytes)?;
         Some(Pretoken(&self.bytes[start..end]))
     }
 }
@@ -238,6 +564,333 @@ mod tests {
             end -= 1;
         }
         all_bytes[..end].to_vec()
+    }
+
+    /// Reference iterator: plain `advance_pos` loop (the pre-mask-scanner
+    /// implementation, itself validated against the state machine by
+    /// `fast_matches_state_machine_owt`). The differential tests check the
+    /// shipped mask-scanner iterator against it token for token.
+    struct ScalarIter<'a> {
+        bytes: &'a [u8],
+        pos: usize,
+    }
+    impl<'a> ScalarIter<'a> {
+        fn new(bytes: &'a [u8]) -> Self {
+            Self { bytes, pos: 0 }
+        }
+    }
+    impl<'a> Iterator for ScalarIter<'a> {
+        type Item = Pretoken<'a>;
+        #[inline]
+        fn next(&mut self) -> Option<Pretoken<'a>> {
+            let start = self.pos;
+            if start >= self.bytes.len() {
+                return None;
+            }
+            let end = advance_pos(self.bytes, start);
+            self.pos = end;
+            Some(Pretoken(&self.bytes[start..end]))
+        }
+    }
+
+    /// Test-local wrapper over the shared batch walker, kept because
+    /// `cargo test` builds skip fat LTO: shipped symbols are not inlined
+    /// into test loops and measure ~1.4x slow, so the interleaved perf
+    /// harness needs a locally instantiated iterator. Must produce exactly
+    /// the shipped tokenization.
+    #[cfg(target_arch = "aarch64")]
+    struct MaskIter<'a> {
+        bytes: &'a [u8],
+        state: MaskState,
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    impl<'a> MaskIter<'a> {
+        fn new(bytes: &'a [u8]) -> Self {
+            Self { bytes, state: MaskState::new(0) }
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    impl<'a> Iterator for MaskIter<'a> {
+        type Item = Pretoken<'a>;
+        #[inline]
+        fn next(&mut self) -> Option<Pretoken<'a>> {
+            let (start, end) = self.state.next_span::<R50kScheme>(self.bytes)?;
+            Some(Pretoken(&self.bytes[start..end]))
+        }
+    }
+
+    /// Token-for-token differential check of `MaskIter` vs the shipped
+    /// iterator on crafted edge cases.
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn mask_iter_matches_shipped_edge_cases() {
+        let cases: Vec<Vec<u8>> = vec![
+            b"".to_vec(),
+            b" ".to_vec(),
+            b"a".to_vec(),
+            b"hello world".to_vec(),
+            b"  double  spaces  ".to_vec(),
+            b"a\n\nb".to_vec(),
+            b"a \n b".to_vec(),
+            b"tabs\tand\nnewlines\r\n end".to_vec(),
+            b"don't can't we'll they've you're I'm he's 'tis 'twas".to_vec(),
+            b"DON'T CAN'T 'S 'LL".to_vec(),
+            b"x'y z' 'a '' ' ".to_vec(),
+            b"3.14 100,000 2nd a1b2".to_vec(),
+            b"!!! ?! #hashtag @user (paren) [brack]".to_vec(),
+            "café résumé naïve".as_bytes().to_vec(),
+            "日本語のテキスト and English".as_bytes().to_vec(),
+            "space\u{00A0}nbsp \u{00A0} runs".as_bytes().to_vec(),
+            "emoji 🎉🎊 mix".as_bytes().to_vec(),
+            "µ§±².5 ×÷".as_bytes().to_vec(),
+            b"ws at end   ".to_vec(),
+            b"   ws at start".to_vec(),
+            // Exactly chunk-sized and chunk-straddling patterns.
+            b"abcdefghijklmnop".to_vec(),
+            b"abcdefghijklmno ".to_vec(),
+            b"abcdefghijklmn 'll xyz".to_vec(),
+            b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_vec(),
+            b"a b c d e f g h i j k l m n o p q r s t u v w x".to_vec(),
+            [b"word ".repeat(10), b"\xE2\x80\x82ws".to_vec()].concat(),
+        ];
+        for (ci, case) in cases.iter().enumerate() {
+            let shipped: Vec<&[u8]> = ScalarIter::new(case).map(|t| t.0).collect();
+            let masked: Vec<&[u8]> = FastR50kPretokenizer::new(case).map(|t| t.0).collect();
+            assert_eq!(
+                shipped,
+                masked,
+                "case {ci} diverged: {:?}",
+                String::from_utf8_lossy(case)
+            );
+        }
+    }
+
+    /// Differential fuzz: random mixes of letters, digits, ws, punctuation,
+    /// apostrophes, and multi-byte UTF-8 at every length 0..~200.
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn mask_iter_matches_shipped_fuzz() {
+        let pieces: &[&str] = &[
+            "a", "B", "z", "9", "0", " ", "  ", "\n", "\t", "\r\n", "'", "'s", "'ll", "'re",
+            "!", ".", ",", "(", "é", "ß", "日", "🎉", "\u{00A0}", "\u{2003}", "word", "12",
+            "’", "’s", "“", "”", "–", "—", "…", "\u{2009}", "\u{200B}", "\u{2028}",
+            "\u{202F}", "×", "÷", "«", "µ", "café", "éé", "naïve", "Α", "а", "ſ", "'ſ",
+            "\u{661}\u{662}", "\u{FF11}", "क", "\u{940}", "\u{1D54F}", "€", "™", "\u{301}",
+        ];
+        let mut state = 0x243F6A8885A308D3u64;
+        let mut rng = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for round in 0..4000 {
+            let target = (round % 200) + 1;
+            let mut buf = Vec::new();
+            while buf.len() < target {
+                buf.extend_from_slice(pieces[(rng() % pieces.len() as u64) as usize].as_bytes());
+            }
+            let shipped: Vec<&[u8]> = ScalarIter::new(&buf).map(|t| t.0).collect();
+            let masked: Vec<&[u8]> = FastR50kPretokenizer::new(&buf).map(|t| t.0).collect();
+            assert_eq!(
+                shipped,
+                masked,
+                "round {round} diverged on {:?}",
+                String::from_utf8_lossy(&buf)
+            );
+        }
+    }
+
+    /// Differential check on the FULL OWT file (~11.9 GB), token for token.
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    #[ignore]
+    fn mask_iter_matches_shipped_owt_full() {
+        let input = load_owt(usize::MAX);
+        eprintln!("loaded {} bytes", input.len());
+        let mut shipped = ScalarIter::new(&input);
+        let mut masked = FastR50kPretokenizer::new(&input);
+        let mut idx = 0usize;
+        loop {
+            match (shipped.next(), masked.next()) {
+                (Some(a), Some(b)) => {
+                    if a.0 != b.0 {
+                        panic!(
+                            "token {idx} diverged: scalar={:?} masked={:?}",
+                            String::from_utf8_lossy(a.0),
+                            String::from_utf8_lossy(b.0)
+                        );
+                    }
+                }
+                (None, None) => break,
+                (a, b) => panic!("length mismatch at {idx}: {:?} vs {:?}", a.is_some(), b.is_some()),
+            }
+            idx += 1;
+        }
+        eprintln!("all {idx} tokens match on full OWT");
+    }
+
+    /// Differential check on real OWT (100 MB), token for token.
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    #[ignore]
+    fn mask_iter_matches_shipped_owt() {
+        let input = load_owt(100_000_000);
+        let mut shipped = ScalarIter::new(&input);
+        let mut masked = FastR50kPretokenizer::new(&input);
+        let mut idx = 0usize;
+        loop {
+            match (shipped.next(), masked.next()) {
+                (Some(a), Some(b)) => assert_eq!(
+                    a.0,
+                    b.0,
+                    "token {idx} diverged: shipped={:?} masked={:?}",
+                    String::from_utf8_lossy(a.0),
+                    String::from_utf8_lossy(b.0)
+                ),
+                (None, None) => break,
+                (a, b) => panic!("length mismatch at {idx}: {:?} vs {:?}", a.is_some(), b.is_some()),
+            }
+            idx += 1;
+        }
+        eprintln!("all {idx} tokens match");
+    }
+
+    /// Iterator-level interleaved A/B: local copy of the shipped scalar
+    /// iterator vs the mask scanner. Both variants are LOCAL copies: test
+    /// builds skip fat LTO, so shipped symbols are not inlined here and
+    /// measure ~1.4x slow (see project memory / step 14 of the log).
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    #[ignore]
+    fn ab_r50k_mask_iter_interleaved() {
+        fn drive_scalar(input: &[u8]) -> (usize, u64) {
+            let mut n = 0usize;
+            let mut acc = 0u64;
+            for t in ScalarIter::new(input) {
+                std::hint::black_box(t.0);
+                acc = acc.wrapping_add(t.0.len() as u64);
+                n += 1;
+            }
+            (n, acc)
+        }
+        fn drive_mask(input: &[u8]) -> (usize, u64) {
+            let mut n = 0usize;
+            let mut acc = 0u64;
+            for t in MaskIter::new(input) {
+                std::hint::black_box(t.0);
+                acc = acc.wrapping_add(t.0.len() as u64);
+                n += 1;
+            }
+            (n, acc)
+        }
+
+        let input = load_owt(100_000_000);
+        let mb = input.len() as f64 / 1e6;
+        let a = drive_scalar(&input);
+        let b = drive_mask(&input);
+        assert_eq!(a, b, "variants disagree");
+
+        let (mut best_a, mut best_b) = (f64::INFINITY, f64::INFINITY);
+        for round in 0..7 {
+            let t = std::time::Instant::now();
+            std::hint::black_box(drive_scalar(&input));
+            let da = t.elapsed().as_secs_f64();
+            let t = std::time::Instant::now();
+            std::hint::black_box(drive_mask(&input));
+            let db = t.elapsed().as_secs_f64();
+            best_a = best_a.min(da);
+            best_b = best_b.min(db);
+            eprintln!(
+                "round {round}: scalar {:.0} MB/s | mask {:.0} MB/s",
+                mb / da,
+                mb / db
+            );
+        }
+        eprintln!(
+            "best: scalar {:.0} MB/s | mask {:.0} MB/s | mask/scalar {:.3}x",
+            mb / best_a,
+            mb / best_b,
+            best_a / best_b
+        );
+    }
+
+    /// Diagnostics for the mask scanner: fallback rate on real OWT, and
+    /// mask-vs-scalar throughput on a sanitized buffer (apostrophes and
+    /// non-ASCII replaced) that never triggers the fallback.
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    #[ignore]
+    fn mask_iter_diagnostics() {
+        let input = load_owt(100_000_000);
+
+        // Bad-zone census: dirty batches, and bytes covered by the first
+        // gap (prefix end to resume point) as a scalar-work proxy.
+        let (mut batches, mut dirty_batches, mut gap_bytes) = (0usize, 0usize, 0u64);
+        let mut scan = 0usize;
+        while scan + 64 <= input.len() {
+            let (usable, bad) = batch_masks(&input, scan);
+            batches += 1;
+            if bad != 0 {
+                dirty_batches += 1;
+                let first_bad = bad.trailing_zeros();
+                let rest = usable & (u64::MAX << first_bad);
+                let resume = if rest != 0 { rest.trailing_zeros() } else { 64 };
+                gap_bytes += u64::from(resume - first_bad);
+            }
+            scan += 64;
+        }
+        eprintln!(
+            "batches: {batches}, dirty: {dirty_batches} ({:.2}%), first-gap bytes {:.2}%",
+            100.0 * dirty_batches as f64 / batches as f64,
+            100.0 * gap_bytes as f64 / input.len() as f64
+        );
+
+        // Sanitized buffer: no apostrophes, no high bytes.
+        let clean: Vec<u8> = input
+            .iter()
+            .map(|&b| if b >= 0x80 || b == b'\'' { b'x' } else { b })
+            .collect();
+        let mb = clean.len() as f64 / 1e6;
+
+        fn drive<'a, I: Iterator<Item = Pretoken<'a>>>(it: I) -> (usize, u64) {
+            let mut n = 0usize;
+            let mut acc = 0u64;
+            for t in it {
+                std::hint::black_box(t.0);
+                acc = acc.wrapping_add(t.0.len() as u64);
+                n += 1;
+            }
+            (n, acc)
+        }
+        assert_eq!(
+            drive(ScalarIter::new(&clean)),
+            drive(MaskIter::new(&clean))
+        );
+        let (mut best_a, mut best_b) = (f64::INFINITY, f64::INFINITY);
+        for round in 0..5 {
+            let t = std::time::Instant::now();
+            std::hint::black_box(drive(ScalarIter::new(&clean)));
+            let da = t.elapsed().as_secs_f64();
+            let t = std::time::Instant::now();
+            std::hint::black_box(drive(MaskIter::new(&clean)));
+            let db = t.elapsed().as_secs_f64();
+            best_a = best_a.min(da);
+            best_b = best_b.min(db);
+            eprintln!(
+                "clean round {round}: scalar {:.0} MB/s | mask {:.0} MB/s",
+                mb / da,
+                mb / db
+            );
+        }
+        eprintln!(
+            "clean best: scalar {:.0} | mask {:.0} MB/s | {:.3}x",
+            mb / best_a,
+            mb / best_b,
+            best_a / best_b
+        );
     }
 
     #[test]
@@ -458,4 +1111,5 @@ mod tests {
             best_a / best_b
         );
     }
+
 }

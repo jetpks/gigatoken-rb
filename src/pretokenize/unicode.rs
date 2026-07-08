@@ -154,6 +154,20 @@ pub(crate) enum DsCharClass {
     Other = 5,
 }
 
+/// Four-class view for schemes whose regex joins `\p{M}` into letter
+/// runs and excludes it from punctuation runs (Qwen3.5's
+/// `[\p{L}\p{M}]+` / `[^\s\p{L}\p{M}\p{N}]+`): marks classify as
+/// letters, everything else as in [`class_of`].
+#[inline(always)]
+pub(crate) fn class_of_marks_join(cp: u32) -> CharClass {
+    match ds_class_of(cp) {
+        DsCharClass::Letter | DsCharClass::Mark => CharClass::Letter,
+        DsCharClass::Number => CharClass::Number,
+        DsCharClass::Whitespace => CharClass::Whitespace,
+        DsCharClass::PunctSym | DsCharClass::Other => CharClass::Other,
+    }
+}
+
 /// 4-bit class per codepoint, 2 codepoints per byte (~544 KiB total).
 static DS_CLASS_TABLE: std::sync::LazyLock<Box<[u8]>> =
     std::sync::LazyLock::new(build_ds_class_table);

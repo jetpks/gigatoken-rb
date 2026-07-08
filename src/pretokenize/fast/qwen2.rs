@@ -1,4 +1,7 @@
-//! Fast scalar pretokenizer for the Qwen2/Qwen3 regex:
+//! Fast pretokenizer for the Qwen2/Qwen3 regex — on aarch64 a mask
+//! scanner via the shared `family::family_batch_masks` boundary algebra
+//! (single-digit mode), with the scalar `advance_pos` below as reference,
+//! non-aarch64 fallback, and bad-zone/tail executor:
 //! `(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+`
 //!
 //! Differences from the cl100k scheme:
@@ -8,31 +11,51 @@
 //!   even at EOS, and the remaining whitespace becomes a separate token
 //!   (cl100k keeps trailing whitespace at EOS as one token via `\s+$`)
 
+use super::family::family_batch_masks;
+use super::mask::{MaskScheme, MaskState};
 use super::{decode_cp, is_ascii_ws, is_digit, is_letter, scan_letters_from, scan_other_from};
 use crate::pretokenize::unicode::{self, CharClass};
 use crate::pretokenize::Pretoken;
 
+pub(crate) struct Qwen2Scheme;
+
+impl MaskScheme for Qwen2Scheme {
+    #[inline(always)]
+    fn advance(bytes: &[u8], pos: usize) -> usize {
+        advance_pos(bytes, pos)
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[inline(always)]
+    fn batch_masks(bytes: &[u8], scan: usize) -> (u64, u64) {
+        family_batch_masks(bytes, scan, false, unicode::class_of)
+    }
+}
+
+/// On aarch64, iteration runs the shared cl100k-family mask scanner (see
+/// `family::family_batch_masks`); elsewhere every token takes the scalar
+/// `advance_pos`.
 pub struct FastQwen2Pretokenizer<'a> {
     bytes: &'a [u8],
-    pos: usize,
+    state: MaskState,
 }
 
 impl<'a> FastQwen2Pretokenizer<'a> {
     #[inline]
     pub fn new(bytes: &'a [u8]) -> Self {
-        Self { bytes, pos: 0 }
+        Self::with_pos(bytes, 0)
     }
 
     /// Resume iteration at a byte offset previously returned by [`Self::pos`].
     #[inline]
     pub fn with_pos(bytes: &'a [u8], pos: usize) -> Self {
-        Self { bytes, pos }
+        Self { bytes, state: MaskState::new(pos) }
     }
 
     /// Current position as a byte offset into the input.
     #[inline]
     pub fn pos(&self) -> usize {
-        self.pos
+        self.state.pos
     }
 }
 
@@ -41,12 +64,8 @@ impl<'a> Iterator for FastQwen2Pretokenizer<'a> {
 
     #[inline]
     fn next(&mut self) -> Option<Pretoken<'a>> {
-        if self.pos >= self.bytes.len() {
-            return None;
-        }
-        let start = self.pos;
-        self.pos = advance_pos(self.bytes, start);
-        Some(Pretoken(&self.bytes[start..self.pos]))
+        let (start, end) = self.state.next_span::<Qwen2Scheme>(self.bytes)?;
+        Some(Pretoken(&self.bytes[start..end]))
     }
 }
 

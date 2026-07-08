@@ -1,4 +1,7 @@
-//! Fast scalar pretokenizer for the Olmo 2/3 (dolma2) regex:
+//! Fast pretokenizer for the Olmo 2/3 (dolma2) regex — on aarch64 a mask
+//! scanner via the shared `family::family_batch_masks` boundary algebra,
+//! with the scalar `advance_pos` below as reference, non-aarch64 fallback,
+//! and bad-zone/tail executor:
 //! `(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+`
 //!
 //! This is the Qwen2 scheme with cl100k's number rule: `\p{N}{1,3}` matches
@@ -6,6 +9,8 @@
 //! else — contractions, letter-run prefixes, the `\s*[\r\n]+` newline rule
 //! outranking end-of-input whitespace — is identical to Qwen2.
 
+use super::family::family_batch_masks;
+use super::mask::{MaskScheme, MaskState};
 use super::{
     decode_cp, is_ascii_ws, is_digit, is_letter, scan_letters_from, scan_numbers_max3,
     scan_other_from,
@@ -13,27 +18,45 @@ use super::{
 use crate::pretokenize::Pretoken;
 use crate::pretokenize::unicode::{self, CharClass};
 
+pub(crate) struct Olmo3Scheme;
+
+impl MaskScheme for Olmo3Scheme {
+    #[inline(always)]
+    fn advance(bytes: &[u8], pos: usize) -> usize {
+        advance_pos(bytes, pos)
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[inline(always)]
+    fn batch_masks(bytes: &[u8], scan: usize) -> (u64, u64) {
+        family_batch_masks(bytes, scan, true, unicode::class_of)
+    }
+}
+
+/// On aarch64, iteration runs the shared cl100k-family mask scanner (see
+/// `family::family_batch_masks`); elsewhere every token takes the scalar
+/// `advance_pos`.
 pub struct FastOlmo3Pretokenizer<'a> {
     bytes: &'a [u8],
-    pos: usize,
+    state: MaskState,
 }
 
 impl<'a> FastOlmo3Pretokenizer<'a> {
     #[inline]
     pub fn new(bytes: &'a [u8]) -> Self {
-        Self { bytes, pos: 0 }
+        Self::with_pos(bytes, 0)
     }
 
     /// Resume iteration at a byte offset previously returned by [`Self::pos`].
     #[inline]
     pub fn with_pos(bytes: &'a [u8], pos: usize) -> Self {
-        Self { bytes, pos }
+        Self { bytes, state: MaskState::new(pos) }
     }
 
     /// Current position as a byte offset into the input.
     #[inline]
     pub fn pos(&self) -> usize {
-        self.pos
+        self.state.pos
     }
 }
 
@@ -42,12 +65,8 @@ impl<'a> Iterator for FastOlmo3Pretokenizer<'a> {
 
     #[inline]
     fn next(&mut self) -> Option<Pretoken<'a>> {
-        if self.pos >= self.bytes.len() {
-            return None;
-        }
-        let start = self.pos;
-        self.pos = advance_pos(self.bytes, start);
-        Some(Pretoken(&self.bytes[start..self.pos]))
+        let (start, end) = self.state.next_span::<Olmo3Scheme>(self.bytes)?;
+        Some(Pretoken(&self.bytes[start..end]))
     }
 }
 

@@ -6,6 +6,9 @@
 //! as another submodule reusing these primitives where its character
 //! classes line up.
 
+pub(crate) mod family;
+pub(crate) mod mask;
+
 pub mod cl100k;
 pub mod deepseek_v3;
 pub mod olmo3;

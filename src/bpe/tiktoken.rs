@@ -83,6 +83,20 @@ fn nfc_segment<'a>(seg: &'a [u8], buf: &'a mut String) -> &'a [u8] {
 /// any per-byte branching. The load is only taken when it cannot cross a page
 /// boundary, so it can never touch an unmapped page; the rare near-boundary case
 /// falls back to a plain copy. Both paths produce the identical key.
+/// Per-length `(mask, length-tag)` pairs for [`pack_pretoken_key`]: one 512-byte
+/// L1-resident table lookup replaces a 128-bit variable shift + sub + tag shift
+/// (u128 shifts lower to a multi-instruction sequence on aarch64).
+const PACK_MASK_TAG: [(u128, u128); 16] = {
+    let mut t = [(0u128, 0u128); 16];
+    let mut n = 0;
+    while n < 16 {
+        let mask = if n == 0 { 0 } else { u128::MAX >> (8 * (16 - n)) };
+        t[n] = (mask, (n as u128) << 120);
+        n += 1;
+    }
+    t
+};
+
 #[inline(always)]
 fn pack_pretoken_key(bytes: &[u8]) -> Option<u128> {
     let n = bytes.len();
@@ -90,9 +104,9 @@ fn pack_pretoken_key(bytes: &[u8]) -> Option<u128> {
         return None;
     }
     let p = bytes.as_ptr();
-    // Keep the low `n` bytes, zero the rest. `n <= 15`, so the shift is < 128
-    // and lane 15 stays zero, ready for the length tag.
-    let mask = (1u128 << (n * 8)) - 1;
+    // Keep the low `n` bytes, zero the rest; lane 15 stays zero, ready for the
+    // length tag.
+    let (mask, tag) = PACK_MASK_TAG[n];
     let low = if (p as usize) & 4095 <= 4096 - 16 {
         // SAFETY: the offset within the (≥ 4096-byte) page is ≤ 4096 - 16, so a
         // 16-byte read stays inside the page holding `p`, which is mapped
@@ -106,7 +120,7 @@ fn pack_pretoken_key(bytes: &[u8]) -> Option<u128> {
         lanes[..n].copy_from_slice(bytes);
         u128::from_le_bytes(lanes) & mask
     };
-    Some(low | ((n as u128) << 120))
+    Some(low | tag)
 }
 
 /// Tokenize a single pretoken by repeatedly applying BPE merges in order.
@@ -394,7 +408,10 @@ impl Tokenizer {
             };
             if let Some((offset, len)) = cached {
                 let start = offset as usize;
-                f(&self.token_arena[start..start + len as usize]);
+                // SAFETY: every cached (offset, len) was recorded right after
+                // appending those `len` tokens at `offset`, and `token_arena`
+                // never shrinks, so the range is always in bounds.
+                f(unsafe { self.token_arena.get_unchecked(start..start + len as usize) });
             } else {
                 // Encode into reusable scratch and append straight to the
                 // arena: no intermediate `Vec`, no `Cow` remap allocation.
