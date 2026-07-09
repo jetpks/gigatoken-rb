@@ -17,11 +17,26 @@ pub struct ByteRemapping {
     mapping: Vec<TokenId>,
 }
 
+/// Whether `b` can appear anywhere in a valid UTF-8 byte stream. `0xC0`/`0xC1`
+/// are overlong two-byte leads and `0xF5..=0xFF` encode code points beyond
+/// U+10FFFF, so none of them ever occur in valid UTF-8.
+fn is_valid_utf8_byte(b: u8) -> bool {
+    !matches!(b, 0xC0 | 0xC1 | 0xF5..=0xFF)
+}
+
 impl ByteRemapping {
     /// Build the byte → token-ID table by scanning `vocab` for single-byte
     /// entries (lowest ID wins). Returns `None` when the mapping is the
     /// identity (token ID == byte value), and an error if some byte value
-    /// has no single-byte token.
+    /// that can appear in valid UTF-8 has no single-byte token.
+    ///
+    /// A vocab may legitimately omit single-byte tokens for the bytes that
+    /// never occur in valid UTF-8 (`0xC0`, `0xC1`, and `0xF5..=0xFF` — overlong
+    /// and out-of-range lead bytes). Byte-level vocabularies trained only on
+    /// UTF-8 text — e.g. ModernBERT / GPT-NeoX — drop them. Since such a byte
+    /// can never reach the merge loop from valid input, its absence is not an
+    /// error; we fill it with a placeholder ID so the table can never yield an
+    /// out-of-range `TokenId` even if fed malformed bytes.
     pub fn from_byte_vocab(vocab: &[impl AsRef<[u8]>]) -> Result<Option<Self>> {
         const UNSET: u32 = u32::MAX;
         let mut mapping = vec![TokenId::from(UNSET); 256];
@@ -32,10 +47,21 @@ impl ByteRemapping {
                 mapping[b as usize] = TokenId::from(id as u32);
             }
         }
-        if let Some(missing) = mapping.iter().position(|t| t.0 == UNSET) {
+        if let Some(missing) = mapping
+            .iter()
+            .enumerate()
+            .position(|(b, t)| t.0 == UNSET && is_valid_utf8_byte(b as u8))
+        {
             return Err(anyhow!(
                 "Byte remapping failed: no single-byte vocab entry for byte {missing:#04x}"
             ));
+        }
+        // Fill the tolerated (never-in-UTF-8) gaps with a safe placeholder so
+        // an unexpected malformed byte indexes a valid token instead of OOB.
+        for t in mapping.iter_mut() {
+            if t.0 == UNSET {
+                *t = TokenId::from(0);
+            }
         }
         Ok(mapping
             .iter()

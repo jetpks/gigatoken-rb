@@ -41,11 +41,14 @@ pub struct Tokenizer {
     pub(crate) pretokenizer_type: PretokenizerType,
     /// Added tokens (special and non-special), matched atomically in the raw
     /// input before pretokenization, like HuggingFace's AddedVocabulary.
-    /// Sorted by content length descending so the first match at a position
-    /// is the longest (leftmost-longest semantics).
     added_tokens: Vec<(Arc<[u8]>, TokenId)>,
-    /// Distinct first bytes of `added_tokens`, for the candidate scan.
-    added_first_bytes: Vec<u8>,
+    /// Leftmost-longest Aho-Corasick automaton over `added_tokens` contents
+    /// (pattern index == `added_tokens` index). A prebuilt automaton keeps the
+    /// scan fast even when an added token starts with a byte that is common in
+    /// text (ModernBERT has 23 space-run added tokens, so a first-byte
+    /// candidate scan would probe on every space). Clones share the automaton
+    /// via its internal `Arc`.
+    added_matcher: Option<aho_corasick::AhoCorasick>,
     /// Apply NFC normalization to non-added-token segments before
     /// pretokenization, like HuggingFace's `NFC` normalizer (e.g. Qwen2).
     normalize_nfc: bool,
@@ -178,7 +181,7 @@ impl Tokenizer {
             symbol_scratch: Vec::new(),
             pretokenizer_type: PretokenizerType::GPT2,
             added_tokens: Vec::new(),
-            added_first_bytes: Vec::new(),
+            added_matcher: None,
             normalize_nfc: false,
         }
     }
@@ -225,7 +228,7 @@ impl Tokenizer {
             symbol_scratch: Vec::new(),
             pretokenizer_type: PretokenizerType::GPT2,
             added_tokens: Vec::new(),
-            added_first_bytes: Vec::new(),
+            added_matcher: None,
             normalize_nfc: false,
         })
     }
@@ -247,7 +250,7 @@ impl Tokenizer {
             symbol_scratch: Vec::new(),
             pretokenizer_type: self.pretokenizer_type,
             added_tokens: self.added_tokens.clone(),
-            added_first_bytes: self.added_first_bytes.clone(),
+            added_matcher: self.added_matcher.clone(),
             normalize_nfc: self.normalize_nfc,
         }
     }
@@ -275,11 +278,13 @@ impl Tokenizer {
             .map(|(content, id)| (content.into(), id))
             .collect();
         added_tokens.sort_by_key(|(content, _)| std::cmp::Reverse(content.len()));
-        let mut first_bytes: Vec<u8> = added_tokens.iter().map(|(c, _)| c[0]).collect();
-        first_bytes.sort_unstable();
-        first_bytes.dedup();
+        self.added_matcher = (!added_tokens.is_empty()).then(|| {
+            aho_corasick::AhoCorasick::builder()
+                .match_kind(aho_corasick::MatchKind::LeftmostLongest)
+                .build(added_tokens.iter().map(|(c, _)| c.as_ref()))
+                .expect("added-token automaton construction cannot fail")
+        });
         self.added_tokens = added_tokens;
-        self.added_first_bytes = first_bytes;
     }
 
     /// Register one additional added token, extending the decode vocab when
@@ -315,30 +320,9 @@ impl Tokenizer {
     /// the longest token when several match at the same position. Returns
     /// `(start, end, id)`.
     fn find_added_token(&self, bytes: &[u8], from: usize) -> Option<(usize, usize, TokenId)> {
-        if self.added_tokens.is_empty() {
-            return None;
-        }
-        let hay = &bytes[from..];
-        let candidates: Box<dyn Iterator<Item = usize> + '_> =
-            match self.added_first_bytes.as_slice() {
-                &[a] => Box::new(memchr::memchr_iter(a, hay)),
-                &[a, b] => Box::new(memchr::memchr2_iter(a, b, hay)),
-                &[a, b, c] => Box::new(memchr::memchr3_iter(a, b, c, hay)),
-                firsts => Box::new(
-                    hay.iter()
-                        .enumerate()
-                        .filter(move |(_, b)| firsts.contains(b))
-                        .map(|(i, _)| i),
-                ),
-            };
-        for cand in candidates {
-            for (content, id) in &self.added_tokens {
-                if hay[cand..].starts_with(content) {
-                    return Some((from + cand, from + cand + content.len(), *id));
-                }
-            }
-        }
-        None
+        let m = self.added_matcher.as_ref()?.find(&bytes[from..])?;
+        let id = self.added_tokens[m.pattern().as_usize()].1;
+        Some((from + m.start(), from + m.end(), id))
     }
 
     /// Encode raw text: split out added-token occurrences (emitted as their
