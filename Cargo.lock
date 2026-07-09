@@ -1113,7 +1113,6 @@ dependencies = [
  "pyo3",
  "rand 0.10.0",
  "rayon",
- "regex",
  "rustc-hash",
  "serde",
  "simdutf",
