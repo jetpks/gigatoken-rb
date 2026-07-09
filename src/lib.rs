@@ -10,9 +10,9 @@ pub(crate) mod simd;
 pub(crate) mod token;
 pub(crate) mod unicode_tables;
 pub mod utils;
-use crate::bpe::Tokenizer;
+pub use crate::bpe::Tokenizer;
 use crate::input::file_source::{
-    chunk_ranges, detect_default_format, load_file, DocFormat, FileSourceSpec, LoadedFile,
+    DocFormat, FileSourceSpec, LoadedFile, chunk_ranges, detect_default_format, load_file,
 };
 use crate::input::{DocumentIter, MmappedFile, Resource};
 pub mod load_tokenizer;
@@ -553,19 +553,19 @@ const MIN_CHUNK_BYTES: usize = 1 << 20;
 /// Target bytes per parallel chunk: ~4 chunks per thread for work-stealing
 /// load balancing, floored at MIN_CHUNK_BYTES so chunks stay coarse.
 fn chunk_target_bytes(total_bytes: usize) -> usize {
-    (total_bytes / (4 * rayon::current_num_threads())).max(MIN_CHUNK_BYTES)
+    (total_bytes / (16 * rayon::current_num_threads())).max(MIN_CHUNK_BYTES)
 }
 
 /// Persistent pool of forked tokenizer workers used by encode_batch and
 /// encode_files. One slot per rayon thread, forked lazily on first use and
 /// retained for the tokenizer's lifetime, so each worker's pretoken cache
 /// stays warm when encoding is invoked repeatedly (e.g. in a loop).
-struct WorkerPool {
+pub struct WorkerPool {
     slots: OnceLock<Vec<Mutex<Option<Tokenizer>>>>,
 }
 
 impl WorkerPool {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             slots: OnceLock::new(),
         }
@@ -647,17 +647,27 @@ struct BPETokenizer {
     workers: WorkerPool,
 }
 
+/// Shared core of encode_batch / encode_files for pre-resolved document
+/// slices: chunk (splitting oversized documents at pretoken-safe
+/// boundaries), encode with pooled workers, and assemble the ragged result
+/// (one flat id buffer plus per-document row lengths). Public so Rust
+/// benches exercise the identical parallel path as the Python bindings.
+pub fn encode_docs_ragged(
+    workers: &WorkerPool,
+    proto: &Tokenizer,
+    docs: &[&[u8]],
+) -> (Vec<u32>, Vec<i64>) {
+    let total: usize = docs.iter().map(|d| d.len()).sum();
+    let added = proto.added_token_contents();
+    let chunks = build_doc_chunks(docs, chunk_target_bytes(total), &added);
+    let outs = encode_chunks_pooled(workers, proto, &chunks);
+    assemble_ragged(outs)
+}
+
 impl BPETokenizer {
-    /// Shared core of encode_batch / encode_files for pre-resolved document
-    /// slices: chunk (splitting oversized documents at pretoken-safe
-    /// boundaries), encode with pooled workers, and assemble the ragged
-    /// result. Call with the GIL released.
+    /// See `encode_docs_ragged`. Call with the GIL released.
     fn encode_slices_ragged(&self, docs: &[&[u8]]) -> (Vec<u32>, Vec<i64>) {
-        let total: usize = docs.iter().map(|d| d.len()).sum();
-        let added = self.tokenizer.added_token_contents();
-        let chunks = build_doc_chunks(docs, chunk_target_bytes(total), &added);
-        let outs = encode_chunks_pooled(&self.workers, &self.tokenizer, &chunks);
-        assemble_ragged(outs)
+        encode_docs_ragged(&self.workers, &self.tokenizer, docs)
     }
 }
 
@@ -755,12 +765,12 @@ impl BPETokenizer {
                 .iter()
                 .flat_map(|f| {
                     let bytes = f.as_bytes();
-                    chunk_ranges(bytes, &format, target).into_iter().map(|r| {
-                        EncodeChunk::Region {
+                    chunk_ranges(bytes, &format, target)
+                        .into_iter()
+                        .map(|r| EncodeChunk::Region {
                             bytes: &bytes[r],
                             format: &format,
-                        }
-                    })
+                        })
                 })
                 .collect();
             let outs = encode_chunks_pooled(&self.workers, &self.tokenizer, &chunks);
@@ -770,17 +780,17 @@ impl BPETokenizer {
     }
 
     fn decode(&self, tokens: Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
-        let token_ids: Vec<crate::token::TokenId> =
-            if let Ok(arr) = tokens.cast::<PyArray1<u32>>() {
-                let arr = arr.readonly();
-                arr.as_slice()?.iter().map(|&t| t.into()).collect()
-            } else {
-                tokens
-                    .extract::<Vec<u32>>()?
-                    .into_iter()
-                    .map(Into::into)
-                    .collect()
-            };
+        let token_ids: Vec<crate::token::TokenId> = if let Ok(arr) = tokens.cast::<PyArray1<u32>>()
+        {
+            let arr = arr.readonly();
+            arr.as_slice()?.iter().map(|&t| t.into()).collect()
+        } else {
+            tokens
+                .extract::<Vec<u32>>()?
+                .into_iter()
+                .map(Into::into)
+                .collect()
+        };
         Ok(self.tokenizer.decode(&token_ids).collect())
     }
 
@@ -976,17 +986,17 @@ impl SentencePieceTokenizer {
     }
 
     fn decode(&self, tokens: Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
-        let token_ids: Vec<crate::token::TokenId> =
-            if let Ok(arr) = tokens.cast::<PyArray1<u32>>() {
-                let arr = arr.readonly();
-                arr.as_slice()?.iter().map(|&t| t.into()).collect()
-            } else {
-                tokens
-                    .extract::<Vec<u32>>()?
-                    .into_iter()
-                    .map(Into::into)
-                    .collect()
-            };
+        let token_ids: Vec<crate::token::TokenId> = if let Ok(arr) = tokens.cast::<PyArray1<u32>>()
+        {
+            let arr = arr.readonly();
+            arr.as_slice()?.iter().map(|&t| t.into()).collect()
+        } else {
+            tokens
+                .extract::<Vec<u32>>()?
+                .into_iter()
+                .map(Into::into)
+                .collect()
+        };
         Ok(self.tokenizer.decode(&token_ids))
     }
 
