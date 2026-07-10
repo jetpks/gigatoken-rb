@@ -42,6 +42,12 @@ TOKENIZER_SPECS = {
             eot_id=248044,
             normalizes_nfc=True,
         ),
+        TokenizerSpec(
+            name="modernbert",
+            eot_text="<|endoftext|>",
+            eot_id=50279,
+            normalizes_nfc=True,
+        ),
         TokenizerSpec(name="deepseek_v3", eot_text="<｜end▁of▁sentence｜>", eot_id=1),
         TokenizerSpec(name="deepseek_v4", eot_text="<｜end▁of▁sentence｜>", eot_id=1),
     ]

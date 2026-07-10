@@ -33,7 +33,11 @@ DOC_BYTES = 1024 * 1024  # target document size within a slab
 
 
 def _assert_ids_match(hf_tok, gigatok_tok, text: str):
-    hf_ids = hf_tok.encode(text).ids
+    # add_special_tokens=False: gigatok encodes raw text without template
+    # wrapping, so HF post-processors that inject tokens (ModernBERT's
+    # TemplateProcessing adds [CLS]/[SEP]) must be disabled. A no-op for the
+    # other tokenizers, whose ByteLevel post-processors add nothing.
+    hf_ids = hf_tok.encode(text, add_special_tokens=False).ids
     gigatok_ids = gigatok_tok.encode(text.encode("utf-8")).tolist()
     assert gigatok_ids == hf_ids, (
         f"Mismatch for {text!r}:\n  HF:    {hf_ids}\n  gigatok: {gigatok_ids}"
@@ -226,7 +230,7 @@ def test_owt_matches_hf(hf_tok, gigatok_tok):
         docs = _split_docs(slab)
         texts = [d.decode("utf-8") for d in docs]
 
-        hf_encodings = hf_tok.encode_batch_fast(texts)
+        hf_encodings = hf_tok.encode_batch_fast(texts, add_special_tokens=False)
         gigatok_arrays = gigatok_tok.encode_batch(docs)
 
         for i, (enc, jt) in enumerate(zip(hf_encodings, gigatok_arrays)):

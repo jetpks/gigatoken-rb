@@ -121,6 +121,15 @@ def deepseek_v4_tokenizer_path() -> Path:
 
 
 @pytest.fixture(scope="session")
+def modernbert_tokenizer_path() -> Path:
+    """Path to ModernBERT-base tokenizer.json, downloaded from HF if absent."""
+    return _download_hf_tokenizer(
+        "answerdotai/ModernBERT-base",
+        "modernbert_tokenizer.json",
+    )
+
+
+@pytest.fixture(scope="session")
 def olmo3_tokenizer_path() -> Path:
     """Path to Olmo3 (dolma2) tokenizer.json, downloaded from HF if absent."""
     return _download_hf_tokenizer(
