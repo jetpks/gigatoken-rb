@@ -1,11 +1,12 @@
 //! Per-scheme variant of `pretokenize_profile`: same single-pass loop over
 //! OWT with every yielded pretoken black_boxed, scheme selected via the
-//! SCHEME env var (r50k | cl100k | olmo3 | qwen2 | qwen3_5). Used for
-//! interleaved A/B runs of the mask-scanner schemes.
+//! SCHEME env var (r50k | cl100k | olmo3 | qwen2 | qwen3_5 | deepseek_v3).
+//! r50k is also what ByteLevel tokenizers like ModernBERT resolve to. Used
+//! for interleaved A/B runs of the mask-scanner schemes.
 
 use gigatok_rs::pretokenize::{
-    FastCl100kPretokenizer, FastOlmo3Pretokenizer, FastQwen2Pretokenizer,
-    FastQwen35Pretokenizer, FastR50kPretokenizer,
+    FastCl100kPretokenizer, FastDeepSeekV3Pretokenizer, FastOlmo3Pretokenizer,
+    FastQwen2Pretokenizer, FastQwen35Pretokenizer, FastR50kPretokenizer,
 };
 use std::hint::black_box;
 use std::time::Instant;
@@ -77,6 +78,7 @@ fn main() {
         "olmo3" => drive!(FastOlmo3Pretokenizer, buf),
         "qwen2" => drive!(FastQwen2Pretokenizer, buf),
         "qwen3_5" => drive!(FastQwen35Pretokenizer, buf),
+        "deepseek_v3" => drive!(FastDeepSeekV3Pretokenizer, buf),
         other => panic!("unknown SCHEME {other:?}"),
     };
     let elapsed = start.elapsed().as_secs_f64();
