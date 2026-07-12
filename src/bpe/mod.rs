@@ -3,13 +3,13 @@ pub mod tiktoken;
 
 use crate::token::TokenId;
 use eyre::{Result, anyhow};
-use itertools::Itertools;
 use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
 // ByteRemapping — shared between tokenizer types
 // ---------------------------------------------------------------------------
 
+#[derive(Clone)]
 pub struct ByteRemapping {
     /// Maps each byte value to the token ID of its single-byte vocab entry.
     /// The IDs need not be < 256 (e.g. DeepSeek puts its byte tokens at
@@ -285,29 +285,94 @@ fn bpe_merge_symbols_small<S: std::hash::BuildHasher>(
     symbols.truncate(write);
 }
 
-/// Naive O(n^2) BPE merge for very short sequences where heap overhead isn't worth it.
-#[allow(dead_code)]
-fn bpe_merge_symbols_naive<S: std::hash::BuildHasher>(
-    merges: &HashMap<(TokenId, TokenId), TokenId, S>,
+/// Vocabulary entries as `(id, bytes)` pairs in ID order, skipping IDs with
+/// no assigned content. Shared by both tokenizer types' `vocab_entries`.
+pub(crate) fn vocab_entries(
+    vocab: &[std::sync::Arc<[u8]>],
+) -> impl Iterator<Item = (u32, &[u8])> {
+    vocab
+        .iter()
+        .enumerate()
+        .filter(|(_, bytes)| !bytes.is_empty())
+        .map(|(id, bytes)| (id as u32, bytes.as_ref()))
+}
+
+/// Pack a ranked-merge pair key into one `u64`: hashing it is a single
+/// multiply instead of a two-round tuple hash, and the merge loop probes this
+/// map ~2x per symbol.
+#[inline(always)]
+pub fn ranked_merge_key(a: TokenId, b: TokenId) -> u64 {
+    ((a.0 as u64) << 32) | b.0 as u64
+}
+
+/// Ranked-merge variant of [`bpe_merge_symbols_small`]: allocation-free BPE
+/// for short symbol sequences (the overwhelming majority of cache-missing
+/// units), with priority taken from the merge table's explicit rank.
+fn bpe_merge_symbols_ranked_small<S: std::hash::BuildHasher>(
+    merges: &HashMap<u64, (TokenId, u32), S>,
     symbols: &mut Vec<TokenId>,
 ) {
+    let get = |a: TokenId, b: TokenId| -> (TokenId, u32) {
+        merges
+            .get(&ranked_merge_key(a, b))
+            .map_or((TokenId::from(0u32), u32::MAX), |&m| m)
+    };
+    let n = symbols.len();
+    debug_assert!((2..=SMALL_MERGE_MAX).contains(&n));
+    // Stack-resident doubly-linked list; see `bpe_merge_symbols_small`.
+    let mut next = [0u8; SMALL_MERGE_MAX];
+    let mut prev = [0u8; SMALL_MERGE_MAX];
+    for i in 0..n {
+        next[i] = (i + 1) as u8;
+        prev[i] = (i as u8).wrapping_sub(1);
+    }
+    // For the pair starting at active position i: its merge priority and
+    // merged token. Rank u32::MAX = no merge (or merged away).
+    let mut ranks = [u32::MAX; SMALL_MERGE_MAX];
+    let mut merged = [TokenId::from(0u32); SMALL_MERGE_MAX];
+    for i in 0..n - 1 {
+        (merged[i], ranks[i]) = get(symbols[i], symbols[i + 1]);
+    }
     loop {
-        let candidate_merges = symbols
-            .iter()
-            .copied()
-            .tuple_windows()
-            .enumerate()
-            .filter_map(|(i, (a, b))| merges.get(&(a, b)).map(|&v| (i, v)));
-
-        let best_merge = candidate_merges.min_by_key(|(_index, merged_token)| *merged_token);
-
-        if let Some((merge_index, merge_token)) = best_merge {
-            symbols[merge_index] = merge_token;
-            symbols.remove(merge_index + 1);
-        } else {
+        let mut best = u32::MAX;
+        let mut best_i = 0;
+        for (i, &rank) in ranks[..n - 1].iter().enumerate() {
+            if rank < best {
+                best = rank;
+                best_i = i;
+            }
+        }
+        if best == u32::MAX {
             break;
         }
+        let i = best_i;
+        symbols[i] = merged[i];
+        // Unlink the right element of the merged pair.
+        let dead = next[i] as usize;
+        let new_right = next[dead] as usize;
+        next[i] = new_right as u8;
+        ranks[dead] = u32::MAX;
+        // Refresh the two pairs now touching the merged symbol.
+        if new_right < n {
+            prev[new_right] = i as u8;
+            (merged[i], ranks[i]) = get(symbols[i], symbols[new_right]);
+        } else {
+            ranks[i] = u32::MAX;
+        }
+        let left = prev[i] as usize;
+        if left < n {
+            (merged[left], ranks[left]) = get(symbols[left], symbols[i]);
+        }
     }
+    // Compact survivors in place.
+    let mut write = 0;
+    let mut i = 0;
+    while i < n {
+        symbols[write] = symbols[i];
+        write += 1;
+        i = next[i] as usize;
+    }
+    symbols.truncate(write);
 }
 
 /// Apply BPE merges using explicit merge ranks for priority (lower rank = first).
@@ -317,7 +382,7 @@ fn bpe_merge_symbols_naive<S: std::hash::BuildHasher>(
 /// the naive O(n × merges) scan.
 /// This is only needed by SentencePiece-style tokenizers.
 pub fn bpe_merge_symbols_ranked<S: std::hash::BuildHasher>(
-    merges: &HashMap<(TokenId, TokenId), (TokenId, u32), S>,
+    merges: &HashMap<u64, (TokenId, u32), S>,
     symbols: &mut Vec<TokenId>,
 ) {
     use std::cmp::Reverse;
@@ -325,6 +390,13 @@ pub fn bpe_merge_symbols_ranked<S: std::hash::BuildHasher>(
 
     let n = symbols.len();
     if n < 2 {
+        return;
+    }
+
+    // Short sequences (the overwhelming majority of word units) skip the
+    // heap and its allocations entirely.
+    if n <= SMALL_MERGE_MAX {
+        bpe_merge_symbols_ranked_small(merges, symbols);
         return;
     }
 
@@ -344,7 +416,7 @@ pub fn bpe_merge_symbols_ranked<S: std::hash::BuildHasher>(
         if j == NONE {
             break;
         }
-        if let Some(&(_, rank)) = merges.get(&(token[i], token[j])) {
+        if let Some(&(_, rank)) = merges.get(&ranked_merge_key(token[i], token[j])) {
             heap.push(Reverse((rank, i)));
         }
         i = j;
@@ -357,7 +429,7 @@ pub fn bpe_merge_symbols_ranked<S: std::hash::BuildHasher>(
             continue;
         }
         // Check the pair still matches (it may have been invalidated by an earlier merge)
-        let pair = (token[pos], token[right]);
+        let pair = ranked_merge_key(token[pos], token[right]);
         match merges.get(&pair) {
             Some(&(merged_token, r)) if r == rank => {
                 // Apply the merge: replace token[pos], remove right
@@ -374,12 +446,12 @@ pub fn bpe_merge_symbols_ranked<S: std::hash::BuildHasher>(
                 // Re-check pair with left neighbor
                 let left = prev[pos];
                 if left != NONE
-                    && let Some(&(_, rank)) = merges.get(&(token[left], token[pos])) {
+                    && let Some(&(_, rank)) = merges.get(&ranked_merge_key(token[left], token[pos])) {
                         heap.push(Reverse((rank, left)));
                     }
                 // Re-check pair with new right neighbor
                 if next[pos] != NONE
-                    && let Some(&(_, rank)) = merges.get(&(token[pos], token[next[pos]])) {
+                    && let Some(&(_, rank)) = merges.get(&ranked_merge_key(token[pos], token[next[pos]])) {
                         heap.push(Reverse((rank, pos)));
                     }
             }

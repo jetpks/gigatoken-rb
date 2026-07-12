@@ -7,6 +7,7 @@
 // The tokenizer variants differ greatly in size
 #![allow(clippy::large_enum_variant)]
 
+use crate::bpe::sentencepiece::{AddedTokenSpec, Metaspace, NormOp, PrependScheme};
 use crate::bpe::{self, SentencePieceBPE};
 use crate::token::TokenId;
 use eyre::{Context, Result, ensure};
@@ -37,6 +38,22 @@ struct NormalizerJson {
     kind: String,
     #[serde(default)]
     normalizers: Vec<NormalizerJson>,
+    /// `Prepend` normalizer: the prefix (Llama 2's "▁").
+    #[serde(default)]
+    prepend: Option<String>,
+    /// `Replace` normalizer: pattern and replacement content.
+    #[serde(default)]
+    pattern: Option<PatternJson>,
+    #[serde(default)]
+    content: Option<String>,
+    /// `Strip` normalizer sides.
+    #[serde(default)]
+    strip_left: Option<bool>,
+    #[serde(default)]
+    strip_right: Option<bool>,
+    /// `Precompiled` normalizer: base64-encoded sentencepiece charsmap.
+    #[serde(default)]
+    precompiled_charsmap: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -47,12 +64,24 @@ struct PreTokenizerJson {
     pretokenizers: Vec<PreTokenizerJson>,
     #[serde(default)]
     pattern: Option<PatternJson>,
+    /// `Metaspace` fields. `add_prefix_space` is the pre-0.15 spelling of
+    /// `prepend_scheme`.
+    #[serde(default)]
+    replacement: Option<String>,
+    #[serde(default)]
+    prepend_scheme: Option<String>,
+    #[serde(default)]
+    add_prefix_space: Option<bool>,
+    #[serde(default)]
+    split: Option<bool>,
 }
 
 #[derive(Deserialize)]
 struct PatternJson {
     #[serde(rename = "Regex", default)]
     regex: Option<String>,
+    #[serde(rename = "String", default)]
+    literal: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -104,22 +133,51 @@ struct AddedToken {
     content: String,
     #[serde(default)]
     special: bool,
+    #[serde(default)]
+    lstrip: bool,
+    #[serde(default)]
+    rstrip: bool,
+    #[serde(default)]
+    normalized: bool,
 }
 
 // ---------------------------------------------------------------------------
 // Token string → raw bytes conversion
 // ---------------------------------------------------------------------------
 
+/// Parse a byte-fallback token string `<0xHH>` into its byte.
+fn parse_byte_fallback(s: &str) -> Option<u8> {
+    if s.len() == 6 && s.starts_with("<0x") && s.ends_with('>') {
+        u8::from_str_radix(&s[3..5], 16).ok()
+    } else {
+        None
+    }
+}
+
 /// Convert a HuggingFace vocab string to raw bytes.
 ///
 /// - Byte-fallback tokens `<0xHH>` → the single byte.
 /// - Everything else → its UTF-8 bytes (▁ is kept as-is).
 fn token_str_to_bytes(s: &str) -> Vec<u8> {
-    if s.len() == 6 && s.starts_with("<0x") && s.ends_with('>')
-        && let Ok(byte) = u8::from_str_radix(&s[3..5], 16) {
-            return vec![byte];
+    match parse_byte_fallback(s) {
+        Some(byte) => vec![byte],
+        None => s.as_bytes().to_vec(),
+    }
+}
+
+/// Added tokens may live outside model.vocab (e.g. Qwen2's <|endoftext|>,
+/// Phi-3's placeholders); extend the vocab so their IDs decode to the
+/// literal content.
+fn extend_vocab_with_added_tokens(vocab: &mut Vec<Arc<[u8]>>, added_tokens: &[AddedToken]) {
+    for t in added_tokens {
+        let id = t.id as usize;
+        if id >= vocab.len() {
+            vocab.resize(id + 1, Arc::from(Vec::new().as_slice()));
         }
-    s.as_bytes().to_vec()
+        if vocab[id].is_empty() {
+            vocab[id] = t.content.as_bytes().into();
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -192,7 +250,7 @@ fn build_sentencepiece(tj: &TokenizerJson) -> Result<SentencePieceBPE> {
     let mut byte_fallback_entries = Vec::new();
     let mut other_entries = Vec::new();
     for (tok_str, &id) in hf_vocab {
-        if tok_str.len() == 6 && tok_str.starts_with("<0x") && tok_str.ends_with('>') {
+        if parse_byte_fallback(tok_str).is_some() {
             byte_fallback_entries.push((tok_str, id));
         } else {
             other_entries.push((tok_str, id));
@@ -211,18 +269,21 @@ fn build_sentencepiece(tj: &TokenizerJson) -> Result<SentencePieceBPE> {
 
     // --- Extract byte-fallback token IDs -------------------------------------
 
-    let mut byte_fallback_ids = [TokenId::from(0u32); 256];
+    // Some vocabs omit byte tokens they never need (Gemma has literal `\t`
+    // pieces instead of `<0x09>`); those stay `None`.
+    let mut byte_fallback_ids = [None; 256];
     for byte_val in 0u16..=255 {
         let key = format!("<0x{:02X}>", byte_val);
-        let &id = hf_vocab
-            .get(&key)
-            .ok_or_else(|| eyre::eyre!("Missing byte fallback token {key}"))?;
-        byte_fallback_ids[byte_val as usize] = TokenId::from(id);
+        byte_fallback_ids[byte_val as usize] = hf_vocab.get(&key).map(|&id| TokenId::from(id));
     }
+    ensure!(
+        byte_fallback_ids.iter().any(|id| id.is_some()),
+        "byte_fallback is set but the vocab has no <0xHH> byte tokens"
+    );
 
     // --- Build merge table (with explicit ranks) -----------------------------
 
-    let mut merges: HashMap<(TokenId, TokenId), (TokenId, u32), FxBuildHasher> =
+    let mut merges: HashMap<u64, (TokenId, u32), FxBuildHasher> =
         HashMap::with_capacity_and_hasher(hf_merges.len(), FxBuildHasher);
 
     let hf_str_to_id = |s: &str| -> Option<TokenId> {
@@ -246,25 +307,184 @@ fn build_sentencepiece(tj: &TokenizerJson) -> Result<SentencePieceBPE> {
             None => continue,
         };
 
-        merges.entry((id_a, id_b)).or_insert((id_merged, rank as u32));
+        merges
+            .entry(crate::bpe::ranked_merge_key(id_a, id_b))
+            .or_insert((id_merged, rank as u32));
     }
+
+    // --- Normalizer and pre-tokenizer configuration --------------------------
+
+    let mut norm_ops = Vec::new();
+    if let Some(n) = &tj.normalizer {
+        parse_sp_normalizer(n, &mut norm_ops)?;
+    }
+    let metaspace = parse_sp_metaspace(&tj.pre_tokenizer)?;
 
     // --- Extract added tokens (for splitting before encoding) ----------------
 
-    let added_tokens: Vec<(String, TokenId)> = tj
-        .added_tokens
-        .iter()
-        .filter(|t| t.special)
-        .map(|t| (t.content.clone(), TokenId::from(t.id)))
-        .collect();
+    // All added tokens (special and non-special) are matched atomically by
+    // HF's AddedVocabulary; mirror that. `normalized: false` tokens match in
+    // the raw input, `normalized: true` ones match against normalizer output
+    // with their content normalized the same way.
+    let mut added_tokens = Vec::new();
+    let mut norm_added_tokens = Vec::new();
+    for t in &tj.added_tokens {
+        let spec = AddedTokenSpec {
+            content: t.content.clone(),
+            id: TokenId::from(t.id),
+            lstrip: t.lstrip,
+            rstrip: t.rstrip,
+        };
+        if t.normalized {
+            norm_added_tokens.push(spec);
+        } else {
+            added_tokens.push(spec);
+        }
+    }
+    extend_vocab_with_added_tokens(&mut vocab, &tj.added_tokens);
 
-    Ok(SentencePieceBPE {
+    let mut model = SentencePieceBPE {
         merges,
         vocab,
         vocab_inv,
         byte_fallback_ids,
         added_tokens,
-    })
+        norm_added_tokens: Vec::new(),
+        norm_ops,
+        metaspace,
+        word_split: crate::bpe::sentencepiece::WordSplit::None,
+        raw_prepend: None,
+        space_init: Vec::new(),
+        ascii_init: [None; 128],
+        added_matcher: None,
+        split_bytes: [0; crate::bpe::sentencepiece::NUM_SPLIT_BYTES],
+        split_safe: Vec::new(),
+    };
+    model.norm_added_tokens = norm_added_tokens
+        .into_iter()
+        .map(|mut spec| {
+            spec.content = model.apply_norm_ops(&spec.content).into_owned();
+            spec
+        })
+        .collect();
+    model.finalize_speed_paths();
+    Ok(model)
+}
+
+/// Translate a tokenizer.json `normalizer` into [`NormOp`]s, erroring on
+/// anything unsupported — silently skipping a normalizer would produce token
+/// IDs that diverge from HF.
+fn parse_sp_normalizer(n: &NormalizerJson, out: &mut Vec<NormOp>) -> Result<()> {
+    match n.kind.as_str() {
+        "Sequence" => {
+            for child in &n.normalizers {
+                parse_sp_normalizer(child, out)?;
+            }
+        }
+        "Prepend" => {
+            let prefix = n
+                .prepend
+                .clone()
+                .ok_or_else(|| eyre::eyre!("Prepend normalizer without a `prepend` string"))?;
+            out.push(NormOp::Prepend(prefix));
+        }
+        "Replace" => {
+            let content = n
+                .content
+                .clone()
+                .ok_or_else(|| eyre::eyre!("Replace normalizer without a `content` string"))?;
+            match &n.pattern {
+                Some(PatternJson {
+                    literal: Some(pattern),
+                    ..
+                }) => out.push(NormOp::Replace {
+                    pattern: pattern.clone(),
+                    content,
+                }),
+                // transformers' SpmConverter emits this exact regex for
+                // sentencepiece's `remove_extra_whitespaces`.
+                Some(PatternJson {
+                    regex: Some(re), ..
+                }) if re == " {2,}" => out.push(NormOp::CollapseSpaces { content }),
+                Some(PatternJson {
+                    regex: Some(re), ..
+                }) => {
+                    return Err(eyre::eyre!(
+                        "Unsupported Replace normalizer regex: {re:?} (only \" {{2,}}\" is supported)"
+                    ));
+                }
+                _ => return Err(eyre::eyre!("Replace normalizer without a pattern")),
+            }
+        }
+        "Strip" => out.push(NormOp::Strip {
+            left: n.strip_left.unwrap_or(true),
+            right: n.strip_right.unwrap_or(true),
+        }),
+        "Precompiled" => {
+            use base64::Engine;
+            let b64 = n.precompiled_charsmap.as_deref().ok_or_else(|| {
+                eyre::eyre!("Precompiled normalizer without a `precompiled_charsmap`")
+            })?;
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(b64)
+                .context("Failed to base64-decode precompiled_charsmap")?;
+            let precompiled = spm_precompiled::Precompiled::from(&bytes)
+                .map_err(|e| eyre::eyre!("Failed to parse precompiled_charsmap: {e}"))?;
+            out.push(NormOp::Precompiled(
+                crate::bpe::sentencepiece::PrecompiledCharsmap::new(precompiled),
+            ));
+        }
+        other => {
+            return Err(eyre::eyre!(
+                "Unsupported normalizer type for SentencePiece tokenizers: {other}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Translate a tokenizer.json `pre_tokenizer` into a [`Metaspace`] config.
+/// `None` (no pre-tokenizer, e.g. Llama 2) leaves spaces to the normalizer
+/// and lets merges cross word boundaries.
+fn parse_sp_metaspace(pre_tokenizer: &Option<PreTokenizerJson>) -> Result<Option<Metaspace>> {
+    fn from_metaspace(pt: &PreTokenizerJson) -> Result<Metaspace> {
+        ensure!(
+            pt.replacement.as_deref().unwrap_or("\u{2581}") == "\u{2581}",
+            "Unsupported Metaspace replacement: {:?} (expected \"▁\")",
+            pt.replacement
+        );
+        let prepend = match (&pt.prepend_scheme, pt.add_prefix_space) {
+            (Some(scheme), _) => match scheme.as_str() {
+                "never" => PrependScheme::Never,
+                "always" => PrependScheme::Always,
+                "first" => PrependScheme::First,
+                other => {
+                    return Err(eyre::eyre!("Unsupported Metaspace prepend_scheme: {other}"));
+                }
+            },
+            (None, Some(false)) => PrependScheme::Never,
+            (None, _) => PrependScheme::Always,
+        };
+        Ok(Metaspace {
+            prepend,
+            split: pt.split.unwrap_or(true),
+        })
+    }
+
+    let Some(pt) = pre_tokenizer else {
+        return Ok(None);
+    };
+    match pt.kind.as_str() {
+        "Metaspace" => Ok(Some(from_metaspace(pt)?)),
+        "Sequence"
+            if pt.pretokenizers.len() == 1 && pt.pretokenizers[0].kind == "Metaspace" =>
+        {
+            Ok(Some(from_metaspace(&pt.pretokenizers[0])?))
+        }
+        other => Err(eyre::eyre!(
+            "Unsupported pre_tokenizer type for SentencePiece tokenizers: {other}"
+        )),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -279,10 +499,10 @@ fn detect_nfc_normalizer(normalizer: &Option<NormalizerJson>) -> Result<bool> {
     fn is_nfc(n: &NormalizerJson) -> Result<bool> {
         match n.kind.as_str() {
             "NFC" => Ok(true),
-            "Sequence" => {
-                let each: Vec<bool> = n.normalizers.iter().map(is_nfc).collect::<Result<_>>()?;
-                Ok(each.into_iter().any(|b| b))
-            }
+            "Sequence" => n
+                .normalizers
+                .iter()
+                .try_fold(false, |acc, c| Ok(acc | is_nfc(c)?)),
             other => Err(eyre::eyre!("Unsupported normalizer type: {other}")),
         }
     }
@@ -305,7 +525,7 @@ fn detect_pretokenizer_type(
 
     fn collect_split_regexes<'a>(pt: &'a PreTokenizerJson, out: &mut Vec<&'a str>) {
         if pt.kind == "Split"
-            && let Some(PatternJson { regex: Some(re) }) = &pt.pattern
+            && let Some(PatternJson { regex: Some(re), .. }) = &pt.pattern
         {
             out.push(re);
         }
@@ -403,17 +623,7 @@ fn build_bpe(tj: &TokenizerJson) -> Result<bpe::tiktoken::Tokenizer> {
         vocab_inv.insert(bytes, TokenId::from(id));
     }
 
-    // Added tokens may live outside model.vocab (e.g. Qwen2's <|endoftext|>);
-    // extend the vocab so their IDs decode to the literal content.
-    for t in &tj.added_tokens {
-        let id = t.id as usize;
-        if id >= vocab.len() {
-            vocab.resize(id + 1, Arc::from(Vec::new().as_slice()));
-        }
-        if vocab[id].is_empty() {
-            vocab[id] = t.content.as_bytes().into();
-        }
-    }
+    extend_vocab_with_added_tokens(&mut vocab, &tj.added_tokens);
 
     // Build merges from the merge list. Each merge "a b" means:
     // look up token IDs for "a" and "b", the merged token is vocab[concat(a,b)].

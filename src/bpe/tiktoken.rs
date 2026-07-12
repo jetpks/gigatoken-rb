@@ -101,7 +101,7 @@ const PACK_MASK_TAG: [(u128, u128); 16] = {
 };
 
 #[inline(always)]
-fn pack_pretoken_key(bytes: &[u8]) -> Option<u128> {
+pub(crate) fn pack_pretoken_key(bytes: &[u8]) -> Option<u128> {
     let n = bytes.len();
     if n > 15 {
         return None;
@@ -240,9 +240,7 @@ impl Tokenizer {
             merges: self.merges.clone(),
             vocab: self.vocab.clone(),
             vocab_inv: self.vocab_inv.clone(),
-            byte_remapping: self.byte_remapping.as_ref().map(|br| ByteRemapping {
-                mapping: br.mapping.clone(),
-            }),
+            byte_remapping: self.byte_remapping.clone(),
             token_arena: Vec::new(),
             pretoken_cache: HashMap::with_hasher(rustc_hash::FxBuildHasher {}),
             pretoken_cache_long: HashMap::with_hasher(rustc_hash::FxBuildHasher {}),
@@ -306,6 +304,34 @@ impl Tokenizer {
             .collect();
         added.push((content, id));
         self.set_added_tokens(added);
+    }
+
+    /// Size of the vocabulary: one greater than the largest token ID,
+    /// including added tokens (IDs with no assigned content count too).
+    pub fn vocab_size(&self) -> usize {
+        self.vocab.len()
+    }
+
+    /// Vocabulary entries as `(id, bytes)` pairs in ID order, including
+    /// added tokens and skipping IDs with no assigned content.
+    pub fn vocab_entries(&self) -> impl Iterator<Item = (u32, &[u8])> {
+        super::vocab_entries(&self.vocab)
+    }
+
+    /// Merge rules as `(left, right)` byte pairs in merge-priority order
+    /// (priority equals the merged token's ID for tiktoken vocabularies).
+    pub fn merge_entries(&self) -> Vec<(&[u8], &[u8])> {
+        let mut ranked: Vec<_> = self.merges.iter().collect();
+        ranked.sort_unstable_by_key(|&(_, merged)| merged);
+        ranked
+            .into_iter()
+            .map(|(&(a, b), _)| {
+                (
+                    self.vocab[a.0 as usize].as_ref(),
+                    self.vocab[b.0 as usize].as_ref(),
+                )
+            })
+            .collect()
     }
 
     /// Contents of the added tokens, for callers that split documents at
