@@ -1,36 +1,14 @@
-import hashlib
-import os
-import tempfile
-from pathlib import Path
-
 import pytest
 import tiktoken
 
 from gigatok.gigatok_rs import BPETokenizer
 
 
-def tiktoken_cache_path(url: str) -> Path:
-    """Resolve the local cache path for a tiktoken BPE file URL."""
-    if "TIKTOKEN_CACHE_DIR" in os.environ:
-        cache_dir = Path(os.environ["TIKTOKEN_CACHE_DIR"])
-    elif "DATA_GYM_CACHE_DIR" in os.environ:
-        cache_dir = Path(os.environ["DATA_GYM_CACHE_DIR"])
-    else:
-        cache_dir = Path(tempfile.gettempdir()) / "data-gym-cache"
-    cache_key = hashlib.sha1(url.encode()).hexdigest()
-    return cache_dir / cache_key
-
-
-R50K_URL = "https://openaipublic.blob.core.windows.net/encodings/r50k_base.tiktoken"
-
-
 @pytest.fixture
-def r50k() -> tuple[tiktoken.Encoding, BPETokenizer]:
+def r50k(r50k_tiktoken_path) -> tuple[tiktoken.Encoding, BPETokenizer]:
     """Return (tiktoken_encoding, BPETokenizer) pair for r50k_base."""
     tt = tiktoken.get_encoding("r50k_base")
-    path = tiktoken_cache_path(R50K_URL)
-    assert path.exists(), f"tiktoken cache not found at {path}; run tiktoken.get_encoding('r50k_base') first"
-    bpe = BPETokenizer.from_tiktoken(path)
+    bpe = BPETokenizer.from_tiktoken(r50k_tiktoken_path)
     return tt, bpe
 
 
