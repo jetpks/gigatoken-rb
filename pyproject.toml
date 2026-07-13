@@ -10,7 +10,22 @@ license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.10"
 authors = [{ name = "Marcel Rød", email = "roed@stanford.edu" }]
+keywords = [
+    "tokenizer",
+    "tokenizers",
+    "tokenization",
+    "bpe",
+    "nlp",
+    "sentencepiece",
+    "tiktoken",
+]
 classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Text Processing :: Linguistic",
+    "Operating System :: OS Independent",
     "Programming Language :: Rust",
     "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.10",
@@ -29,8 +44,14 @@ dependencies = [
     "numpy>=1.24.4",
 ]
 
+[project.urls]
+Repository = "https://github.com/marcelroed/gigatoken"
+Issues = "https://github.com/marcelroed/gigatoken/issues"
+
 [tool.maturin]
 module-name = "gigatoken.gigatoken_rs"
+strip = true
+exclude = ["gigatoken/*.so", "gigatoken/__pycache__/**"]
 
 
 [tool.uv]
