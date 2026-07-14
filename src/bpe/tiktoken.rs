@@ -22,14 +22,19 @@ use std::sync::Arc;
 /// determined by the merged token's vocab ID (lower = first), which
 /// equals the merge rank for tiktoken vocabularies.
 pub struct Tokenizer {
-    pub(crate) merges: HashMap<(TokenId, TokenId), TokenId, rustc_hash::FxBuildHasher>,
+    // The model tables (merges, pair_ranks, vocab, vocab_inv) are immutable
+    // after construction and shared across forks behind `Arc`: parallel
+    // workers read the same few MB of tables instead of holding one deep
+    // clone each, which keeps a single copy resident per cache/cluster on
+    // the cold miss path and makes forking the tables O(1). The rare
+    // mutation (`add_special_token`) goes through `Arc::make_mut`.
+    pub(crate) merges: Arc<HashMap<(TokenId, TokenId), TokenId, rustc_hash::FxBuildHasher>>,
     /// Flat pair-rank tables replacing `merges` lookups on the miss path's
     /// merge loop; `None` for vocabularies whose IDs don't fit its packed
-    /// keys (those keep probing `merges`). Immutable after construction and
-    /// shared across forks.
+    /// keys (those keep probing `merges`).
     pair_ranks: Option<Arc<PairRankTable>>,
-    pub(crate) vocab: Vec<Arc<[u8]>>,
-    pub(crate) vocab_inv: HashMap<Arc<[u8]>, TokenId, rustc_hash::FxBuildHasher>,
+    pub(crate) vocab: Arc<Vec<Arc<[u8]>>>,
+    pub(crate) vocab_inv: Arc<HashMap<Arc<[u8]>, TokenId, rustc_hash::FxBuildHasher>>,
     pub(crate) byte_remapping: Option<ByteRemapping>,
     /// Append-only arena of encoded token IDs. Cache entries for encodings
     /// of 5+ tokens store `(offset, len)` slices into this vector; shorter
@@ -143,12 +148,12 @@ impl Tokenizer {
         let pair_ranks =
             PairRankTable::build(&merges, byte_remapping.as_ref(), vocab.len()).map(Arc::new);
         let mut token_arena = Vec::new();
-        let pretoken_cache = Self::seeded_pretoken_cache(&vocab, &mut token_arena);
+        let pretoken_cache = Self::seeded_pretoken_cache(&vocab, &mut token_arena, 0);
         Tokenizer {
-            merges,
+            merges: Arc::new(merges),
             pair_ranks,
-            vocab_inv,
-            vocab,
+            vocab_inv: Arc::new(vocab_inv),
+            vocab: Arc::new(vocab),
             byte_remapping,
             token_arena,
             pretoken_cache,
@@ -169,15 +174,21 @@ impl Tokenizer {
     /// vocab word. Iterating IDs descending and keeping the first insert
     /// per key resolves duplicate byte strings to the highest ID — the same
     /// entry `vocab_inv` (built ascending, later inserts overwrite) returns.
+    ///
+    /// `min_slots` additionally floors the table size for a worker with a
+    /// known workload (see [`Self::fork_sized`]); the table is built once
+    /// at the max of the seed requirement and that floor, so seeding never
+    /// grows it mid-way.
     fn seeded_pretoken_cache(
         vocab: &[Arc<[u8]>],
         token_arena: &mut Vec<TokenId>,
+        min_slots: usize,
     ) -> ShortPretokenCache {
         let n_short = vocab
             .iter()
             .filter(|bytes| (1..=15).contains(&bytes.len()))
             .count();
-        let mut cache = ShortPretokenCache::with_at_least(n_short);
+        let mut cache = ShortPretokenCache::with_at_least(n_short, min_slots);
         for id in (0..vocab.len() as u32).rev() {
             let bytes = &vocab[id as usize];
             if !(1..=15).contains(&bytes.len()) {
@@ -237,13 +248,13 @@ impl Tokenizer {
         let pair_ranks =
             PairRankTable::build(&merges, byte_remapping.as_ref(), vocab.len()).map(Arc::new);
         let mut token_arena = Vec::new();
-        let pretoken_cache = Self::seeded_pretoken_cache(&vocab, &mut token_arena);
+        let pretoken_cache = Self::seeded_pretoken_cache(&vocab, &mut token_arena, 0);
         Ok(Tokenizer {
-            merges,
+            merges: Arc::new(merges),
             pair_ranks,
             byte_remapping,
-            vocab,
-            vocab_inv,
+            vocab: Arc::new(vocab),
+            vocab_inv: Arc::new(vocab_inv),
             token_arena,
             pretoken_cache,
             pretoken_cache_long: HashMap::with_hasher(rustc_hash::FxBuildHasher {}),
@@ -260,17 +271,45 @@ impl Tokenizer {
     /// freshly seeded cache (no encoded pretokens beyond the vocab seed).
     /// Useful for per-thread encoding in parallel.
     pub fn fork(&self) -> Self {
-        let mut token_arena = Vec::new();
-        let pretoken_cache = Self::seeded_pretoken_cache(&self.vocab, &mut token_arena);
+        self.fork_sized(0)
+    }
+
+    /// [`Self::fork`] with the caches pre-sized for a worker expected to
+    /// encode roughly `expected_bytes` of input. On a cold parallel run a
+    /// default-sized worker rehashes its pretoken table through 6-7
+    /// doublings — random scatter writes into a fresh zeroed allocation
+    /// each time, on every worker at once; sizing from the input share
+    /// pays for the table exactly once. The estimates are capacity hints
+    /// only: every structure still grows past them as needed, and the
+    /// clamps keep tiny inputs at the default size. The short-table size
+    /// is a floor passed through the vocab seeding, so the seed
+    /// requirement and the workload estimate resolve to one table
+    /// construction (whichever is larger).
+    pub(crate) fn fork_sized(&self, expected_bytes: usize) -> Self {
+        // ~1 distinct short pretoken per ~256 input bytes covers OWT-like
+        // text at 3/4 load (Heaps' law: distinct pretokens grow ~ n^0.55,
+        // so a share sees proportionally more distinct pretokens than the
+        // whole); clamp at 2^22 slots (128 MB) per worker.
+        let cache_slots = (expected_bytes / 256)
+            .clamp(1 << 16, 1 << 22)
+            .next_power_of_two();
+        let arena_cap = (expected_bytes / 256).min(1 << 24);
+        let long_cap = (expected_bytes / 8192).min(1 << 20);
+        let mut token_arena = Vec::with_capacity(arena_cap);
+        let pretoken_cache =
+            Self::seeded_pretoken_cache(&self.vocab, &mut token_arena, cache_slots);
         Tokenizer {
-            merges: self.merges.clone(),
+            merges: Arc::clone(&self.merges),
             pair_ranks: self.pair_ranks.clone(),
-            vocab: self.vocab.clone(),
-            vocab_inv: self.vocab_inv.clone(),
+            vocab: Arc::clone(&self.vocab),
+            vocab_inv: Arc::clone(&self.vocab_inv),
             byte_remapping: self.byte_remapping.clone(),
             token_arena,
             pretoken_cache,
-            pretoken_cache_long: HashMap::with_hasher(rustc_hash::FxBuildHasher {}),
+            pretoken_cache_long: HashMap::with_capacity_and_hasher(
+                long_cap,
+                rustc_hash::FxBuildHasher {},
+            ),
             merge_scratch: MergeScratch::default(),
             symbol_scratch: Vec::new(),
             pretokenizer_type: self.pretokenizer_type,
@@ -317,12 +356,16 @@ impl Tokenizer {
     /// added-token handling in the HF loader).
     pub fn add_special_token(&mut self, content: Vec<u8>, id: TokenId) {
         let idx = id.0 as usize;
-        if idx >= self.vocab.len() {
-            self.vocab.resize(idx + 1, Arc::from(Vec::new().as_slice()));
+        // Loader-phase mutation of the shared model tables: `make_mut`
+        // copies only when a fork holds the tables too (never during
+        // loading, where this is called).
+        let vocab = Arc::make_mut(&mut self.vocab);
+        if idx >= vocab.len() {
+            vocab.resize(idx + 1, Arc::from(Vec::new().as_slice()));
         }
-        if self.vocab[idx].is_empty() {
-            self.vocab[idx] = content.clone().into();
-            self.vocab_inv.insert(self.vocab[idx].clone(), id);
+        if vocab[idx].is_empty() {
+            vocab[idx] = content.clone().into();
+            Arc::make_mut(&mut self.vocab_inv).insert(vocab[idx].clone(), id);
             // Keep the vocab seed in sync (see `seeded_pretoken_cache`): a
             // short pretoken matching this content must resolve to `id`
             // without the miss path's reverse-vocab probe. An existing cache
@@ -890,7 +933,7 @@ mod tests {
             .pair_ranks
             .as_deref()
             .expect("GPT-2 must take the pair-rank fast path");
-        for (&(a, b), &m) in &tokenizer.merges {
+        for (&(a, b), &m) in tokenizer.merges.iter() {
             assert_eq!(table.rank(a, b), m.0, "pair ({}, {})", a.0, b.0);
         }
         // Dense negatives (byte × byte) and flat negatives must agree with
