@@ -424,15 +424,15 @@ impl Committer {
         unsafe impl Send for SyncPtr {}
         unsafe impl Sync for SyncPtr {}
         impl SyncPtr {
-            /// SAFETY (caller): `off` must be within the reservation.
-            fn at(&self, off: usize) -> *mut u32 {
+            /// SAFETY: `off` must be within the reservation.
+            unsafe fn at(&self, off: usize) -> *mut u32 {
                 unsafe { self.0.add(off) }
             }
         }
 
         let Committer {
             mut flat,
-            base,
+            base: _,
             cap,
             cursor,
         } = self;
@@ -450,7 +450,12 @@ impl Committer {
             offset += chunk.ids.len();
         }
         debug_assert_eq!(offset, total);
-        let base = SyncPtr(base);
+        // Re-derive the destination pointer from the Vec AFTER it moved out
+        // of `self`: the pre-move `base` is only valid for the shared phase
+        // (while the Committer sat unmoved); a move retags the Vec's unique
+        // pointer under strict aliasing models, so post-move writes and the
+        // `set_len` below must go through a pointer derived post-move.
+        let base = SyncPtr(flat.as_mut_ptr());
         // `with_max_len(1)` keeps the multi-MB copies stealable one by one.
         rest.par_iter()
             .zip(offsets)
