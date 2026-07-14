@@ -268,7 +268,223 @@ pub(crate) fn map_maybe_par<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R +
     }
 }
 
-/// Encode all chunks with pooled workers — in parallel when there is more
+/// Concatenate per-chunk row lengths into per-document row counts, merging
+/// `continues` fragments into the previous document's row.
+fn row_counts(chunks: &[ChunkTokens]) -> Vec<i64> {
+    let mut counts: Vec<i64> = Vec::new();
+    for chunk in chunks {
+        let mut lens = chunk.lens.iter().copied();
+        if chunk.continues
+            && let Some(l) = lens.next()
+        {
+            *counts
+                .last_mut()
+                .expect("continuation fragment before any document") += l;
+        }
+        counts.extend(lens);
+    }
+    counts
+}
+
+/// The in-flight state of the overlapped gather: a flat id buffer reserved
+/// at an upper bound BEFORE chunk sizes are known, plus a cursor over the
+/// longest fully-encoded prefix of the chunk sequence.
+///
+/// The first-touch faults + memcpy of the final gather cost ~170 ms of a
+/// 1.23 s 10 GB window when run as a separate phase after the encode — and
+/// more than half of its ~2.1 s of CPU was kernel fault-path contention
+/// from 16 threads faulting the flat buffer at once. Chunk completion is
+/// near-sequential (strict in-order handout, descending LPT sizes), so a
+/// worker that finishes a chunk can commit the ready prefix — offsets are
+/// exact, they are sums of *completed* chunk sizes — while the tail still
+/// encodes. The copy work then hides inside the encode phase at ~1 thread
+/// at a time (no fault convoy), leaving only a small residual drain after
+/// the last chunk.
+///
+/// The upper bound: a token consumes at least one input byte, so
+/// `total_bytes` tokens bounds the output; untouched reserved pages cost
+/// address space only. Two escapes fall back to the collect-then-gather
+/// path (`gather_flat`): the reservation itself failing (e.g. Linux
+/// heuristic overcommit refusing a 4x-input VA block for a huge batch),
+/// and the cursor overflowing the bound, which is impossible for plain
+/// byte input and reachable only when NFC normalization expands bytes
+/// (composition-exclusion pathologies) — `advance` stops committing and
+/// `finish` returns None rather than write past the reservation.
+struct Committer {
+    /// Owns the reservation; untouched until `finish`.
+    flat: Vec<u32>,
+    /// `flat.as_mut_ptr()`, captured once so workers can write through a
+    /// pointer with mutable provenance while `flat` itself sits unmoved.
+    base: *mut u32,
+    /// Reserved capacity in tokens; commits never write at or past it.
+    cap: usize,
+    cursor: Mutex<CommitCursor>,
+}
+
+struct CommitCursor {
+    /// Index of the first uncommitted chunk.
+    next: usize,
+    /// Tokens committed so far == sum of ids.len() over chunks[..next].
+    offset: usize,
+    /// A chunk did not fit under `cap`; committing has stopped for good.
+    overflowed: bool,
+}
+
+// SAFETY: `base` points into `flat`'s heap allocation, which is never
+// reallocated or moved while shared (nothing pushes to `flat`; the Vec
+// moves only in `finish`, after all shared use has ended, and moving the
+// Vec struct does not move its buffer). Writes through `base` happen only
+// while holding `cursor` (disjoint, in-bounds ranges) or in `finish`'s
+// exclusive post-join phases.
+unsafe impl Send for Committer {}
+unsafe impl Sync for Committer {}
+
+impl Committer {
+    /// Chunks committed per `advance` call. Bounds how long one worker is
+    /// away from encoding (a backlog can pile up behind a long-held lock);
+    /// anything left over is drained by later completions or `finish`.
+    const MAX_DRAIN: usize = 8;
+
+    /// Reserve `cap` tokens up front, or None (→ classic gather) if the
+    /// allocator refuses.
+    fn try_new(cap: usize) -> Option<Self> {
+        let mut flat: Vec<u32> = Vec::new();
+        if cap == 0 || flat.try_reserve_exact(cap).is_err() {
+            return None;
+        }
+        let base = flat.as_mut_ptr();
+        // Ask for 2 MiB pages before first touch, as in `gather_flat`:
+        // commits fault in the buffer, and huge pages cut the fault count
+        // ~500x. No-op where THP is unavailable.
+        #[cfg(target_os = "linux")]
+        // SAFETY: the range is exactly this reservation; MADV_HUGEPAGE
+        // only hints page sizing.
+        unsafe {
+            libc::madvise(
+                base as *mut libc::c_void,
+                cap * std::mem::size_of::<u32>(),
+                libc::MADV_HUGEPAGE,
+            );
+        }
+        Some(Self {
+            flat,
+            base,
+            cap,
+            cursor: Mutex::new(CommitCursor {
+                next: 0,
+                offset: 0,
+                overflowed: false,
+            }),
+        })
+    }
+
+    /// Copy any freshly completed prefix chunks into the flat buffer.
+    /// Non-blocking: if another worker is mid-commit, return to encoding —
+    /// the current holder (or a later completion, or `finish`) picks the
+    /// chunk up. A completion that lands between the holder's last check
+    /// and its unlock is likewise deferred, never lost.
+    fn advance(&self, outs: &[OnceLock<ChunkTokens>]) {
+        let Ok(mut cur) = self.cursor.try_lock() else {
+            return;
+        };
+        for _ in 0..Self::MAX_DRAIN {
+            if cur.overflowed {
+                return;
+            }
+            let Some(chunk) = outs.get(cur.next).and_then(OnceLock::get) else {
+                return;
+            };
+            let len = chunk.ids.len();
+            if self.cap - cur.offset < len {
+                cur.overflowed = true;
+                return;
+            }
+            // SAFETY: holding `cursor`, writing [offset, offset+len), which
+            // is within the reservation (checked above) and disjoint from
+            // every earlier commit (offset is monotone).
+            unsafe {
+                std::ptr::copy_nonoverlapping(chunk.ids.as_ptr(), self.base.add(cur.offset), len);
+            }
+            cur.offset += len;
+            cur.next += 1;
+        }
+    }
+
+    /// After all chunks are encoded (and the scope joined): copy the
+    /// uncommitted suffix in parallel, size the buffer to `total` and trim
+    /// the reservation. None means the bound was overrun (see type docs) —
+    /// caller falls back to the classic gather; the prefix copied so far is
+    /// discarded (chunk buffers are still intact).
+    fn finish(self, chunks: &[ChunkTokens], total: usize) -> Option<Vec<u32>> {
+        use rayon::prelude::*;
+        /// Raw destination pointer, shareable across the copy tasks. (The
+        /// accessor keeps closure capture at the wrapper, not the field.)
+        struct SyncPtr(*mut u32);
+        // SAFETY: only used for the disjoint in-bounds writes below.
+        unsafe impl Send for SyncPtr {}
+        unsafe impl Sync for SyncPtr {}
+        impl SyncPtr {
+            /// SAFETY (caller): `off` must be within the reservation.
+            fn at(&self, off: usize) -> *mut u32 {
+                unsafe { self.0.add(off) }
+            }
+        }
+
+        let Committer {
+            mut flat,
+            base,
+            cap,
+            cursor,
+        } = self;
+        let cur = cursor
+            .into_inner()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if cur.overflowed || total > cap {
+            return None;
+        }
+        let rest = &chunks[cur.next..];
+        let mut offsets = Vec::with_capacity(rest.len());
+        let mut offset = cur.offset;
+        for chunk in rest {
+            offsets.push(offset);
+            offset += chunk.ids.len();
+        }
+        debug_assert_eq!(offset, total);
+        let base = SyncPtr(base);
+        // `with_max_len(1)` keeps the multi-MB copies stealable one by one.
+        rest.par_iter()
+            .zip(offsets)
+            .with_max_len(1)
+            .for_each(|(chunk, off)| {
+                // SAFETY: exclusive access (workers are joined); suffix
+                // ranges are disjoint from each other and from the
+                // committed prefix, and end at total <= cap.
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        chunk.ids.as_ptr(),
+                        base.at(off),
+                        chunk.ids.len(),
+                    );
+                }
+            });
+        // SAFETY: capacity >= cap >= total, and [0, total) was fully
+        // initialized by the prefix commits plus the suffix copies above.
+        unsafe {
+            flat.set_len(total);
+        }
+        // Return the unused reservation. Large allocations trim in place on
+        // the mainstream allocators (macOS libmalloc large entries, glibc
+        // mmap'd chunks via mremap): pointer-stable, no copy, and the
+        // untouched tail pages were never faulted so there is nothing to
+        // tear down. An allocator that copies instead only costs one
+        // memcpy; correctness is unaffected.
+        flat.shrink_to_fit();
+        Some(flat)
+    }
+}
+
+/// Encode all chunks with pooled workers and gather them into one flat id
+/// buffer plus per-document row counts — in parallel when there is more
 /// than one chunk, serially otherwise. Each worker's caches are pre-sized
 /// for its share of `total_bytes` (capacity hints only — see
 /// `Tokenizer::fork_sized`; workers already forked on an earlier call keep
@@ -281,56 +497,104 @@ pub(crate) fn map_maybe_par<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R +
 /// small tail, which strands 15 threads behind one ~90 ms straggler
 /// (measured ~64 ms of a 1.46 s 10 GB window). In-order handout makes the
 /// LPT descending-size order of `build_doc_chunks` a guarantee, bounding
-/// the tail at roughly one small chunk.
-pub(crate) fn encode_chunks_pooled(
+/// the tail at roughly one small chunk — and makes chunk completion
+/// near-sequential, which is what lets the gather copy overlap the encode
+/// (see `Committer`).
+pub(crate) fn encode_chunks_gathered(
     workers: &WorkerPool,
     proto: &Tokenizer,
     chunks: &[EncodeChunk],
     total_bytes: usize,
-) -> Vec<ChunkTokens> {
+) -> (Vec<u32>, Vec<i64>) {
+    // A token consumes >= 1 input byte, so total_bytes tokens is the
+    // reservation bound (NFC expansion is caught by the overflow escape).
+    encode_chunks_gathered_with_cap(workers, proto, chunks, total_bytes, total_bytes)
+}
+
+/// `encode_chunks_gathered` with the committer's reservation bound passed
+/// explicitly, so tests can force the overflow fallback in-process.
+fn encode_chunks_gathered_with_cap(
+    workers: &WorkerPool,
+    proto: &Tokenizer,
+    chunks: &[EncodeChunk],
+    total_bytes: usize,
+    cap_tokens: usize,
+) -> (Vec<u32>, Vec<i64>) {
     let share = total_bytes / rayon::current_num_threads().max(1);
     let encode = |c: &EncodeChunk| workers.with_worker(proto, share, |tok| encode_chunk(tok, c));
     if chunks.len() <= 1 {
-        return chunks.iter().map(encode).collect();
+        // Small inputs skip the thread fan-out — and a lone chunk's id
+        // buffer IS the flat result, no gather copy at all.
+        return match chunks.first() {
+            Some(chunk) => {
+                let out = encode(chunk);
+                let counts = row_counts(std::slice::from_ref(&out));
+                (out.ids, counts)
+            }
+            None => (Vec::new(), Vec::new()),
+        };
     }
     let next = AtomicUsize::new(0);
     let outs: Vec<OnceLock<ChunkTokens>> = (0..chunks.len()).map(|_| OnceLock::new()).collect();
+    let committer = Committer::try_new(cap_tokens);
     let tasks = rayon::current_num_threads().min(chunks.len());
     rayon::scope(|s| {
         for _ in 0..tasks {
             s.spawn(|_| {
                 loop {
                     let i = next.fetch_add(1, Ordering::Relaxed);
-                    let Some(chunk) = chunks.get(i) else { break };
+                    let Some(chunk) = chunks.get(i) else {
+                        // One last opportunistic drain on the way out: this
+                        // worker's final chunk may have been skipped while
+                        // another held the commit lock.
+                        if let Some(c) = &committer {
+                            c.advance(&outs);
+                        }
+                        break;
+                    };
                     // Each index is claimed exactly once, so `set` cannot
                     // already be filled.
                     let _ = outs[i].set(encode(chunk));
+                    if let Some(c) = &committer {
+                        c.advance(&outs);
+                    }
                 }
             });
         }
     });
-    outs.into_iter()
+    let outs: Vec<ChunkTokens> = outs
+        .into_iter()
         .map(|slot| slot.into_inner().expect("every claimed chunk was encoded"))
-        .collect()
+        .collect();
+    let counts = row_counts(&outs);
+    let total: usize = outs.iter().map(|c| c.ids.len()).sum();
+    match committer.and_then(|c| c.finish(&outs, total)) {
+        Some(flat) => {
+            // The copies are done; free the spent chunk buffers off the
+            // critical path (same policy and rationale as `gather_flat`).
+            if total * std::mem::size_of::<u32>() >= DEFERRED_DROP_MIN_BYTES {
+                rayon::spawn(move || drop(outs));
+            }
+            (flat, counts)
+        }
+        None => (gather_flat(outs), counts),
+    }
 }
 
 /// Merge per-chunk outputs into one flat id buffer and per-document row
 /// counts. The flat gather copies chunk buffers in parallel into a single
-/// allocation.
+/// allocation. (The SentencePiece paths gather this way; the BPE batch
+/// path overlaps the copy with the encode — see `Committer` — and falls
+/// back to this only when the up-front reservation is refused or overrun.)
 pub(crate) fn assemble_ragged(chunks: Vec<ChunkTokens>) -> (Vec<u32>, Vec<i64>) {
+    let counts = row_counts(&chunks);
+    (gather_flat(chunks), counts)
+}
+
+/// Copy all chunk id buffers into one freshly allocated flat buffer, in
+/// parallel, freeing the spent chunk buffers off the critical path.
+fn gather_flat(chunks: Vec<ChunkTokens>) -> Vec<u32> {
     use rayon::prelude::*;
-    let mut counts: Vec<i64> = Vec::new();
-    for chunk in &chunks {
-        let mut lens = chunk.lens.iter().copied();
-        if chunk.continues
-            && let Some(l) = lens.next()
-        {
-            *counts
-                .last_mut()
-                .expect("continuation fragment before any document") += l;
-        }
-        counts.extend(lens);
-    }
     let total: usize = chunks.iter().map(|c| c.ids.len()).sum();
     let mut flat = vec![0u32; total];
     // Ask for 2 MiB pages before first touch: the parallel copy below
@@ -376,7 +640,7 @@ pub(crate) fn assemble_ragged(chunks: Vec<ChunkTokens>) -> (Vec<u32>, Vec<i64>) 
     if total * std::mem::size_of::<u32>() >= DEFERRED_DROP_MIN_BYTES {
         rayon::spawn(move || drop(chunks));
     }
-    (flat, counts)
+    flat
 }
 
 /// Persistent pool of forked tokenizer workers used by encode_batch and
@@ -483,8 +747,7 @@ pub(crate) fn encode_docs_ragged_with(
     let total: usize = docs.iter().map(|d| d.len()).sum();
     let added = proto.added_token_contents();
     let chunks = build_doc_chunks(docs, total, chunk_target_bytes(total), &added, lpt);
-    let outs = encode_chunks_pooled(workers, proto, &chunks, total);
-    assemble_ragged(outs)
+    encode_chunks_gathered(workers, proto, &chunks, total)
 }
 
 /// SentencePiece analog of `encode_docs_ragged`: group whole documents into
@@ -589,6 +852,51 @@ mod tests {
             assert_eq!(flat, ids_ref, "ids mismatch (lpt={lpt})");
         }
     }
+
+    /// The overlapped gather's escape hatches must be output-identical to
+    /// the committed path: cap 0 stands in for a refused up-front
+    /// reservation (no committer at all), cap 1 overflows on the first
+    /// commit, and a mid-range cap overflows mid-flight after a real
+    /// prefix has been committed — the fallback must discard that prefix
+    /// and re-gather from the (intact) chunk buffers.
+    #[test]
+    fn gather_fallbacks_match() {
+        let merges = HashMap::with_hasher(rustc_hash::FxBuildHasher {});
+        let vocab = (0..=u8::MAX).map(|b| vec![b]).collect();
+        let proto = Tokenizer::new(merges, vocab, None);
+
+        let mut state = 0xD1B54A32D192ED03u64;
+        let mut text = |len: usize| -> Vec<u8> {
+            (0..len)
+                .map(|_| {
+                    state = state
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
+                    let r = (state >> 33) as usize;
+                    b"abcdefghijklmnopqrstuvwxyz0123456789    "[r % 40]
+                })
+                .collect()
+        };
+        let owned: Vec<Vec<u8>> = (0..20).map(|_| text(1 << 20)).collect();
+        let docs: Vec<&[u8]> = owned.iter().map(|d| d.as_slice()).collect();
+        let total: usize = docs.iter().map(|d| d.len()).sum();
+        let added = proto.added_token_contents();
+        let chunks = build_doc_chunks(&docs, total, chunk_target_bytes(total), &added, true);
+        assert!(chunks.len() > 1, "test must exercise the parallel path");
+
+        let workers = WorkerPool::new();
+        let (flat_ref, lens_ref) = encode_chunks_gathered(&workers, &proto, &chunks, total);
+        // Byte-level vocab: one token per byte, so any cap below `total`
+        // overflows; total / 3 overflows mid-flight with a committed
+        // prefix behind it.
+        for cap in [0, 1, total / 3] {
+            let workers = WorkerPool::new();
+            let (flat, lens) =
+                encode_chunks_gathered_with_cap(&workers, &proto, &chunks, total, cap);
+            assert_eq!(lens, lens_ref, "lens mismatch (cap={cap})");
+            assert_eq!(flat, flat_ref, "ids mismatch (cap={cap})");
+        }
+    }
 }
 
 /// encode_files core for the BPE backend. With no separator each file is one
@@ -617,8 +925,7 @@ pub(crate) fn encode_files_docs(
                 })
         })
         .collect();
-    let outs = encode_chunks_pooled(workers, proto, &chunks, total);
-    assemble_ragged(outs)
+    encode_chunks_gathered(workers, proto, &chunks, total)
 }
 
 /// encode_files core for the SentencePiece backend: cut files into byte
