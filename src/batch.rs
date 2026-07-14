@@ -27,9 +27,7 @@ pub(crate) fn chunk_target_bytes(total_bytes: usize) -> usize {
 /// Append one document's token ids to `ids` and its row length to `lens`.
 pub(crate) fn encode_into(tokenizer: &mut Tokenizer, doc: &[u8], ids: &mut Vec<u32>, lens: &mut Vec<i64>) {
     let before = ids.len();
-    tokenizer.encode_with_added_tokens(doc, |tokens| {
-        ids.extend(tokens.iter().map(|&t| u32::from(t)))
-    });
+    tokenizer.encode_with_added_tokens_flat(doc, ids);
     lens.push((ids.len() - before) as i64);
 }
 

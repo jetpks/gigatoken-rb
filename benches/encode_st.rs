@@ -38,19 +38,20 @@ fn main() {
         .and_then(|v| v.trim().parse().ok())
         .unwrap_or(1);
     eprintln!("Encoding (single-threaded)...");
+    // Flat output buffer, reserved once from the batch engine's
+    // bytes-per-token estimate (see batch::encode_chunk) and reused across
+    // passes; the token count is its length.
+    let mut out: Vec<u32> = Vec::with_capacity(input.len() / 4 + 16);
     for pass in 0..passes {
+        out.clear();
         let start = Instant::now();
-        let mut total_tokens: usize = 0;
         if tokenizer_override.is_some() {
             let pretokens = tokenizer.pretokenizer_type().pretokenize(buf);
-            tokenizer.memoized_encode(pretokens, |tokens| {
-                total_tokens += tokens.len();
-            });
+            tokenizer.memoized_encode_flat(pretokens, &mut out);
         } else {
-            tokenizer.memoized_encode(FastR50kPretokenizer::new(buf), |tokens| {
-                total_tokens += tokens.len();
-            });
+            tokenizer.memoized_encode_flat(FastR50kPretokenizer::new(buf), &mut out);
         }
+        let total_tokens = out.len();
         let elapsed = start.elapsed().as_secs_f64();
         let throughput_gb = size_gb / elapsed;
 

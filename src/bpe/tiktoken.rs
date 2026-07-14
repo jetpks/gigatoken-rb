@@ -22,9 +22,9 @@ pub struct Tokenizer {
     pub(crate) vocab_inv: HashMap<Arc<[u8]>, TokenId, rustc_hash::FxBuildHasher>,
     pub(crate) byte_remapping: Option<ByteRemapping>,
     /// Append-only arena of encoded token IDs. Cache entries for encodings
-    /// of 3+ tokens store `(offset, len)` slices into this vector; shorter
-    /// encodings (~98% of hit occurrences) live inline in the cache entry
-    /// and never touch it.
+    /// of 5+ tokens store `(offset, len)` slices into this vector; shorter
+    /// encodings (well over 99% of hit occurrences) live inline in the
+    /// cache entry and never touch it.
     token_arena: Vec<TokenId>,
     /// Pretoken cache for the common case (≤ 15 bytes, ~99.9% of
     /// pretokens). The key packs the bytes into the low 15 bytes and the
@@ -79,21 +79,43 @@ fn nfc_segment<'a>(seg: &'a [u8], buf: &'a mut String) -> &'a [u8] {
 }
 
 /// Cache-value packing (shared by the short-pretoken table and decode in
-/// the encode loop). Low byte: token count in bits 0-6 plus a "spilled"
-/// flag in bit 7. Inline values (1-2 tokens, each ID < 2^24 — true of
-/// every real vocab) carry the IDs in bits 8-31 and 32-55; spilled values
-/// carry the token-arena offset in the high 32 bits.
+/// the encode loop). `val` low byte: token count in bits 0-6 plus a
+/// "spilled" flag in bit 7. Inline values (1-4 tokens; only the first ID
+/// must fit 24 bits — true of every real vocab) carry tokens 1-2 in `val`
+/// bits 8-31 and 32-63 and tokens 3-4 in `ext`'s two u32 lanes; spilled
+/// values carry the token-arena offset in `val`'s high 32 bits and leave
+/// `ext` unused.
 const VAL_SPILL: u64 = 0x80;
 
 #[inline(always)]
-fn pack_val_inline(symbols: &[TokenId]) -> Option<u64> {
+fn pack_val_inline(symbols: &[TokenId]) -> Option<(u64, u64)> {
     match *symbols {
-        [a] if a.0 < (1 << 24) => Some(1 | ((a.0 as u64) << 8)),
-        [a, b] if a.0 < (1 << 24) && b.0 < (1 << 24) => {
-            Some(2 | ((a.0 as u64) << 8) | ((b.0 as u64) << 32))
+        [a] if a.0 < (1 << 24) => Some((1 | ((a.0 as u64) << 8), 0)),
+        [a, b] if a.0 < (1 << 24) => {
+            Some((2 | ((a.0 as u64) << 8) | ((b.0 as u64) << 32), 0))
         }
+        [a, b, c] if a.0 < (1 << 24) => Some((
+            3 | ((a.0 as u64) << 8) | ((b.0 as u64) << 32),
+            c.0 as u64,
+        )),
+        [a, b, c, d] if a.0 < (1 << 24) => Some((
+            4 | ((a.0 as u64) << 8) | ((b.0 as u64) << 32),
+            c.0 as u64 | ((d.0 as u64) << 32),
+        )),
         _ => None,
     }
+}
+
+/// Unpack an inline value's four token lanes (lanes past the count are
+/// another key's leftovers; callers truncate by the count).
+#[inline(always)]
+fn unpack_val_lanes(val: u64, ext: u64) -> [u32; 4] {
+    [
+        (val >> 8) as u32 & 0xFF_FFFF,
+        (val >> 32) as u32,
+        ext as u32,
+        (ext >> 32) as u32,
+    ]
 }
 
 impl Tokenizer {
@@ -339,78 +361,91 @@ impl Tokenizer {
         }
     }
 
+    /// Flat variant of [`Self::encode_with_added_tokens`]: the identical
+    /// token stream appended to `out` as raw u32 ids, routed through
+    /// [`Self::memoized_encode_flat`] so segment tokens land directly in
+    /// the caller's buffer (the batch engine's per-chunk id buffer).
+    pub fn encode_with_added_tokens_flat(&mut self, bytes: &[u8], out: &mut Vec<u32>) {
+        let pretokenizer_type = self.pretokenizer_type;
+        let normalize_nfc = self.normalize_nfc;
+        let mut nfc_buf = String::new();
+        let mut pos = 0;
+        while pos < bytes.len() {
+            let (seg_end, added) = match self.find_added_token(bytes, pos) {
+                Some((start, end, id)) => (start, Some((end, id))),
+                None => (bytes.len(), None),
+            };
+            let segment = if normalize_nfc {
+                nfc_segment(&bytes[pos..seg_end], &mut nfc_buf)
+            } else {
+                &bytes[pos..seg_end]
+            };
+            match pretokenizer_type {
+                PretokenizerType::GPT2 => {
+                    self.memoized_encode_flat(FastR50kPretokenizer::new(segment), out)
+                }
+                PretokenizerType::GPT4 => {
+                    self.memoized_encode_flat(FastCl100kPretokenizer::new(segment), out)
+                }
+                PretokenizerType::Qwen2 => {
+                    self.memoized_encode_flat(FastQwen2Pretokenizer::new(segment), out)
+                }
+                PretokenizerType::Qwen35 => {
+                    self.memoized_encode_flat(FastQwen35Pretokenizer::new(segment), out)
+                }
+                PretokenizerType::Olmo3 => {
+                    self.memoized_encode_flat(FastOlmo3Pretokenizer::new(segment), out)
+                }
+                PretokenizerType::DeepSeekV3 => {
+                    self.memoized_encode_flat(FastDeepSeekV3Pretokenizer::new(segment), out)
+                }
+            }
+            match added {
+                Some((end, id)) => {
+                    out.push(id.0);
+                    pos = end;
+                }
+                None => break,
+            }
+        }
+    }
+
     /// For each pretoken in the input iterator, looks up the string in the
     /// cache, and if not found, encodes it and inserts it into the cache.
     /// Calls `f` with the encoded token slice for each pretoken.
     ///
-    /// Runs in chunks of `CHUNK` pretokens through three phases — pull
-    /// spans from the pretokenizer, then key/hash/prefetch every span,
-    /// then probe and emit. The phase split serves two purposes:
-    /// - every cache probe was prefetched a phase earlier (hundreds of
-    ///   cycles: the ~1.3M-entry table on 1 GB OWT is far beyond L3, and
-    ///   unpipelined tail lookups were ~60-cycle stalls dominating encode);
-    /// - each phase is a tight loop over plain arrays, keeping the
-    ///   pretokenizer's state hot in one and letting the key/hash math
-    ///   schedule with high ILP in another instead of interleaving with
-    ///   the branchy probe/emit code.
+    /// A thin wrapper over the flat probe/emit machinery (see
+    /// [`Self::memoized_encode_flat`], the path the batch engine and
+    /// benches use): each chunk's tokens land in a reused L1-resident
+    /// buffer with per-pretoken end offsets recorded on the side, then `f`
+    /// receives one slice per pretoken.
     pub fn memoized_encode<'i>(
         &mut self,
         mut pretokens: impl PretokenSpans<'i>,
         mut f: impl FnMut(&[TokenId]),
     ) {
         let mut batch = SpanBatch::new();
+        let mut out: Vec<u32> = Vec::new();
+        let mut ends = [0usize; PRETOKEN_CHUNK];
         loop {
-            // Pull phase: a chunk of pretoken spans with keys and hashes
-            // derived and their probe lines prefetched on the way out (out
-            // of line, fused with the span walker — see PretokenSpans).
-            // Probes happen a phase later — hundreds of cycles, enough to
-            // cover DRAM — so the probe phase finds its lines in L1.
             let cache = &self.pretoken_cache;
-            let n = pretokens.fill_spans_keyed(&mut batch, &|h| cache.prefetch(h));
+            let n = pretokens.fill_spans_keyed(&mut batch, &|h| cache.prefetch_l2(h));
             if n == 0 {
                 break;
             }
-            // Probe phase: probe and emit. ~90% of pretokens encode to one
-            // token and ~98% to at most two (228M tokens / 208M pretokens
-            // on OWT); inline values avoid the dependent random load into
-            // `token_arena`.
-            for i in 0..n {
-                let (key, h) = (batch.keys[i], batch.hashes[i]);
-                if key != 0 {
-                    match self.pretoken_cache.get(key, h) {
-                        Some(val) => {
-                            let len = (val & 0x7F) as usize;
-                            if val & VAL_SPILL == 0 {
-                                let pair = [
-                                    TokenId((val >> 8) as u32 & 0xFF_FFFF),
-                                    TokenId((val >> 32) as u32),
-                                ];
-                                f(&pair[..len]);
-                            } else {
-                                let start = (val >> 32) as usize;
-                                // SAFETY: recorded right after appending
-                                // `len` tokens at `start`; the arena never
-                                // shrinks.
-                                f(unsafe { self.token_arena.get_unchecked(start..start + len) });
-                            }
-                        }
-                        None => self.encode_pretoken_miss(batch.spans[i], key, h, &mut f),
-                    }
-                } else {
-                    // Long pretokens (> 15 bytes, rare) always spill to the
-                    // arena; their token counts can exceed the packed-value
-                    // range, so they bypass it entirely.
-                    match self.pretoken_cache_long.get(batch.spans[i]) {
-                        Some(&(offset, len)) => {
-                            let start = offset as usize;
-                            // SAFETY: as above.
-                            f(unsafe {
-                                self.token_arena.get_unchecked(start..start + len as usize)
-                            })
-                        }
-                        None => self.encode_pretoken_miss(batch.spans[i], 0, 0, &mut f),
-                    }
-                }
+            out.clear();
+            self.probe_emit_chunk(&batch, n, &mut out, |i, w| ends[i] = w);
+            let mut start = 0;
+            for &end in &ends[..n] {
+                // SAFETY: TokenId is repr(transparent) over u32, and the
+                // recorded ends partition `out` (0 <= start <= end <= len).
+                f(unsafe {
+                    std::slice::from_raw_parts(
+                        out.as_ptr().add(start) as *const TokenId,
+                        end - start,
+                    )
+                });
+                start = end;
             }
             if n < PRETOKEN_CHUNK {
                 break;
@@ -418,17 +453,167 @@ impl Tokenizer {
         }
     }
 
-    /// Cache-miss path of [`Self::memoized_encode`]: BPE-encode `bytes` and
-    /// record it in the table `key` routes to (the short-pretoken table,
-    /// or the long map when `key == 0`). Out of line to keep the hit
-    /// loop's code compact.
+    /// Flat variant of [`Self::memoized_encode`]: the identical token
+    /// stream appended to `out` as raw u32 ids (bit-compatible with
+    /// `TokenId`), with no per-pretoken delivery. This is the batch
+    /// engine's output shape (`batch::encode_into` fills chunk id buffers),
+    /// so the emit loop writes tokens straight into the final buffer.
+    ///
+    /// Runs in chunks of `PRETOKEN_CHUNK` pretokens through two phases —
+    /// pull spans from the pretokenizer with keys/hashes derived and probe
+    /// lines prefetched into L2 on the way out (out of line, fused with
+    /// the span walker — see PretokenSpans), then probe and emit. The
+    /// phase split keeps the walker's state register-allocated in one
+    /// tight loop and gives every probe line a chunk of latency (hundreds
+    /// of cycles, enough to cover DRAM) before its probe.
+    pub fn memoized_encode_flat<'i>(
+        &mut self,
+        mut pretokens: impl PretokenSpans<'i>,
+        out: &mut Vec<u32>,
+    ) {
+        let mut batch = SpanBatch::new();
+        loop {
+            let cache = &self.pretoken_cache;
+            let n = pretokens.fill_spans_keyed(&mut batch, &|h| cache.prefetch_l2(h));
+            if n == 0 {
+                break;
+            }
+            self.probe_emit_chunk(&batch, n, out, |_, _| {});
+            if n < PRETOKEN_CHUNK {
+                break;
+            }
+        }
+    }
+
+    /// Probe-and-emit for one chunk: branchless flat emit with a single
+    /// rare data-dependent branch per pretoken. Every iteration stores the
+    /// probed value's four token lanes unconditionally at the write cursor
+    /// and advances by the token count only when the fast predicate (pair
+    /// hit ∧ inline value ∧ short key, ~99% of pretokens) holds; stores
+    /// past the cursor are dead — overwritten by a later iteration or
+    /// truncated by the final `set_len`. Everything else — probe walks
+    /// past the home pair, arena spills, long pretokens, misses — takes
+    /// the `#[cold]` slow path. `record(i, cursor)` runs once per pretoken
+    /// (per-pretoken slicing in [`Self::memoized_encode`]; a no-op closure
+    /// in the flat variant).
+    ///
+    /// Slack invariant: `out.capacity() >= cursor + 4 * (iterations
+    /// left)`, established by the reserve below and re-established by the
+    /// slow path after any reallocation, so the two 8-byte stores are
+    /// always in bounds.
+    #[inline(always)]
+    fn probe_emit_chunk(
+        &mut self,
+        batch: &SpanBatch<'_>,
+        n: usize,
+        out: &mut Vec<u32>,
+        mut record: impl FnMut(usize, usize),
+    ) {
+        out.reserve(4 * n);
+        let mut w = out.len();
+        // Probe-stage prefetch: promote the pair's line L2 -> L1 a fixed
+        // short distance ahead (the fill phase staged it into L2; D only
+        // has to cover the L2 hit latency, a handful of iterations).
+        const D: usize = 16;
+        for i in 0..D.min(n) {
+            self.pretoken_cache.prefetch(batch.hashes[i]);
+        }
+        for i in 0..n {
+            if i + D < n {
+                self.pretoken_cache.prefetch(batch.hashes[i + D]);
+            }
+            let (key, h) = (batch.keys[i], batch.hashes[i]);
+            let (val, ext, found) = self.pretoken_cache.probe_pair(key, h);
+            // `key != 0` folds the long-pretoken route in AND guards the
+            // empty-slot sentinel (probe_pair matches key 0 against empty
+            // slots); on !found the lanes below are another entry's, dead
+            // because the cursor does not advance.
+            let fast = found & (val & VAL_SPILL == 0) & (key != 0);
+            // Lanes 1-2 packed into one u64 store, lanes 3-4 are `ext`
+            // verbatim (little-endian lane order, like the raw key load in
+            // `pack_pretoken_key`).
+            let ab = ((val >> 8) & 0x00FF_FFFF) | (val & 0xFFFF_FFFF_0000_0000);
+            // SAFETY: the slack invariant leaves >= 4 u32s past `w`.
+            unsafe {
+                let p = out.as_mut_ptr().add(w);
+                (p as *mut u64).write_unaligned(ab);
+                (p.add(2) as *mut u64).write_unaligned(ext);
+            }
+            w += if fast { (val & 0x7F) as usize } else { 0 };
+            if !fast {
+                w = self.probe_emit_slow(batch.spans[i], key, h, out, w);
+            }
+            record(i, w);
+        }
+        // SAFETY: w <= capacity by the slack invariant, and every element
+        // below `w` was written (fast advances never skip lanes; the slow
+        // path appends through Vec).
+        unsafe { out.set_len(w) };
+    }
+
+    /// Everything [`Self::probe_emit_chunk`]'s fast predicate rejects.
+    /// Appends this pretoken's tokens at cursor `w` and returns the new
+    /// cursor, re-establishing the emit loop's slack invariant.
+    #[cold]
+    #[inline(never)]
+    fn probe_emit_slow(
+        &mut self,
+        bytes: &[u8],
+        key: u128,
+        h: u64,
+        out: &mut Vec<u32>,
+        w: usize,
+    ) -> usize {
+        // SAFETY: elements below `w` are initialized and w <= capacity
+        // (emit-loop invariant); Vec append methods need len in sync.
+        unsafe { out.set_len(w) };
+        if key != 0 {
+            match self.pretoken_cache.get(key, h) {
+                Some((val, ext)) => {
+                    let len = (val & 0x7F) as usize;
+                    if val & VAL_SPILL == 0 {
+                        out.extend_from_slice(&unpack_val_lanes(val, ext)[..len]);
+                    } else {
+                        let start = (val >> 32) as usize;
+                        // SAFETY: recorded right after appending `len`
+                        // tokens at `start`; the arena never shrinks.
+                        let toks =
+                            unsafe { self.token_arena.get_unchecked(start..start + len) };
+                        out.extend(toks.iter().map(|t| t.0));
+                    }
+                }
+                None => self.encode_pretoken_miss(bytes, key, h, out),
+            }
+        } else {
+            // Long pretokens (> 15 bytes, rare) always spill to the arena;
+            // their token counts can exceed the packed-value range, so
+            // they bypass it entirely.
+            match self.pretoken_cache_long.get(bytes) {
+                Some(&(offset, len)) => {
+                    let start = offset as usize;
+                    // SAFETY: as above.
+                    let toks = unsafe {
+                        self.token_arena.get_unchecked(start..start + len as usize)
+                    };
+                    out.extend(toks.iter().map(|t| t.0));
+                }
+                None => self.encode_pretoken_miss(bytes, 0, 0, out),
+            }
+        }
+        out.reserve(4 * PRETOKEN_CHUNK);
+        out.len()
+    }
+
+    /// Cache-miss path of the probe/emit loop: BPE-encode `bytes`, record
+    /// it in the table `key` routes to (the short-pretoken table, or the
+    /// long map when `key == 0`), and append its tokens to `out`.
     #[inline(never)]
     fn encode_pretoken_miss(
         &mut self,
         bytes: &[u8],
         key: u128,
         h: u64,
-        f: &mut impl FnMut(&[TokenId]),
+        out: &mut Vec<u32>,
     ) {
         // Encode into reusable scratch; only encodings too long to inline
         // go to the arena. A pretoken that is a complete vocab entry
@@ -447,21 +632,21 @@ impl Tokenizer {
         }
         let len = symbols.len() as u32;
         if key != 0 {
-            let val = match pack_val_inline(symbols) {
-                Some(val) => val,
+            let (val, ext) = match pack_val_inline(symbols) {
+                Some(packed) => packed,
                 None => {
                     let offset = self.token_arena.len() as u64;
                     self.token_arena.extend_from_slice(symbols);
-                    VAL_SPILL | len as u64 | (offset << 32)
+                    (VAL_SPILL | len as u64 | (offset << 32), 0)
                 }
             };
-            self.pretoken_cache.insert(key, h, val);
+            self.pretoken_cache.insert(key, h, val, ext);
         } else {
             let offset = self.token_arena.len() as u32;
             self.token_arena.extend_from_slice(symbols);
             self.pretoken_cache_long.insert(bytes.into(), (offset, len));
         }
-        f(symbols);
+        out.extend(symbols.iter().map(|t| t.0));
     }
 
     pub fn decode(&self, v: &[TokenId]) -> impl Iterator<Item = u8> {
