@@ -76,6 +76,8 @@ impl<'a> Iterator for FastCl100kPretokenizer<'a> {
     }
 }
 
+super::impl_mask_pretoken_spans!(FastCl100kPretokenizer, Cl100kScheme);
+
 /// Whitespace-led token starting at `start`, i.e. the alternatives
 /// `\s++$` | `\s*[\r\n]` | `\s+(?!\S)` | `\s+`, in that priority.
 /// Precondition: the letter-prefix (`[^\r\n\p{L}\p{N}]?+\p{L}++`) and

@@ -1,0 +1,36 @@
+Events disabled
+Loading tokenizer from "/home/marcel/projects/tokers/.claude/worktrees/agent-a5ba8c6f81c499ac8/data/gpt2_tokenizer.json"...
+Reading "/home/marcel/data/owt_train.txt"...
+Read 1.00 GB in 0.3s
+Encoding (single-threaded)...
+Events enabled
+pass 0: 228107519 tokens in 1.46s — 0.69 GB/s (685 MB/s)
+cache: short 1315258 entries (cap 2097152), long 51476 (cap 57344, 1157749 key bytes), arena 918268 tokens (cap 1835008)
+
+ Performance counter stats for 'env ENCODE_MB=1000 ENCODE_PASSES=1 ./target/release/deps/encode_st-57c4b9fdb93c41d6':
+
+        38,568,976      ex_ret_brn_misp                  #      8.2 %ops  bad_speculation_from_mispredicts
+                                                         #      0.4 %ops  bad_speculation_from_pipeline_restarts  (25.00%)
+         1,676,468      bp_redirects.resync                                                     (25.00%)
+    31,156,012,061      de_src_op_disp.all                                                      (25.00%)
+     7,605,749,555      ls_not_halted_cyc                                                       (25.00%)
+    25,960,026,329      ex_ret_ops                                                              (25.00%)
+     2,420,633,598      ex_no_retire.load_not_complete   #      1.7 %slots  backend_bound_by_cpu
+                                                         #     29.8 %slots  backend_bound_by_memory  (25.08%)
+    19,163,802,463      de_no_dispatch_per_slot.backend_stalls                                        (25.08%)
+     2,560,791,138      ex_no_retire.not_complete                                               (25.08%)
+     7,604,434,728      ls_not_halted_cyc                                                       (25.08%)
+       239,861,576      ex_ret_ucode_ops                 #     42.3 %slots  retiring_from_fastpath
+                                                         #      0.4 %slots  retiring_from_microcode  (24.98%)
+     7,609,846,712      ls_not_halted_cyc                                                       (24.98%)
+    26,000,259,594      ex_ret_ops                                                              (24.98%)
+    10,478,899,458      de_no_dispatch_per_slot.no_ops_from_frontend #      4.9 %slots  frontend_bound_by_bandwidth  (24.94%)
+     7,611,091,764      ls_not_halted_cyc                                                       (24.94%)
+       937,205,192      cpu/de_no_dispatch_per_slot.no_ops_from_frontend,cmask=0x8/ #     12.3 %slots  frontend_bound_by_latency  (24.94%)
+
+       1.460182858 seconds time elapsed
+
+       1.445577000 seconds user
+       0.414165000 seconds sys
+
+

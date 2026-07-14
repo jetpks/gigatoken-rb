@@ -1,0 +1,28 @@
+Events disabled
+Loading tokenizer from "/home/marcel/projects/tokers/.claude/worktrees/agent-a5ba8c6f81c499ac8/data/gpt2_tokenizer.json"...
+Reading "/home/marcel/data/owt_train.txt"...
+Read 1.00 GB in 0.3s
+Encoding (single-threaded)...
+Events enabled
+pass 0: 228107519 tokens in 1.44s — 0.70 GB/s (697 MB/s)
+cache: short 1315258 entries (cap 2097152), long 51476 (cap 57344, 1157749 key bytes), arena 918268 tokens (cap 1835008)
+
+ Performance counter stats for 'env ENCODE_MB=1000 ENCODE_PASSES=1 ./target/release/deps/encode_st-57c4b9fdb93c41d6':
+
+     2,256,263,522      ex_ret_brn                       #      0.0 per_branch  branch_misprediction_rate  (39.92%)
+        38,290,319      ex_ret_brn_misp                                                         (39.92%)
+        14,940,013      L1-icache-load-misses            #      7.2 %  l1i_miss_rate            (40.07%)
+       208,340,570      L1-icache-loads                                                         (40.07%)
+             5,036      iTLB-loads                       #     12.8 %  itlb_miss_rate           (40.09%)
+               643      iTLB-load-misses                                                        (40.09%)
+       261,800,261      dTLB-loads                       #      4.8 %  dtlb_miss_rate           (40.01%)
+        12,612,434      dTLB-load-misses                                                        (40.01%)
+       216,064,218      L1-dcache-load-misses            #      2.6 %  l1d_miss_rate            (39.91%)
+     8,455,814,619      L1-dcache-loads                                                         (39.91%)
+
+       1.440409819 seconds time elapsed
+
+       1.419534000 seconds user
+       0.420158000 seconds sys
+
+

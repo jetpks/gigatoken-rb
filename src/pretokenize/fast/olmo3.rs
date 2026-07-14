@@ -72,6 +72,8 @@ impl<'a> Iterator for FastOlmo3Pretokenizer<'a> {
     }
 }
 
+super::impl_mask_pretoken_spans!(FastOlmo3Pretokenizer, Olmo3Scheme);
+
 /// Whitespace-led token starting at `start`, i.e. the alternatives
 /// `\s*[\r\n]+` | `\s+(?!\S)` | `\s+`, in that priority.
 /// Precondition: the letter-prefix (`[^\r\n\p{L}\p{N}]?\p{L}+`) and

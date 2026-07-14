@@ -16,6 +16,7 @@ use std::time::Instant;
 
 mod common;
 fn main() {
+    common::allow_thp();
     let tokenizer_json = std::env::var("TOKENIZER_JSON")
         .unwrap_or_else(|_| "data/gpt2_tokenizer.json".to_string());
     let tokenizer_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(&tokenizer_json);

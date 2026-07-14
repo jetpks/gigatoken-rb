@@ -1,0 +1,4 @@
+event syntax error: '{l3_lookup_state.l3_miss/metric-id=l3_lookup_state.l3_mi..'
+                      \___ Bad event or PMU
+
+Unable to find PMU or event on a PMU of 'l3_lookup_state.l3_miss'

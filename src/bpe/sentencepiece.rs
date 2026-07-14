@@ -1,5 +1,5 @@
 use crate::bpe::bpe_merge_symbols_ranked;
-use crate::bpe::tiktoken::pack_pretoken_key;
+use crate::pretokenize::pack_pretoken_key;
 use crate::token::TokenId;
 use rustc_hash::FxBuildHasher;
 use std::borrow::Cow;

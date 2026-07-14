@@ -115,3 +115,27 @@ impl<'a> Iterator for FastPretokenizerDispatch<'a> {
         }
     }
 }
+
+// SAFETY: pure delegation to the concrete pretokenizers' (contract-upholding)
+// fills; no entries are written here.
+unsafe impl<'a> crate::pretokenize::PretokenSpans<'a> for FastPretokenizerDispatch<'a> {
+    /// One dispatch per chunk instead of one per pretoken, delegating to
+    /// the concrete pretokenizers' fused chunk fills.
+    #[inline]
+    fn fill_spans_keyed(
+        &mut self,
+        batch: &mut crate::pretokenize::SpanBatch<'a>,
+        prefetch: &impl Fn(u64),
+    ) -> usize {
+        use crate::pretokenize::PretokenSpans;
+        match self {
+            FastPretokenizerDispatch::R50k(it) => it.fill_spans_keyed(batch, prefetch),
+            FastPretokenizerDispatch::Cl100k(it) => it.fill_spans_keyed(batch, prefetch),
+            FastPretokenizerDispatch::Qwen2(it) => it.fill_spans_keyed(batch, prefetch),
+            FastPretokenizerDispatch::Qwen35(it) => it.fill_spans_keyed(batch, prefetch),
+            FastPretokenizerDispatch::Olmo3(it) => it.fill_spans_keyed(batch, prefetch),
+            FastPretokenizerDispatch::DeepSeekV3(it) => it.fill_spans_keyed(batch, prefetch),
+        }
+    }
+}
+

@@ -75,6 +75,8 @@ impl<'a> Iterator for FastQwen35Pretokenizer<'a> {
     }
 }
 
+super::impl_mask_pretoken_spans!(FastQwen35Pretokenizer, Qwen35Scheme);
+
 /// If the char at `pos` is `\p{L}` or `\p{M}`, return the offset just past it.
 #[inline(always)]
 fn lm_end_at(bytes: &[u8], pos: usize) -> Option<usize> {

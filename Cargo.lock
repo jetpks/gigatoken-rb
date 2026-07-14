@@ -1112,6 +1112,7 @@ dependencies = [
  "icu_codepointtrie_builder",
  "indicatif",
  "itertools 0.15.0",
+ "libc",
  "memchr",
  "memmap2",
  "numpy",

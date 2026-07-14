@@ -27,6 +27,10 @@
 //! 4. [`MaskState`] — the scheme-agnostic batch walker: segments, bad-zone
 //!    gaps, scalar tail, one-batch-ahead precompute; scalar overruns stay
 //!    on the 64-byte grid so the precompute survives them.
+//! 5. [`MaskState::fill_spans_two_phase`] — the chunked pull the encode
+//!    loop uses: the same masks and trust rules as `next_span`, but
+//!    harvested a chunk at a time into a flat boundary buffer and emitted
+//!    in a branch-free counted loop.
 
 use crate::pretokenize::unicode::{self, CharClass};
 
@@ -106,10 +110,31 @@ pub(crate) unsafe fn movemask64(
     unsafe {
         const W: [u8; 16] = [1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128];
         let w = vld1q_u8(W.as_ptr());
-        let s0 = vpaddq_u8(vandq_u8(v0, w), vandq_u8(v1, w));
-        let s1 = vpaddq_u8(vandq_u8(v2, w), vandq_u8(v3, w));
-        let s = vpaddq_u8(vpaddq_u8(s0, s1), vdupq_n_u8(0));
-        vgetq_lane_u64::<0>(vreinterpretq_u64_u8(s))
+        let mut a0 = vandq_u8(v0, w);
+        let a1 = vandq_u8(v1, w);
+        let mut a2 = vandq_u8(v2, w);
+        let a3 = vandq_u8(v3, w);
+        // The 4-`addp` reduction tree (simdjson's arm64 movemask), pinned
+        // as asm. Written with `vpaddq_u8`, LLVM rewrites every pairwise
+        // add into a uzp1/uzp2/orr triple — adjacent weighted lanes have
+        // disjoint bits, so add == or, and the canonical or-form never
+        // re-forms addp — inflating each call from 9 to 17 vector ops
+        // (4-7 calls per 64-byte batch across the schemes). The weighted
+        // `and`s stay outside so the scheduler still interleaves
+        // neighboring calls. `addp(x, x)` lane 0..7 equals the old
+        // `addp(x, zero)` lanes 0..7; only lane u64 0 is read.
+        core::arch::asm!(
+            "addp {a0:v}.16b, {a0:v}.16b, {a1:v}.16b",
+            "addp {a2:v}.16b, {a2:v}.16b, {a3:v}.16b",
+            "addp {a0:v}.16b, {a0:v}.16b, {a2:v}.16b",
+            "addp {a0:v}.16b, {a0:v}.16b, {a0:v}.16b",
+            a0 = inout(vreg) a0,
+            a1 = in(vreg) a1,
+            a2 = inout(vreg) a2,
+            a3 = in(vreg) a3,
+            options(pure, nomem, nostack, preserves_flags),
+        );
+        vgetq_lane_u64::<0>(vreinterpretq_u64_u8(a0))
     }
 }
 
@@ -295,17 +320,24 @@ pub(crate) fn ascii_masks_avx2(bytes: &[u8], scan: usize) -> AsciiMasks {
 // -----------------------------------------------------------------------
 
 /// Is the char starting at `idx` NOT whitespace (`\S` for a `(?!\S)`
-/// lookahead)? Full answer via the packed table; the caller guarantees
-/// the whole char is in bounds (a `scan + 70 <= len` batch guard covers
-/// every call site's worst case).
+/// lookahead)? Full answer via the packed table.
+///
+/// # Safety
+///
+/// `idx < bytes.len()`, and when `bytes[idx]` is non-ASCII,
+/// `idx + 4 <= bytes.len()` (the guardless [`decode_cp_inbounds`] read).
+/// The batch classifiers' `scan + 70 <= len` guard covers every call
+/// site's worst case (`idx = scan + 64`).
 #[inline(always)]
-pub(crate) fn nn_at_full(bytes: &[u8], idx: usize) -> bool {
-    use super::{decode_cp, is_ascii_ws};
+pub(crate) unsafe fn nn_at_full(bytes: &[u8], idx: usize) -> bool {
+    use super::{decode_cp_inbounds, is_ascii_ws};
     let b = bytes[idx];
     if b < 0x80 {
         return !is_ascii_ws(b);
     }
-    let (cp, _) = unsafe { decode_cp(bytes, idx) };
+    // SAFETY: caller guarantees idx + 4 <= len for a non-ASCII byte here
+    // (this fn's contract).
+    let (cp, _) = unsafe { decode_cp_inbounds(bytes, idx) };
     unicode::class_of(cp) != CharClass::Whitespace
 }
 
@@ -317,13 +349,21 @@ pub(crate) fn nn_at_full(bytes: &[u8], idx: usize) -> bool {
 /// compute true boundary carries instead of deferring to a bad zone.
 /// `class`: the scheme's codepoint classifier (`unicode::class_of`, or a
 /// mark-folding view like `unicode::class_of_marks_join`).
+///
+/// # Safety
+///
+/// `pos > 0`, and when `bytes[pos - 1]` is non-ASCII,
+/// `pos + 3 <= bytes.len()`: the walk-back lead `j` satisfies
+/// `j <= pos - 1`, so the guardless [`decode_cp_inbounds`] read needs
+/// `j + 4 <= pos + 3` in-bounds bytes. The batch classifiers' `scan + 70
+/// <= len` guard covers every call site (`pos <= scan + 64`).
 #[inline(always)]
-pub(crate) fn char_through(
+pub(crate) unsafe fn char_through(
     bytes: &[u8],
     pos: usize,
     class: impl Fn(u32) -> CharClass,
 ) -> (CharClass, usize, usize) {
-    use super::{decode_cp, is_ascii_ws, is_digit, is_letter};
+    use super::{decode_cp_inbounds, is_ascii_ws, is_digit, is_letter};
     let b = bytes[pos - 1];
     if b < 0x80 {
         let cls = if is_letter(b) {
@@ -341,7 +381,9 @@ pub(crate) fn char_through(
     while j > 0 && bytes[j] & 0xC0 == 0x80 {
         j -= 1;
     }
-    let (cp, l) = unsafe { decode_cp(bytes, j) };
+    // SAFETY: j < pos and pos + 3 <= len (this fn's contract), so
+    // j + 4 <= len.
+    let (cp, l) = unsafe { decode_cp_inbounds(bytes, j) };
     (class(cp), j, j + l)
 }
 
@@ -380,9 +422,8 @@ pub(crate) struct UniClasses {
 
 /// Classify every unicode char whose lead bit is in `m` (typically
 /// `hi & !claimed-straddle-in-bytes`) for `bytes[scan..scan+64]`.
-/// Requires `scan + 70 <= len` (lookahead for a 4-byte char led at bit
-/// 63). A char spilling off the batch end is classified via that
-/// lookahead; only its in-batch bytes get class bits, and the next
+/// A char spilling off the batch end is classified via the lookahead
+/// bytes; only its in-batch bytes get class bits, and the next
 /// batch's `char_through` walk-back covers the remainder. `NUMBERS`:
 /// false for schemes whose digit grouping is char-counted (`\p{N}{1,3}`
 /// byte masks can't express multi-byte chars), true otherwise.
@@ -392,14 +433,20 @@ pub(crate) struct UniClasses {
 /// The loop stays branchy on purpose: a branchless csel-selected
 /// decode/classify body measured 0.986x (predicted branches beat data
 /// chains, log step 13/17).
+///
+/// # Safety
+///
+/// `scan + 70 <= bytes.len()` (the batch classifiers' lookahead guard):
+/// a lead bit at position 63 puts the guardless [`decode_cp_inbounds`]
+/// read at `scan + 63`, which may touch through `scan + 67`.
 #[inline(always)]
-pub(crate) fn classify_uni_chars<const NUMBERS: bool, const LEADS: bool>(
+pub(crate) unsafe fn classify_uni_chars<const NUMBERS: bool, const LEADS: bool>(
     bytes: &[u8],
     scan: usize,
     mut m: u64,
     class: impl Fn(u32) -> CharClass,
 ) -> UniClasses {
-    use super::decode_cp;
+    use super::decode_cp_inbounds;
     let mut u = UniClasses::default();
     while m != 0 {
         let i = m.trailing_zeros() as usize;
@@ -418,7 +465,9 @@ pub(crate) fn classify_uni_chars<const NUMBERS: bool, const LEADS: bool>(
         };
         let chm = ((1u64 << l) - 1) << i; // in-batch bytes (excess drops)
         let lead = 1u64 << i;
-        let (cp, _) = unsafe { decode_cp(bytes, scan + i) };
+        // SAFETY: scan + 70 <= len (this fn's # Safety contract), i <= 63,
+        // so scan + i + 4 <= len even for a 4-byte lead at bit 63.
+        let (cp, _) = unsafe { decode_cp_inbounds(bytes, scan + i) };
         match class(cp) {
             CharClass::Letter => u.l |= chm,
             CharClass::Number => {
@@ -661,5 +710,441 @@ impl MaskState {
                 self.scalar_until = usize::MAX;
             }
         }
+    }
+}
+
+// -----------------------------------------------------------------------
+// Two-phase chunked span fill
+// -----------------------------------------------------------------------
+
+/// Set-bit positions of a byte, packed in 8 u16 lanes (unused lanes 0,
+/// never read). 4 KB, L1-resident alongside the unicode class table.
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+static BIT_POS: [[u16; 8]; 256] = {
+    let mut t = [[0u16; 8]; 256];
+    let mut b = 1usize;
+    while b < 256 {
+        let mut j = 0;
+        let mut w = 0;
+        while j < 8 {
+            if b >> j & 1 == 1 {
+                t[b][w] = j as u16;
+                w += 1;
+            }
+            j += 1;
+        }
+        b += 1;
+    }
+    t
+};
+
+/// Append the set-bit positions of `m`, offset by `rel` (wrapping), to
+/// `out[0..popcount]` with no data-dependent branch: 8 fixed iterations,
+/// one unconditional 8-lane store each at that octet's exclusive-prefix
+/// popcount, so 64 bits cost the same straight-line code regardless of
+/// population. Scribbles up to `out[popcount + 7]`; callers reserve the
+/// slack. Returns the popcount.
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+#[inline(always)]
+unsafe fn flatten_bits(m: u64, rel: u16, out: *mut u16) -> usize {
+    // Per-octet popcounts (SWAR); one multiply turns them into inclusive
+    // prefix sums, and a byte shift makes them exclusive write offsets —
+    // the 8 stores below are mutually independent.
+    let mut x = m;
+    x -= (x >> 1) & 0x5555_5555_5555_5555;
+    x = (x & 0x3333_3333_3333_3333) + ((x >> 2) & 0x3333_3333_3333_3333);
+    x = (x + (x >> 4)) & 0x0F0F_0F0F_0F0F_0F0F;
+    let incl = x.wrapping_mul(0x0101_0101_0101_0101);
+    let excl = incl << 8;
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        use std::arch::aarch64::*;
+        for j in 0..8 {
+            let b = (m >> (8 * j)) as u8 as usize;
+            let w = (excl >> (8 * j)) as u8 as usize;
+            let v = vld1q_u16(BIT_POS[b].as_ptr());
+            let v = vaddq_u16(v, vdupq_n_u16(rel.wrapping_add(8 * j as u16)));
+            vst1q_u16(out.add(w), v);
+        }
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    unsafe {
+        for j in 0..8 {
+            let b = (m >> (8 * j)) as u8 as usize;
+            let w = (excl >> (8 * j)) as u8 as usize;
+            let e = &BIT_POS[b];
+            let base = rel.wrapping_add(8 * j as u16);
+            // Fixed 8-lane copy: autovectorizes to one 16-byte store.
+            for t in 0..8 {
+                out.add(w + t).write(e[t].wrapping_add(base));
+            }
+        }
+    }
+    (incl >> 56) as usize
+}
+
+/// [`pack_mask_halves`](crate::pretokenize::pack_mask_halves) — the single
+/// source of the mask math — evaluated for each clamped length `m` in
+/// 1..=15 (entry 0 unused), as one 16-byte row so the phase-B emission
+/// loop loads both halves with a single `ldp`. That loop is
+/// issue-width-bound (~34 instructions/span before, at 4 stores + 2 loads
+/// it is nowhere near the load/store port limits), so trading the 7-op
+/// per-half shift/select chain for 1 always-L1-hot load (256 B, 4 lines)
+/// is a straight instruction-count cut. The ALU form stays in
+/// `pack_mask_halves` for the latency-chained per-span paths — see its
+/// docs for the measured cost of a dependent load on those chains.
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+static PACK_MASK_TABLE: [[u64; 2]; 16] = {
+    let mut t = [[0u64; 2]; 16];
+    let mut n = 1;
+    while n <= 15 {
+        let (lo, hi) = crate::pretokenize::pack_mask_halves(n);
+        t[n] = [lo, hi];
+        n += 1;
+    }
+    t
+};
+
+/// Boundary scratch of one fill: PRETOKEN_CHUNK live entries, one batch of
+/// overshoot from the last harvested batch (64 in-batch boundaries plus one
+/// scalar-overrun end), and [`flatten_bits`]' 8-lane scribble slack, with
+/// margin.
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+const BOUND_BUF: usize = crate::pretokenize::PRETOKEN_CHUNK + 144;
+
+/// Boundary offsets are u16-relative to the fill base; a batch is only
+/// harvested while every position it can contribute (base + 63, or the
+/// tail's `len`, both < base + 64) still fits.
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+const REL_LIMIT: isize = u16::MAX as isize - 127;
+
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+impl MaskState {
+    /// Two-phase `fill_spans_keyed` body: phase A harvests one chunk's
+    /// boundary positions into a flat buffer (branchless [`flatten_bits`]
+    /// per clean batch; the scheme's scalar `advance` through bad zones,
+    /// with `next_span`'s exact segment/overrun/tail trust rules), then
+    /// phase B turns consecutive boundary pairs into batch entries
+    /// in a counted loop with no data-dependent branch. The per-span
+    /// refill ladder, pop-exit and pack mispredicts of the fused
+    /// `next_span` loop (the dominant share of encode's 25% discarded
+    /// issue bandwidth) collapse into one predictable branch per 64-byte
+    /// batch.
+    ///
+    /// Boundary sets are identical to `next_span`'s by construction: the
+    /// same `batch_masks` bits, the same scalar re-derivation for bad
+    /// zones. Leftover boundaries past the chunk are discarded and `scan`
+    /// rewound to the grid batch containing `pos` — masks are pure
+    /// functions of the bytes, so the ~1 recomputed batch per fill buys
+    /// carry-free fills, and a later `next_span` (which only ever advances
+    /// `scan`) cannot skip the discarded bits. All other fields are reset
+    /// so iterator and chunked pulls compose in any order.
+    ///
+    /// Callers must ensure [`simd_scanner_available`] (the scheme's
+    /// `batch_masks` is unsafe to call otherwise on x86_64).
+    #[inline(always)]
+    pub(crate) fn fill_spans_two_phase<'a, S: MaskScheme>(
+        &mut self,
+        bytes: &'a [u8],
+        batch: &mut crate::pretokenize::SpanBatch<'a>,
+        prefetch: &impl Fn(u64),
+    ) -> usize {
+        // Hash-arm dispatch, once per fill (≤ PRETOKEN_CHUNK spans), on
+        // the process-immutable `crc_hash_selected` bit — see
+        // `fill_span_hash` for why this keeps every hash site consistent.
+        #[cfg(target_arch = "x86_64")]
+        if crate::pretokenize::crc_hash_selected() {
+            // SAFETY: `crc_hash_selected` verified SSE4.2 support.
+            return unsafe { self.fill_spans_two_phase_crc::<S>(bytes, batch, prefetch) };
+        }
+        self.fill_spans_two_phase_impl::<S, false>(bytes, batch, prefetch)
+    }
+
+    /// The SSE4.2 (CRC-hash) monomorphization of
+    /// [`Self::fill_spans_two_phase`].
+    ///
+    /// # Safety
+    ///
+    /// The CPU must support SSE4.2 (`crc_hash_selected` must have
+    /// returned true). The caller must also uphold
+    /// [`Self::fill_spans_two_phase`]'s own precondition
+    /// ([`simd_scanner_available`]).
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "sse4.2")]
+    unsafe fn fill_spans_two_phase_crc<'a, S: MaskScheme>(
+        &mut self,
+        bytes: &'a [u8],
+        batch: &mut crate::pretokenize::SpanBatch<'a>,
+        prefetch: &impl Fn(u64),
+    ) -> usize {
+        self.fill_spans_two_phase_impl::<S, true>(bytes, batch, prefetch)
+    }
+
+    /// [`Self::fill_spans_two_phase`]'s body, monomorphized on the hash
+    /// arm (`X86_CRC` — see `fill_span_hash`'s reachability contract).
+    #[inline(always)]
+    fn fill_spans_two_phase_impl<'a, S: MaskScheme, const X86_CRC: bool>(
+        &mut self,
+        bytes: &'a [u8],
+        batch: &mut crate::pretokenize::SpanBatch<'a>,
+        prefetch: &impl Fn(u64),
+    ) -> usize {
+        use crate::pretokenize::{
+            PRETOKEN_CHUNK, fill_span_hash, pack_pretoken_key,
+        };
+        debug_assert!(simd_scanner_available());
+        let len = bytes.len();
+        let mut pending = self.pos;
+        let mut scan = self.scan;
+        // Rewind onto the grid batch containing `pending` after iterator
+        // pops (next_span keeps consumed batches' bits in `rem`, which
+        // this path recomputes). The forward direction is normalized at
+        // each refill below.
+        if scan > pending {
+            scan -= 64 * (scan - pending).div_ceil(64);
+        }
+        let mut n = 0usize;
+        // Opaque table base: LLVM rematerializes the static's address as
+        // an adrp+add pair inside the per-span emission loop (constant
+        // addresses are "free to recompute" to the register allocator);
+        // pinning it here keeps the loop at one indexed ldp per span.
+        let pack_masks: *const [u64; 2] = std::hint::black_box(PACK_MASK_TABLE.as_ptr());
+
+        'refill: while n < PRETOKEN_CHUNK && pending < len {
+            // Skip grid batches wholly behind `pending` (a direct-emitted
+            // long span or a dropped overrun end can leave `scan` far
+            // back); keeps `resume - base <= 63` for every batch below.
+            if pending >= scan + 64 {
+                scan += 64 * ((pending - scan) / 64);
+            }
+            let fill_base = pending;
+            let needed = PRETOKEN_CHUNK - n;
+            let mut buf = [std::mem::MaybeUninit::<u16>::uninit(); BOUND_BUF];
+            let bufp = buf.as_mut_ptr() as *mut u16;
+            let mut nb = 0usize;
+            // Boundary bits at or below `resume` are settled: the pending
+            // token's own start, or stale run-internal bits behind a
+            // scalar overrun (see next_span's grid-keeping comment).
+            let mut resume = pending;
+            let mut exhausted = false;
+            // A scalar end past the u16 window: dropped and re-derived
+            // next fill, unless it is the fill's first boundary (emitted
+            // directly below).
+            let mut overflow_end: Option<usize> = None;
+
+            // Phase A: harvest boundary positions.
+            'harvest: while nb < needed {
+                if scan.wrapping_sub(fill_base) as isize > REL_LIMIT {
+                    break; // re-base: offsets would leave the u16 window
+                }
+                if scan + 64 > len {
+                    // Scalar tail to end of input.
+                    let mut p = if nb > 0 {
+                        fill_base + unsafe { *bufp.add(nb - 1) } as usize
+                    } else {
+                        fill_base
+                    };
+                    while p < len && nb < needed {
+                        p = S::advance(bytes, p);
+                        // p <= len < scan + 64, within the u16 window per
+                        // the REL_LIMIT check above.
+                        unsafe { bufp.add(nb).write((p - fill_base) as u16) };
+                        nb += 1;
+                    }
+                    exhausted = p >= len;
+                    break;
+                }
+                let base = scan;
+                let (usable, bad) = S::batch_masks(bytes, base);
+                // At a resume point r (the pending token's start): usable
+                // bits at or below r are dead (the pending start itself,
+                // or stale run-internal bits behind a scalar overrun), but
+                // a bad bit AT r must stay live — load_segment's
+                // `live = MAX << from_bit` plus the at_start clear. A zone
+                // starting exactly at r has to route r through the scalar
+                // path, or the stale post-zone usable bit would be
+                // trusted. Only the fill's first batch and post-overrun
+                // batches have such bits.
+                let (mut ulive, mut blive) = if resume >= base {
+                    debug_assert!(resume - base < 64);
+                    let k = resume - base;
+                    ((u64::MAX << k) << 1, u64::MAX << k)
+                } else {
+                    (u64::MAX, u64::MAX)
+                };
+                let rel = base.wrapping_sub(fill_base) as u16;
+                if bad & blive == 0 {
+                    debug_assert!(nb + 72 <= BOUND_BUF);
+                    nb += unsafe { flatten_bits(usable & ulive, rel, bufp.add(nb)) };
+                    scan = base + 64;
+                    continue;
+                }
+                // Dirty batch: per segment, trusted prefix bits then the
+                // scheme's scalar advance through the zone up to the next
+                // trusted boundary — load_segment's rules, emitting into
+                // the buffer.
+                loop {
+                    let seg_bad = bad & blive;
+                    if seg_bad == 0 {
+                        debug_assert!(nb + 72 <= BOUND_BUF);
+                        nb += unsafe { flatten_bits(usable & ulive, rel, bufp.add(nb)) };
+                        scan = base + 64;
+                        break;
+                    }
+                    let fb = seg_bad.trailing_zeros();
+                    let prefix = usable & ulive & !(u64::MAX << fb);
+                    debug_assert!(nb + 72 <= BOUND_BUF);
+                    nb += unsafe { flatten_bits(prefix, rel, bufp.add(nb)) };
+                    let mut p = if nb > 0 {
+                        fill_base + unsafe { *bufp.add(nb - 1) } as usize
+                    } else {
+                        fill_base
+                    };
+                    let rest = usable & (u64::MAX << fb);
+                    let until = if rest != 0 {
+                        base + rest.trailing_zeros() as usize
+                    } else {
+                        base + 64
+                    };
+                    // until <= base + 64 <= len, so `advance` stays in
+                    // bounds; it may overrun `until` and the batch end.
+                    while p < until {
+                        p = S::advance(bytes, p);
+                        let relp = p - fill_base;
+                        if relp > u16::MAX as usize {
+                            overflow_end = Some(p);
+                            break 'harvest;
+                        }
+                        debug_assert!(nb < BOUND_BUF);
+                        unsafe { bufp.add(nb).write(relp as u16) };
+                        nb += 1;
+                    }
+                    if p >= base + 64 {
+                        // Overrun past the batch: stay on the grid and
+                        // resume in the batch containing p, bits at or
+                        // below p masked (they can be stale run-internal
+                        // bits, exactly as in next_span).
+                        scan = base + 64 * ((p - base) / 64);
+                        resume = p;
+                        break;
+                    }
+                    // Resume inside the batch at p: same at-start/bad-bit
+                    // split as the batch-entry masks above.
+                    blive = u64::MAX << (p - base);
+                    ulive = blive << 1;
+                }
+            }
+
+            if nb == 0 {
+                // No boundary inside the u16 window: a > 65 KB pretoken.
+                // Emit it alone through the careful pack.
+                debug_assert!(!exhausted);
+                let end = overflow_end.unwrap_or_else(|| S::advance(bytes, fill_base));
+                let span = &bytes[fill_base..end];
+                let (key, h) = match pack_pretoken_key(span) {
+                    Some(key) => (key, fill_span_hash::<X86_CRC>(key)),
+                    None => (0, 0),
+                };
+                prefetch(h);
+                let meta = if key != 0 { h } else { span.len() as u64 };
+                batch.entries[n] = crate::pretokenize::BatchEntry {
+                    key,
+                    ptr: span.as_ptr(),
+                    meta,
+                };
+                n += 1;
+                pending = end;
+                continue 'refill;
+            }
+
+            // Phase B: flat emission with no data-dependent branch. One
+            // hoisted check proves every 16-byte key load in-bounds of the
+            // input slice; only a fill reaching within 16 bytes of EOF
+            // routes through the careful per-span pack.
+            let emit_n = nb.min(needed);
+            let last_end = unsafe { *bufp.add(emit_n - 1) } as usize;
+            let entries = &mut batch.entries[n..n + emit_n];
+            let base_ptr = unsafe { bytes.as_ptr().add(fill_base) };
+            // `prev`/`end` in usize: the u16 boundary domain forced two
+            // `& 0xffff` masks and a duplicated 15-compare per span (the
+            // compiler cannot see end >= prev in u16 subtraction).
+            let mut prev = 0usize;
+            if fill_base + last_end + 16 <= len {
+                for (i, e) in entries.iter_mut().enumerate() {
+                    let end = unsafe { *bufp.add(i) } as usize;
+                    let tok_len = end - prev;
+                    let p = unsafe { base_ptr.add(prev) };
+                    prev = end;
+                    // SAFETY: p + 16 <= base_ptr + last_end + 16 <= end of
+                    // the input slice (hoisted check above).
+                    let raw = unsafe { (p as *const u128).read_unaligned() };
+                    // Branchless pack_pretoken_key: one ldp from
+                    // PACK_MASK_TABLE instead of the 7-op per-half ALU
+                    // chain (see the table's docs). tok_len >= 1
+                    // (boundaries are strictly increasing), so the clamped
+                    // length is in the table's 1..=15 domain. Long spans
+                    // take key 0 (pretoken_key_hash(0) == 0) through the
+                    // `keep` AND-mask — an if/select here gets if-converted
+                    // into a real branch (LLVM hoists it to skip the two
+                    // loads), reintroducing the pattern-free n > 15 branch
+                    // this loop exists to avoid.
+                    let m = tok_len.min(15);
+                    // SAFETY: m <= 15, in the 16-entry table.
+                    let [mask_lo, mask_hi] = unsafe { *pack_masks.add(m) };
+                    let keep = ((tok_len <= 15) as u64).wrapping_neg();
+                    let klo = (raw as u64) & mask_lo & keep;
+                    let khi = (((raw >> 64) as u64 & mask_hi) | ((m as u64) << 56)) & keep;
+                    let key = (klo as u128) | ((khi as u128) << 64);
+                    let hv = fill_span_hash::<X86_CRC>(key);
+                    prefetch(hv);
+                    // meta = hash for short spans, length for long ones
+                    // (see `BatchEntry::meta`), in the same AND-mask style
+                    // as the key routing — a select gets if-converted.
+                    let meta = (hv & keep) | (tok_len as u64 & !keep);
+                    e.key = key;
+                    e.ptr = p;
+                    e.meta = meta;
+                }
+            } else {
+                for (i, e) in entries.iter_mut().enumerate() {
+                    let end = unsafe { *bufp.add(i) } as usize;
+                    let tok_len = end - prev;
+                    let p = unsafe { base_ptr.add(prev) };
+                    prev = end;
+                    // SAFETY: as above for the span bounds.
+                    let span = unsafe { std::slice::from_raw_parts(p, tok_len) };
+                    let (key, hv) = match pack_pretoken_key(span) {
+                        Some(key) => (key, fill_span_hash::<X86_CRC>(key)),
+                        None => (0, 0),
+                    };
+                    prefetch(hv);
+                    let meta = if key != 0 { hv } else { tok_len as u64 };
+                    e.key = key;
+                    e.ptr = p;
+                    e.meta = meta;
+                }
+            }
+            n += emit_n;
+            pending = fill_base + prev;
+            if exhausted {
+                debug_assert_eq!(pending, len);
+                break;
+            }
+        }
+
+        // Rewind past discarded leftover boundaries and leave the state as
+        // a fresh resume at `pending` for either pull style.
+        if scan > pending {
+            scan -= 64 * (scan - pending).div_ceil(64);
+        }
+        self.pos = pending;
+        self.scan = scan;
+        self.mask_base = scan;
+        self.rem = 0;
+        self.batch_usable = 0;
+        self.batch_bad = 0;
+        self.scalar_until = pending;
+        self.pre_base = usize::MAX;
+        n
     }
 }

@@ -66,6 +66,39 @@ impl<'a> Iterator for FastDeepSeekV3Pretokenizer<'a> {
     }
 }
 
+// SAFETY: delegates to `fill_spans_keyed_with_buf`, which writes exactly
+// the first `n` entries from live in-bounds spans of `self.bytes`.
+unsafe impl<'a> crate::pretokenize::PretokenSpans<'a> for FastDeepSeekV3Pretokenizer<'a> {
+    /// Chunked pull with the cursor in a local across the whole chunk (the
+    /// per-`next` store-load of `self.pos` costs real time in the encode
+    /// loop's register-starved surroundings).
+    #[inline(never)]
+    fn fill_spans_keyed(
+        &mut self,
+        batch: &mut crate::pretokenize::SpanBatch<'a>,
+        prefetch: &impl Fn(u64),
+    ) -> usize {
+        let (bytes, len) = (self.bytes, self.bytes.len());
+        let mut pos = self.pos;
+        let n = crate::pretokenize::fill_spans_keyed_with_buf(
+            bytes,
+            || {
+                if pos >= len {
+                    return None;
+                }
+                let start = pos;
+                // advance_pos returns an in-bounds end > start.
+                pos = advance_pos(bytes, start);
+                Some((start, pos))
+            },
+            batch,
+            prefetch,
+        );
+        self.pos = pos;
+        n
+    }
+}
+
 /// If the char at `pos` is `\p{L}` or `\p{M}` within the region, return the
 /// offset just past it.
 #[inline(always)]

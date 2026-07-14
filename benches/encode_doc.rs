@@ -3,8 +3,14 @@
 //! is ONE document handed to the library's parallel encode path
 //! (`encode_docs_ragged`), which splits it at pretoken-safe boundaries
 //! (token-identical to a serial pass), encodes with a persistent worker
-//! pool, and gathers one flat id buffer. Five rounds, so warm rounds show
-//! the retained worker caches.
+//! pool, and gathers one flat id buffer.
+//!
+//! One round per process by default: a first pass over a fresh dataset is
+//! the workload that matters, and everything a second in-process round
+//! reuses — worker pretoken caches, allocator arenas, faulted pages, grown
+//! buffer capacities — makes later rounds unrealistically fast. Restart the
+//! binary to collect independent samples; ENCODE_ROUNDS>1 remains available
+//! for cache-behavior experiments.
 //!
 //! Run with: cargo bench --bench encode_doc              (2 GB default)
 //!           ENCODE_MB=500 cargo bench --bench encode_doc
@@ -21,6 +27,7 @@ mod common;
 const DEFAULT_MB: usize = 2000;
 
 fn main() {
+    common::allow_thp();
     let tokenizer_json = std::env::var("TOKENIZER_JSON")
         .unwrap_or_else(|_| "data/olmo3_tokenizer.json".to_string());
     let tokenizer_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(&tokenizer_json);
@@ -31,10 +38,15 @@ fn main() {
     let size_mb = input.len() as f64 / 1e6;
     eprintln!("1 document, {} threads\n", rayon::current_num_threads());
 
-    // Persistent worker pool, retained across rounds like the binding's —
-    // pretoken caches stay warm after round 0.
-    let workers = WorkerPool::new();
-    for round in 0..5 {
+    let rounds: usize = std::env::var("ENCODE_ROUNDS")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(1);
+    for round in 0..rounds {
+        // Fresh worker pool per round so extra rounds at least start with
+        // cold pretoken caches (the pool retains one forked tokenizer per
+        // rayon thread).
+        let workers = WorkerPool::new();
         let t0 = Instant::now();
         let (flat, lens) = encode_docs_ragged(&workers, &tokenizer, &[&input]);
         black_box((&flat, lens));
