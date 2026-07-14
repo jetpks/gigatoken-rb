@@ -304,9 +304,14 @@ fn whitespace_run(input: &mut &str) -> ModalResult<()> {
             break;
         }
     }
-    // Need 2+ ws bytes consumed, non-ws must follow (not EOF)
-    if i == 0 || i >= bytes.len() {
+    if i == 0 {
         return Err(backtrack());
+    }
+    // At end of input the `(?!\S)` lookahead succeeds, so `\s+(?!\S)` consumes
+    // the entire trailing whitespace run as one pretoken.
+    if i >= bytes.len() {
+        *input = &before[i..];
+        return Ok(());
     }
     // Find start of last whitespace char
     let mut last_start = i - 1;
@@ -398,7 +403,7 @@ fn pretoken<'a>(input: &mut &'a str) -> ModalResult<Pretoken<'a>> {
     }
 
     let consumed = before.len() - input.len();
-    Ok(Pretoken(before[..consumed].as_bytes()))
+    Ok(Pretoken(&before.as_bytes()[..consumed]))
 }
 
 /// Try whitespace_run first (2+ ws chars with non-ws following), fall back to single.
@@ -424,6 +429,9 @@ pub fn pretoken_next<'a>(input: &mut &'a str) -> Option<Pretoken<'a>> {
     pretoken(input).ok()
 }
 
+// The `impl FnMut` parser type is unnameable, so this signature can't be
+// factored into a type alias.
+#[allow(clippy::type_complexity)]
 pub fn pretokens_iterator<'a>(
     input: &'a mut &'a str,
 ) -> winnow::combinator::ParserIterator<
@@ -443,6 +451,61 @@ pub fn pretokens_iterator<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Trailing-whitespace and mixed-whitespace edge cases, checked against the
+    /// reference GPT-2 regex. Catches the `\s+(?!\S)` end-of-input case: the
+    /// lookahead succeeds at EOF, so a trailing run like "\n\n\n" must be a
+    /// single pretoken, not one per character.
+    #[test]
+    fn whitespace_edge_cases_match_regex() {
+        let re = fancy_regex::Regex::new(
+            r"'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+",
+        )
+        .unwrap();
+        let cases = [
+            "\n\n\n",
+            "\n\n\nhello",
+            "a\n\n\nb",
+            "hello  \n  world",
+            "  \t\n ",
+            "x  ",
+            "x \n",
+            " \n x",
+            "\t\t\tword",
+            "end\n\n",
+            "end\n",
+            " ",
+            "\u{a0}\u{a0}",
+            "word\u{2028}\u{2028}",
+        ];
+        for case in cases {
+            let expected: Vec<&str> = re.find_iter(case).map(|m| m.unwrap().as_str()).collect();
+
+            let mut input = case;
+            let mut combinator: Vec<String> = Vec::new();
+            while let Some(p) = pretoken_next(&mut input) {
+                combinator.push(String::from_utf8(p.0.to_vec()).unwrap());
+            }
+            assert_eq!(combinator, expected, "combinator mismatch for {case:?}");
+
+            let mut fast: Vec<String> = Vec::new();
+            let mut it =
+                crate::pretokenize::fast::FastR50kPretokenizer::new(case.as_bytes());
+            for p in it {
+                fast.push(String::from_utf8(p.as_ref().to_vec()).unwrap());
+            }
+            assert_eq!(fast, expected, "fast mismatch for {case:?}");
+
+            let state_machine: Vec<String> =
+                crate::pretokenize::PretokenizerIter::new(case.as_bytes())
+                    .map(|p| String::from_utf8(p.0.to_vec()).unwrap())
+                    .collect();
+            assert_eq!(
+                state_machine, expected,
+                "state machine mismatch for {case:?}"
+            );
+        }
+    }
 
     #[test]
     fn combinator_compare() {
@@ -472,7 +535,7 @@ mod tests {
                             [a_offset.saturating_sub(32)..min(input_bytes.len(), a_offset + 32)];
                         eprintln!("Context: {:?}", String::from_utf8_lossy(region));
 
-                        assert!(false);
+                        panic!("combinator pretoken differs from standard pretokenizer");
                     }
                 }
                 itertools::EitherOrBoth::Left(a) => {
@@ -487,7 +550,7 @@ mod tests {
                         [a_offset.saturating_sub(32)..min(input_bytes.len(), a_offset + 32)];
                     eprintln!("Context: {:?}", String::from_utf8_lossy(region));
 
-                    assert!(false);
+                    panic!("standard pretokenizer produced an extra pretoken");
                 }
                 itertools::EitherOrBoth::Right(b) => {
                     eprintln!("Right only: {:?}", String::from_utf8_lossy(b.0));
@@ -501,7 +564,7 @@ mod tests {
                         [b_offset.saturating_sub(32)..min(input_bytes.len(), b_offset + 32)];
                     eprintln!("Context: {:?}", String::from_utf8_lossy(region));
 
-                    assert!(false);
+                    panic!("combinator pretokenizer produced an extra pretoken");
                 }
             }
         }

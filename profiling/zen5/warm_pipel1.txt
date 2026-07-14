@@ -1,0 +1,32 @@
+Events disabled
+Loading tokenizer from "/home/marcel/projects/tokers/.claude/worktrees/agent-a5ba8c6f81c499ac8/data/gpt2_tokenizer.json"...
+Reading "/home/marcel/data/owt_train.txt"...
+Read 1.00 GB in 0.3s
+Encoding (single-threaded)...
+pass 0: 228107519 tokens in 1.45s — 0.69 GB/s (688 MB/s)
+Events enabled
+pass 1: 228107519 tokens in 0.99s — 1.01 GB/s (1011 MB/s)
+pass 2: 228107519 tokens in 0.99s — 1.01 GB/s (1011 MB/s)
+pass 3: 228107519 tokens in 0.99s — 1.01 GB/s (1009 MB/s)
+pass 4: 228107519 tokens in 0.99s — 1.01 GB/s (1010 MB/s)
+pass 5: 228107519 tokens in 0.99s — 1.01 GB/s (1010 MB/s)
+cache: short 1315258 entries (cap 2097152), long 51476 (cap 57344, 1157749 key bytes), arena 918268 tokens (cap 1835008)
+
+ Performance counter stats for 'env ENCODE_MB=1000 ENCODE_PASSES=6 ./target/release/deps/encode_st-57c4b9fdb93c41d6':
+
+   120,664,710,145      de_src_op_disp.all               #      3.8 %ops  bad_speculation       (50.01%)
+    25,545,171,092      ls_not_halted_cyc                                                       (50.01%)
+   112,845,361,241      ex_ret_ops                       #     55.2 %slots  retiring            (50.01%)
+        56,256,049      de_no_dispatch_per_slot.smt_contention #      0.0 %slots  smt_contention      (50.02%)
+    25,542,999,194      ls_not_halted_cyc                                                       (50.02%)
+    10,864,240,448      de_no_dispatch_per_slot.no_ops_from_frontend #      5.3 %slots  frontend_bound      (49.99%)
+    25,546,941,082      ls_not_halted_cyc                                                       (49.99%)
+    72,832,566,269      de_no_dispatch_per_slot.backend_stalls #     35.6 %slots  backend_bound       (49.98%)
+    25,549,114,680      ls_not_halted_cyc                                                       (49.98%)
+
+       4.903502135 seconds time elapsed
+
+       6.384371000 seconds user
+       0.418024000 seconds sys
+
+

@@ -246,3 +246,7 @@ __marimo__/
 
 # Downloaded test data
 /data/
+
+.DS_Store
+
+*.trace/

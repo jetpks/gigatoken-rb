@@ -3,8 +3,8 @@ from pathlib import Path
 import pytest
 from tokenizers.pre_tokenizers import ByteLevel
 
-# from jeton.jeton_rs import PretokenizerIterator
-from jeton.jeton_rs import pretokenizer
+# from gigatoken.gigatoken_rs import PretokenizerIterator
+from gigatoken.gigatoken_rs import pretokenizer
 from tqdm import tqdm
 
 

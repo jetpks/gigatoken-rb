@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 from tokenizers import Tokenizer
-from jeton.jeton_rs import SentencePieceTokenizer
+from gigatoken.gigatoken_rs import SentencePieceTokenizer
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 OWT_PATH = DATA_DIR / "owt_train.txt"
@@ -22,7 +22,7 @@ def hf_tok(tinyllama_tokenizer_path):
 
 
 @pytest.fixture(scope="module")
-def jeton_tok(tinyllama_tokenizer_path):
+def gigatoken_tok(tinyllama_tokenizer_path):
     return SentencePieceTokenizer.from_hf(tinyllama_tokenizer_path)
 
 
@@ -31,14 +31,14 @@ def jeton_tok(tinyllama_tokenizer_path):
 # ---------------------------------------------------------------------------
 
 
-def _assert_ids_match(hf_tok, jeton_tok, text: str):
+def _assert_ids_match(hf_tok, gigatoken_tok, text: str):
     """Encode text with both tokenizers and compare token IDs directly."""
     hf_ids = hf_tok.encode(text).ids[1:]  # strip BOS
-    jeton_ids = jeton_tok.encode(text)
-    assert jeton_ids == hf_ids, (
+    gigatoken_ids = gigatoken_tok.encode(text).tolist()
+    assert gigatoken_ids == hf_ids, (
         f"Mismatch for {text!r}:\n"
         f"  HF:    {hf_ids}\n"
-        f"  jeton: {jeton_ids}"
+        f"  gigatoken: {gigatoken_ids}"
     )
 
 
@@ -76,21 +76,21 @@ TEXTS = [
 
 
 @pytest.mark.parametrize("text", TEXTS, ids=lambda t: repr(t)[:50])
-def test_encode_matches_hf(hf_tok, jeton_tok, text):
-    _assert_ids_match(hf_tok, jeton_tok, text)
+def test_encode_matches_hf(hf_tok, gigatoken_tok, text):
+    _assert_ids_match(hf_tok, gigatoken_tok, text)
 
 
-def test_decode_roundtrip(jeton_tok):
+def test_decode_roundtrip(gigatoken_tok):
     text = "Hello world, this is a test."
-    ids = jeton_tok.encode(text)
-    decoded = jeton_tok.decode(ids)
+    ids = gigatoken_tok.encode(text)
+    decoded = gigatoken_tok.decode(ids)
     assert decoded == text.encode("utf-8")
 
 
-def test_decode_with_byte_fallback(jeton_tok):
+def test_decode_with_byte_fallback(gigatoken_tok):
     text = "emoji: 🚀"
-    ids = jeton_tok.encode(text)
-    decoded = jeton_tok.decode(ids)
+    ids = gigatoken_tok.encode(text)
+    decoded = gigatoken_tok.decode(ids)
     assert decoded == text.encode("utf-8")
 
 
@@ -110,7 +110,7 @@ def _load_owt_lines(max_bytes: int) -> list[str]:
 
 
 @pytest.mark.skipif(not OWT_PATH.exists(), reason="OWT data not available")
-def test_owt_10mb(hf_tok, jeton_tok):
+def test_owt_10mb(hf_tok, gigatoken_tok):
     """Compare token IDs on ~10 MB of OWT, line by line."""
     lines = _load_owt_lines(OWT_SIZE)
     non_empty = [l for l in lines if l]
@@ -123,14 +123,14 @@ def test_owt_10mb(hf_tok, jeton_tok):
 
     mismatches = 0
     for i, line in enumerate(non_empty):
-        jeton_ids = jeton_tok.encode(line)
+        gigatoken_ids = gigatoken_tok.encode(line).tolist()
         hf_ids = hf_id_lists[i]
-        if jeton_ids != hf_ids:
+        if gigatoken_ids != hf_ids:
             if mismatches < 5:
                 print(
                     f"  Line {i}: {line[:60]!r}...\n"
                     f"    HF:    {hf_ids[:10]}... ({len(hf_ids)} tokens)\n"
-                    f"    jeton: {jeton_ids[:10]}... ({len(jeton_ids)} tokens)"
+                    f"    gigatoken: {gigatoken_ids[:10]}... ({len(gigatoken_ids)} tokens)"
                 )
             mismatches += 1
 

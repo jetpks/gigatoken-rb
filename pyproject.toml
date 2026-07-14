@@ -1,22 +1,57 @@
 [build-system]
-requires = ["maturin>=1.11,<2.0"]
+requires = ["maturin>=1.14.1,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "jeton"
+name = "gigatoken"
+description = "Tokenize your documents at GB/s"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
+authors = [{ name = "Marcel Rød", email = "roed@stanford.edu" }]
+keywords = [
+    "tokenizer",
+    "tokenizers",
+    "tokenization",
+    "bpe",
+    "nlp",
+    "sentencepiece",
+    "tiktoken",
+]
 classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Text Processing :: Linguistic",
+    "Operating System :: OS Independent",
     "Programming Language :: Rust",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Programming Language :: Python :: Implementation :: CPython",
-    "Programming Language :: Python :: Implementation :: PyPy",
 ]
 dynamic = ["version"]
-dependencies = ["awkward>=2.8.9", "numpy>=1.24.4"]
+dependencies = [
+    # Everything down to awkward 2.0.0 passes the test suite, but 2.6.3 is the
+    # first release compatible with NumPy 2.x, which the numpy floor permits.
+    "awkward>=2.6.3",
+    # rust-numpy supports numpy >= 1.16; 1.24.4 (verified) keeps headroom.
+    "numpy>=1.24.4",
+]
+
+[project.urls]
+Repository = "https://github.com/marcelroed/gigatoken"
+Issues = "https://github.com/marcelroed/gigatoken/issues"
 
 [tool.maturin]
-
-features = ["pyo3/extension-module"]
-module-name = "jeton.jeton_rs"
+module-name = "gigatoken.gigatoken_rs"
+strip = true
+exclude = ["gigatoken/*.so", "gigatoken/__pycache__/**"]
 
 
 [tool.uv]
@@ -47,6 +82,7 @@ dev = [
     "huggingface-hub>=0.20.0",
     "transformers>=4.17.0",
     "ty>=0.0.25",
+    "sentencepiece>=0.2.1",
 ]
 
 [tool.ruff]

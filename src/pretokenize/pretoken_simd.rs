@@ -815,7 +815,7 @@ mod tests {
     }
 
     #[test]
-    fn simd_matches_combinator() {
+    fn simd_matches_fast() {
         let data_dir = std::env::home_dir().unwrap().join("data");
         let input =
             std::fs::read_to_string(data_dir.join("TinyStoriesV2-GPT4-valid.txt")).unwrap();

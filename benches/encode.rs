@@ -1,43 +1,45 @@
-use jeton_rs::load_tokenizer::hf::load_hf_bpe;
-use jeton_rs::pretokenize::pretoken_fast::FastPretokenizer;
-use rayon::prelude::*;
+//! Whole-file parallel encode benchmark. The entire input is ONE document
+//! handed to the library's parallel encode path (`encode_docs_ragged`) —
+//! the same chunking policy, pretoken-safe splitting, and persistent worker
+//! pool as `BPETokenizer.encode_batch` / `encode_files` — so this measures
+//! gigatoken's own parallelism, not a bench-local split.
+//!
+//! Run with: cargo bench --bench encode                 (full OWT)
+//!           ENCODE_MB=500 cargo bench --bench encode
+//!           TOKENIZER_JSON=data/qwen3_5_tokenizer.json cargo bench --bench encode
+
+use gigatoken_rs::load_tokenizer::hf::load_hf_bpe;
+use gigatoken_rs::{WorkerPool, encode_docs_ragged};
+use std::hint::black_box;
 use std::path::PathBuf;
 use std::time::Instant;
 
+mod common;
 fn main() {
-    let tokenizer_path =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("data/gpt2_tokenizer.json");
-    eprintln!("Loading GPT-2 tokenizer from {tokenizer_path:?}...");
-    let tokenizer = load_hf_bpe(&tokenizer_path).expect("Could not load GPT-2 tokenizer");
+    common::allow_thp();
+    let tokenizer_json = std::env::var("TOKENIZER_JSON")
+        .unwrap_or_else(|_| "data/gpt2_tokenizer.json".to_string());
+    let tokenizer_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(&tokenizer_json);
+    eprintln!("Loading tokenizer from {tokenizer_path:?}...");
+    let tokenizer = load_hf_bpe(&tokenizer_path).expect("Could not load tokenizer");
 
-    let owt_path = std::env::home_dir().unwrap().join("data/owt_train.txt");
-    eprintln!("Reading {owt_path:?}...");
-    let t0 = Instant::now();
-    let input = std::fs::read(&owt_path).expect("Could not read ~/data/owt_train.txt");
+    let input = common::load_owt_input(None);
     let size_gb = input.len() as f64 / 1e9;
-    eprintln!("Read {:.2} GB in {:.1}s", size_gb, t0.elapsed().as_secs_f64());
 
-    let text = unsafe { std::str::from_utf8_unchecked(&input) };
-    let lines: Vec<&[u8]> = text.lines().map(|l| l.as_bytes()).collect();
-    eprintln!("{} lines\n", lines.len());
-
-    eprintln!("Encoding (parallel)...");
+    eprintln!(
+        "Encoding (1 document, {} threads)...",
+        rayon::current_num_threads()
+    );
+    let workers = WorkerPool::new();
     let start = Instant::now();
-    let total_tokens: usize = lines
-        .par_iter()
-        .map_init(
-            || tokenizer.fork(),
-            |tok, &line| {
-                let mut n = 0usize;
-                for arc in tok.memoized_encode(FastPretokenizer::new(line)) {
-                    n += arc.len();
-                }
-                n
-            },
-        )
-        .sum();
+    let (ids, lens) = encode_docs_ragged(&workers, &tokenizer, &[&input]);
+    black_box((&ids, lens));
     let elapsed = start.elapsed().as_secs_f64();
     let throughput_gb = size_gb / elapsed;
 
-    eprintln!("{total_tokens} tokens in {elapsed:.2}s — {throughput_gb:.2} GB/s ({:.0} MB/s)", throughput_gb * 1000.0);
+    eprintln!(
+        "{} tokens in {elapsed:.2}s — {throughput_gb:.2} GB/s ({:.0} MB/s)",
+        ids.len(),
+        throughput_gb * 1000.0
+    );
 }

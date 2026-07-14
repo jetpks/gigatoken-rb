@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+from gigatoken._hf_compat import _gpt2_unicode_to_byte
+
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
 
@@ -15,7 +17,7 @@ DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 # ---------------------------------------------------------------------------
 
 
-def _download_hf_file(repo_id: str, filename: str, local_name: str) -> Path:
+def _download_hf_file(repo_id: str, filename: str, local_name: str, repo_type: str = "model") -> Path:
     """Download a single file from a HuggingFace repo into DATA_DIR."""
     dest = DATA_DIR / local_name
     if dest.exists():
@@ -23,32 +25,18 @@ def _download_hf_file(repo_id: str, filename: str, local_name: str) -> Path:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     from huggingface_hub import hf_hub_download
 
-    cached = hf_hub_download(repo_id=repo_id, filename=filename)
+    cached = hf_hub_download(repo_id=repo_id, filename=filename, repo_type=repo_type)
     shutil.copy2(cached, dest)
     return dest
 
 
 def _download_hf_tokenizer(repo_id: str, local_name: str) -> Path:
-    """Download tokenizer.json from HF and normalize merges to array format.
+    """Download a repo's tokenizer.json from HF into DATA_DIR, verbatim.
 
-    Newer HF tokenizer files store merges as strings ("▁ t") but the Rust
-    parser expects arrays (["▁", "t"]). This converts on download.
+    (The Rust parser accepts both legacy `"a b"` string merges and array
+    merges, so no normalization is needed.)
     """
-    dest = DATA_DIR / local_name
-    if dest.exists():
-        return dest
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    from huggingface_hub import hf_hub_download
-
-    cached = hf_hub_download(repo_id=repo_id, filename="tokenizer.json")
-    with open(cached) as f:
-        data = json.load(f)
-    merges = data.get("model", {}).get("merges", [])
-    if merges and isinstance(merges[0], str):
-        data["model"]["merges"] = [m.split(" ", 1) for m in merges]
-    with open(dest, "w") as f:
-        json.dump(data, f, ensure_ascii=False)
-    return dest
+    return _download_hf_file(repo_id, "tokenizer.json", local_name)
 
 
 def _download_url(url: str, local_name: str) -> Path:
@@ -76,6 +64,48 @@ def tinyllama_tokenizer_path() -> Path:
 
 
 @pytest.fixture(scope="session")
+def tinyllama_spm_path() -> Path:
+    """Path to TinyLlama's raw sentencepiece tokenizer.model."""
+    return _download_hf_file(
+        "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+        "tokenizer.model",
+        "tinyllama_tokenizer.model",
+    )
+
+
+@pytest.fixture(scope="session")
+def sp4096_spm_path() -> Path:
+    """Path to the parameter-golf fineweb 4096 sentencepiece model (BPE with
+    byte fallback, no dummy prefix, nmt_nfkc precompiled charsmap)."""
+    return _download_hf_file(
+        "Ryukijano/parameter-golf-sp4096",
+        "tokenizers/fineweb_4096_bpe.model",
+        "fineweb_4096_bpe.model",
+        repo_type="dataset",
+    )
+
+
+@pytest.fixture(scope="session")
+def phi3_tokenizer_path() -> Path:
+    """Path to Phi-3-mini tokenizer.json (Llama-style with rstrip'd added
+    tokens outside model.vocab)."""
+    return _download_hf_tokenizer(
+        "microsoft/Phi-3-mini-4k-instruct",
+        "phi3_tokenizer.json",
+    )
+
+
+@pytest.fixture(scope="session")
+def llama_legacy_tokenizer_path() -> Path:
+    """Path to the original Llama tokenizer.json (added tokens with
+    normalized=true, matched against normalizer output)."""
+    return _download_hf_tokenizer(
+        "hf-internal-testing/llama-tokenizer",
+        "llama_legacy_tokenizer.json",
+    )
+
+
+@pytest.fixture(scope="session")
 def gpt2_tokenizer_path() -> Path:
     """Path to GPT-2 tokenizer.json, downloaded from HF if absent."""
     return _download_hf_tokenizer(
@@ -84,26 +114,70 @@ def gpt2_tokenizer_path() -> Path:
     )
 
 
+@pytest.fixture(scope="session")
+def qwen2_tokenizer_path() -> Path:
+    """Path to Qwen2 tokenizer.json, downloaded from HF if absent."""
+    return _download_hf_tokenizer(
+        "Qwen/Qwen2-1.5B-Instruct",
+        "qwen2_tokenizer.json",
+    )
+
+
+@pytest.fixture(scope="session")
+def qwen3_5_tokenizer_path() -> Path:
+    """Path to Qwen3.5 tokenizer.json, downloaded from HF if absent."""
+    return _download_hf_tokenizer(
+        "Qwen/Qwen3.5-9B",
+        "qwen3_5_tokenizer.json",
+    )
+
+
+@pytest.fixture(scope="session")
+def deepseek_v3_tokenizer_path() -> Path:
+    """Path to DeepSeek V3 tokenizer.json, downloaded from HF if absent."""
+    return _download_hf_tokenizer(
+        "deepseek-ai/DeepSeek-V3",
+        "deepseek_v3_tokenizer.json",
+    )
+
+
+@pytest.fixture(scope="session")
+def deepseek_v4_tokenizer_path() -> Path:
+    """Path to DeepSeek V4 tokenizer.json, downloaded from HF if absent."""
+    return _download_hf_tokenizer(
+        "deepseek-ai/DeepSeek-V4-Flash",
+        "deepseek_v4_tokenizer.json",
+    )
+
+
+@pytest.fixture(scope="session")
+def modernbert_tokenizer_path() -> Path:
+    """Path to ModernBERT-base tokenizer.json, downloaded from HF if absent."""
+    return _download_hf_tokenizer(
+        "answerdotai/ModernBERT-base",
+        "modernbert_tokenizer.json",
+    )
+
+
+@pytest.fixture(scope="session")
+def olmo3_tokenizer_path() -> Path:
+    """Path to Olmo3 (dolma2) tokenizer.json, downloaded from HF if absent."""
+    return _download_hf_tokenizer(
+        "allenai/Olmo-3-1025-7B",
+        "olmo3_tokenizer.json",
+    )
+
+
 # ---------------------------------------------------------------------------
 # GPT-2 byte <-> unicode helpers (reused by test_bpe_train_compare, etc.)
+# The canonical Python copy of the table lives in gigatoken._hf_compat.
 # ---------------------------------------------------------------------------
 
-
-def _build_gpt2_byte_unicode_tables():
-    allowed = list(range(33, 127)) + list(range(161, 173)) + list(range(174, 256))
-    b2u = [None] * 256
-    for b in allowed:
-        b2u[b] = chr(b)
-    n = 0
-    for b in range(256):
-        if b2u[b] is None:
-            b2u[b] = chr(256 + n)
-            n += 1
-    u2b = {ch: i for i, ch in enumerate(b2u)}
-    return b2u, u2b
-
-
-GPT2_B2U, GPT2_U2B = _build_gpt2_byte_unicode_tables()
+GPT2_U2B = _gpt2_unicode_to_byte()
+GPT2_B2U = [None] * 256
+for _ch, _b in GPT2_U2B.items():
+    GPT2_B2U[_b] = _ch
+del _ch, _b
 
 
 def gpt2_bytes_to_unicode(data: bytes) -> str:
@@ -112,6 +186,29 @@ def gpt2_bytes_to_unicode(data: bytes) -> str:
 
 def gpt2_unicode_to_bytes(s: str) -> bytes:
     return bytes(GPT2_U2B[ch] for ch in s)
+
+
+@pytest.fixture(scope="session")
+def dclm_docs() -> list[str]:
+    """Curated ~20 MB of DCLM documents, selected from a shard that is
+    downloaded into the HuggingFace cache on first use — see dclm_fixture.py."""
+    import dclm_fixture
+
+    return dclm_fixture.get_dclm_docs()
+
+
+@pytest.fixture(scope="session")
+def dclm_sample_path(dclm_docs, tmp_path_factory) -> Path:
+    """The DCLM sample written to a session-temporary .jsonl.zst file."""
+    import zstandard
+
+    path = tmp_path_factory.mktemp("dclm") / "dclm_sample.jsonl.zst"
+    with open(path, "wb") as fh:
+        with zstandard.ZstdCompressor(level=3).stream_writer(fh) as writer:
+            for text in dclm_docs:
+                writer.write(json.dumps({"text": text}, ensure_ascii=False).encode("utf-8"))
+                writer.write(b"\n")
+    return path
 
 
 @pytest.fixture(scope="session")

@@ -1,20 +1,14 @@
-#![feature(test)]
 #![feature(portable_simd)]
 
 mod bpe;
 mod bpe_train;
 mod input;
 mod load_tokenizer;
-mod output;
 mod pretokenize;
-pub(crate) mod simd;
 mod token;
-pub(crate) mod unicode_tables;
-pub(crate) mod utils;
 
 use input::MmappedFile;
 use input::Resource;
-use input::file_source::FileSourceSpec;
 use input::jsonl::JsonLinesSlice;
 use std::path::PathBuf;
 
@@ -85,10 +79,9 @@ pub fn main() {
     let start = std::time::Instant::now();
     let mut total_tokens: usize = 0;
     for doc in &docs {
-        let iter = r50k.memoized_encode(pretokenize::pretokenize_as_iter(doc.as_bytes()));
-        for arc in iter {
-            total_tokens += arc.len();
-        }
+        r50k.memoized_encode(pretokenize::pretokenize_as_iter(doc.as_bytes()), |tokens| {
+            total_tokens += tokens.len();
+        });
     }
     let elapsed = start.elapsed();
     eprintln!(

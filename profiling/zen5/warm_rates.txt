@@ -1,0 +1,33 @@
+Events disabled
+Loading tokenizer from "/home/marcel/projects/tokers/.claude/worktrees/agent-a5ba8c6f81c499ac8/data/gpt2_tokenizer.json"...
+Reading "/home/marcel/data/owt_train.txt"...
+Read 1.00 GB in 0.3s
+Encoding (single-threaded)...
+pass 0: 228107519 tokens in 1.46s — 0.68 GB/s (683 MB/s)
+Events enabled
+pass 1: 228107519 tokens in 1.00s — 1.00 GB/s (1001 MB/s)
+pass 2: 228107519 tokens in 1.00s — 1.00 GB/s (1000 MB/s)
+pass 3: 228107519 tokens in 1.00s — 1.00 GB/s (1001 MB/s)
+pass 4: 228107519 tokens in 1.00s — 1.00 GB/s (1004 MB/s)
+pass 5: 228107519 tokens in 1.00s — 1.00 GB/s (1004 MB/s)
+cache: short 1315258 entries (cap 2097152), long 51476 (cap 57344, 1157749 key bytes), arena 918268 tokens (cap 1835008)
+
+ Performance counter stats for 'env ENCODE_MB=1000 ENCODE_PASSES=6 ./target/release/deps/encode_st-57c4b9fdb93c41d6':
+
+     8,334,502,843      ex_ret_brn                       #      0.0 per_branch  branch_misprediction_rate  (40.00%)
+        59,639,100      ex_ret_brn_misp                                                         (40.00%)
+         3,211,127      L1-icache-load-misses            #      8.2 %  l1i_miss_rate            (40.02%)
+        38,978,627      L1-icache-loads                                                         (40.02%)
+           127,124      iTLB-loads                       #      0.1 %  itlb_miss_rate           (40.02%)
+               164      iTLB-load-misses                                                        (40.02%)
+     1,166,529,900      dTLB-loads                       #     12.3 %  dtlb_miss_rate           (40.00%)
+       143,136,775      dTLB-load-misses                                                        (40.00%)
+       602,841,389      L1-dcache-load-misses            #      1.7 %  l1d_miss_rate            (39.97%)
+    34,986,920,601      L1-dcache-loads                                                         (39.97%)
+
+       4.963495187 seconds time elapsed
+
+       6.417235000 seconds user
+       0.445016000 seconds sys
+
+

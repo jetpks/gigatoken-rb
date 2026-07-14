@@ -1,43 +1,21 @@
-import hashlib
-import os
-import tempfile
-from pathlib import Path
-
 import pytest
 import tiktoken
 
-from jeton.jeton_rs import BPETokenizer
-
-
-def tiktoken_cache_path(url: str) -> Path:
-    """Resolve the local cache path for a tiktoken BPE file URL."""
-    if "TIKTOKEN_CACHE_DIR" in os.environ:
-        cache_dir = Path(os.environ["TIKTOKEN_CACHE_DIR"])
-    elif "DATA_GYM_CACHE_DIR" in os.environ:
-        cache_dir = Path(os.environ["DATA_GYM_CACHE_DIR"])
-    else:
-        cache_dir = Path(tempfile.gettempdir()) / "data-gym-cache"
-    cache_key = hashlib.sha1(url.encode()).hexdigest()
-    return cache_dir / cache_key
-
-
-R50K_URL = "https://openaipublic.blob.core.windows.net/encodings/r50k_base.tiktoken"
+from gigatoken.gigatoken_rs import BPETokenizer
 
 
 @pytest.fixture
-def r50k() -> tuple[tiktoken.Encoding, BPETokenizer]:
+def r50k(r50k_tiktoken_path) -> tuple[tiktoken.Encoding, BPETokenizer]:
     """Return (tiktoken_encoding, BPETokenizer) pair for r50k_base."""
     tt = tiktoken.get_encoding("r50k_base")
-    path = tiktoken_cache_path(R50K_URL)
-    assert path.exists(), f"tiktoken cache not found at {path}; run tiktoken.get_encoding('r50k_base') first"
-    bpe = BPETokenizer.from_tiktoken(path)
+    bpe = BPETokenizer.from_tiktoken(r50k_tiktoken_path)
     return tt, bpe
 
 
 def _assert_same(tt_enc, bpe_tok, text: str):
     expected = tt_enc.encode(text)
-    actual = bpe_tok.encode(text.encode("utf-8"))
-    assert actual == expected, f"Mismatch for {text!r}:\n  tiktoken: {expected}\n  jeton:    {actual}"
+    actual = bpe_tok.encode(text.encode("utf-8")).tolist()
+    assert actual == expected, f"Mismatch for {text!r}:\n  tiktoken: {expected}\n  gigatoken:    {actual}"
 
 
 SIMPLE_STRINGS = [
@@ -112,7 +90,7 @@ def test_paragraphs(r50k, text):
 
 
 def test_roundtrip_token_count(r50k):
-    """Token counts should match between tiktoken and jeton."""
+    """Token counts should match between tiktoken and gigatoken."""
     tt, bpe = r50k
     text = "Here is a moderately long sentence with some numbers 42 and symbols @#$%."
     assert len(tt.encode(text)) == len(bpe.encode(text.encode("utf-8")))
@@ -151,6 +129,18 @@ def test_json_like(r50k):
 def test_url_like(r50k):
     tt, bpe = r50k
     _assert_same(tt, bpe, "https://example.com/path?query=value&other=123#fragment")
+
+
+def test_endoftext_added_token(r50k):
+    """<|endoftext|> encodes to id 50256 and round-trips, matching both
+    tiktoken with specials allowed and the tokenizer.json-loaded GPT-2."""
+    tt, bpe = r50k
+    text = "Hello world.<|endoftext|>Next document."
+    expected = tt.encode(text, allowed_special="all")
+    actual = bpe.encode(text.encode("utf-8")).tolist()
+    assert actual == expected
+    assert 50256 in actual
+    assert bpe.decode(actual) == text.encode("utf-8")
 
 
 def test_multiline_code(r50k):

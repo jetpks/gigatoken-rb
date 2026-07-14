@@ -1,11 +1,12 @@
 [package]
-name = "jeton"
-version = "0.1.0"
+name = "gigatoken"
+version = "0.3.0"
 edition = "2024"
+license = "MIT"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [lib]
-name = "jeton_rs"
+name = "gigatoken_rs"
 crate-type = ["cdylib", "lib"]
 
 [features]
@@ -14,34 +15,53 @@ parquet = ["dep:polars"]
 [dependencies]
 dashmap = "6.1"
 indicatif = "0.18"
-itertools = "0.14"
+itertools = "0.15"
 priority-queue = "2.0"
-pyo3 = { version = "0.28", features = ["eyre"] }
+# One wheel per target supports GIL-enabled CPython 3.10 and newer.
+pyo3 = { version = "0.29", features = ["abi3-py310", "eyre"] }
+numpy = "0.29"
 rayon = "1.11"
-regex = "1.12"
 # xxhash-rust = { version = "0.8.15", features = ["xxh3", "std", "const_xxh3"] }
 rustc-hash = "2.1"
-polars = { version = "0.53", features = ["lazy", "parquet"], optional = true }
+polars = { version = "0.54", features = [
+    "lazy",
+    "parquet",
+    "strings",
+], optional = true }
 memmap2 = { version = "0.9", features = ["stable_deref_trait"] }
 base64 = "0.22"
-icu = { version = "2.1", features = ["compiled_data", "datagen"] }
+icu = { version = "2.2", features = ["compiled_data", "datagen"] }
 eyre = "0.6.12"
 winnow = { version = "1", features = ["simd"] }
 bumpalo = { version = "3.19.1", features = ["collections", "std"] }
-icu_codepointtrie_builder = { version = "0.5.1" }
+icu_codepointtrie_builder = { version = "0.6.0" }
 zerovec = { version = "0.11.5", features = ["derive", "std"] }
-voracious_radix_sort = { version = "1.2.0", features = [
-    "voracious_multithread",
-] }
 sonic-rs = "0.5.8"
 memchr = "2.8.0"
+aho-corasick = "1.1"
 simdutf = "0.7.0"
 serde = { version = "1.0.228", features = ["derive"] }
 flate2 = "1.1"
 zstd = "0.13"
+spm_precompiled = "0.1.4"
+
+# madvise/prctl on Linux (pretoken cache table, batch gather, bench THP
+# setup); already in the tree transitively via memmap2/pyo3.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
 
 [profile.release]
 lto = "fat"
+
+# Profiling parity: benches keep the release codegen (fat LTO, same inlining)
+# but carry full debug info so profilers can resolve inlined frames and source
+# lines. Debug info does not change generated code; parity is verified by
+# comparing bench throughput against a stripped release build (within noise).
+[profile.bench]
+inherits = "release"
+debug = true
+strip = "none"
+split-debuginfo = "packed"
 
 [profile.profiling]
 inherits = "release"
@@ -50,6 +70,9 @@ lto = false
 codegen-units = 1
 strip = "none"
 split-debuginfo = "packed"
+# Frame pointers make Instruments' stack unwinding reliable. Mangling is left at
+# the toolchain default (v0); `cargo instruments` demangles v0 symbols itself.
+rustflags = ["-C", "force-frame-pointers=yes"]
 
 [profile.profiling.package."*"]
 debug = 2
@@ -57,13 +80,9 @@ strip = "none"
 
 [dev-dependencies]
 criterion = "0.8"
-fancy-regex = "0.17.0"
+fancy-regex = "0.18.0"
 rand = "0.10"
 
-
-# [[bench]]
-# name = "unicode"
-# harness = false
 
 [[bench]]
 name = "pretokenize"
@@ -76,6 +95,26 @@ test = false
 
 [[bench]]
 name = "encode_st"
+harness = false
+test = false
+
+[[bench]]
+name = "encode_st_sp"
+harness = false
+test = false
+
+[[bench]]
+name = "encode_doc"
+harness = false
+test = false
+
+[[bench]]
+name = "pretokenize_profile"
+harness = false
+test = false
+
+[[bench]]
+name = "pretokenize_profile_all"
 harness = false
 test = false
 

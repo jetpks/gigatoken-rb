@@ -38,7 +38,6 @@ fn update_word(
     while i < w.symbols.len() - 1 {
         if w.symbols[i] == pair.0 && w.symbols[i + 1] == pair.1 {
             // Perform the merge
-            // count_changes.push((pair, -1)); // This one was removed from the priority queue
             if i >= 1 {
                 record_changes((w.symbols[i - 1], pair.0), -w.word_count);
                 record_changes((w.symbols[i - 1], new_symbol), w.word_count);
@@ -73,7 +72,6 @@ fn update_words(
     pair: Pair,
     new_symbol: u32,
 ) -> DashMap<(u32, u32), isize, FxBuildHasher> {
-    // let count_changes: BTreeMap<(u32, u32), isize> = BTreeMap::new();
     let count_changes: DashMap<(u32, u32), isize, FxBuildHasher> = DashMap::default();
 
     let n_threads = rayon::current_num_threads();

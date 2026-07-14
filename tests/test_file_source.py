@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from jeton import FileSource, train_bpe
+from gigatoken import FileSource, JsonlFileSource, TextFileSource, train_bpe
 
 CORPUS_LINES = [
     "The quick brown fox jumps over the lazy dog.",
@@ -76,7 +76,7 @@ VOCAB_SIZE = 400
 @pytest.fixture(scope="module")
 def reference_result(jsonl_file):
     """Train from plain JSONL — the reference all other formats must match."""
-    source = FileSource([str(jsonl_file)], field="text")
+    source = JsonlFileSource([str(jsonl_file)], field="text")
     return train_bpe(source, VOCAB_SIZE, [])
 
 
@@ -86,7 +86,7 @@ def reference_result(jsonl_file):
 
 
 def test_file_source_txt(txt_file):
-    source = FileSource([str(txt_file)])
+    source = TextFileSource([str(txt_file)], separator=b"<|endoftext|>")
     vocab, merges = train_bpe(source, VOCAB_SIZE, [])
     assert len(vocab) == VOCAB_SIZE
     assert len(merges) == VOCAB_SIZE - 256
@@ -100,7 +100,7 @@ def test_file_source_jsonl(reference_result):
 
 def test_file_source_jsonl_gz_matches_jsonl(jsonl_gz_file, reference_result):
     """Gzip-compressed JSONL must produce identical merges to plain JSONL."""
-    source = FileSource([str(jsonl_gz_file)], field="text")
+    source = JsonlFileSource([str(jsonl_gz_file)], field="text")
     vocab, merges = train_bpe(source, VOCAB_SIZE, [])
     _, ref_merges = reference_result
     assert merges == ref_merges
@@ -108,7 +108,7 @@ def test_file_source_jsonl_gz_matches_jsonl(jsonl_gz_file, reference_result):
 
 def test_file_source_jsonl_zst_matches_jsonl(jsonl_zst_file, reference_result):
     """Zstd-compressed JSONL must produce identical merges to plain JSONL."""
-    source = FileSource([str(jsonl_zst_file)], field="text")
+    source = JsonlFileSource([str(jsonl_zst_file)], field="text")
     vocab, merges = train_bpe(source, VOCAB_SIZE, [])
     _, ref_merges = reference_result
     assert merges == ref_merges
@@ -131,7 +131,7 @@ def test_file_source_multi_file_matches_single(
     """Multiple copies of the same data (different formats) must produce
     identical merges to a single copy — the word counts scale uniformly
     so merge order is preserved."""
-    source = FileSource(
+    source = JsonlFileSource(
         [str(jsonl_file), str(jsonl_gz_file), str(jsonl_zst_file)],
         field="text",
     )
@@ -147,12 +147,17 @@ def test_file_source_custom_field(tmp_dir, reference_result):
         for line in CORPUS_LINES:
             f.write(json.dumps({"content": line}) + "\n")
 
-    source = FileSource([str(path)], field="content")
+    source = JsonlFileSource([str(path)], field="content")
     _, merges = train_bpe(source, VOCAB_SIZE, [])
     _, ref_merges = reference_result
     assert merges == ref_merges
 
 
 def test_file_source_repr():
-    source = FileSource(["a.txt", "b.jsonl"], field="text")
-    assert "2 files" in repr(source)
+    assert "2 files" in repr(JsonlFileSource(["a.jsonl", "b.jsonl"]))
+    assert "2 files" in repr(TextFileSource(["a.txt", "b.txt"]))
+
+
+def test_file_source_base_not_constructible():
+    with pytest.raises(TypeError):
+        FileSource(["a.txt"])

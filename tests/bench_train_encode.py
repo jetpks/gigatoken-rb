@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Benchmark: Jeton vs HuggingFace tokenizers for BPE training and encoding.
+"""Benchmark: Gigatoken vs HuggingFace tokenizers for BPE training and encoding.
 
 Run with: uv run python tests/bench_train_encode.py
 """
@@ -12,7 +12,7 @@ from pathlib import Path
 
 from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
 
-from jeton import train_bpe
+from gigatoken import train_bpe
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 TOKENIZER_JSON = DATA_DIR / "tinyllama_tokenizer.json"
@@ -109,11 +109,11 @@ def bench_training(corpus_size_kb: int = 1024, vocab_size: int = 2000, n_runs: i
     print(f" Runs:            {n_runs}")
     print()
 
-    # -- Jeton --
-    def train_jeton():
+    # -- Gigatoken --
+    def train_gigatoken():
         return train_bpe(corpus_bytes, vocab_size, [])
 
-    jeton_median, jeton_times, _ = timed(train_jeton, n_runs=n_runs)
+    gigatoken_median, gigatoken_times, _ = timed(train_gigatoken, n_runs=n_runs)
 
     # -- HF tokenizers --
     def train_hf():
@@ -131,7 +131,7 @@ def bench_training(corpus_size_kb: int = 1024, vocab_size: int = 2000, n_runs: i
 
     hf_median, hf_times, _ = timed(train_hf, n_runs=n_runs)
 
-    speedup = hf_median / jeton_median if jeton_median > 0 else float("inf")
+    speedup = hf_median / gigatoken_median if gigatoken_median > 0 else float("inf")
 
     print(f" {'Implementation':<20} {'Median (s)':>10} {'Min (s)':>10} {'Speedup':>10}")
     print(f" {'-'*20} {'-'*10} {'-'*10} {'-'*10}")
@@ -139,10 +139,10 @@ def bench_training(corpus_size_kb: int = 1024, vocab_size: int = 2000, n_runs: i
         f" {'HF tokenizers':<20} {hf_median:>10.3f} {min(hf_times):>10.3f} {'1.0x':>10}"
     )
     print(
-        f" {'Jeton':<20} {jeton_median:>10.3f} {min(jeton_times):>10.3f} {speedup:>9.1f}x"
+        f" {'Gigatoken':<20} {gigatoken_median:>10.3f} {min(gigatoken_times):>10.3f} {speedup:>9.1f}x"
     )
     print()
-    return jeton_median, hf_median
+    return gigatoken_median, hf_median
 
 
 # ---------------------------------------------------------------------------
@@ -170,18 +170,18 @@ def bench_encoding(text_size_kb: int = 100, n_runs: int = 5):
     print()
 
     # -- Load tokenizers --
-    # Jeton: SentencePieceTokenizer
-    from jeton.jeton_rs import SentencePieceTokenizer
+    # Gigatoken: SentencePieceTokenizer
+    from gigatoken.gigatoken_rs import SentencePieceTokenizer
 
-    jeton_tok = SentencePieceTokenizer.from_hf(TOKENIZER_JSON)
+    gigatoken_tok = SentencePieceTokenizer.from_hf(TOKENIZER_JSON)
 
     # HF: load from file (fast Rust backend, no BOS via encode without special tokens)
     hf_tok = Tokenizer.from_file(str(TOKENIZER_JSON))
 
     # -- Sequential encoding --
-    def encode_jeton():
+    def encode_gigatoken():
         for line in lines:
-            jeton_tok.encode(line)
+            gigatoken_tok.encode(line)
 
     def encode_hf():
         for line in lines:
@@ -190,15 +190,15 @@ def bench_encoding(text_size_kb: int = 100, n_runs: int = 5):
     def encode_hf_batch():
         hf_tok.encode_batch(lines, add_special_tokens=False)
 
-    jeton_median, jeton_times, _ = timed(encode_jeton, n_runs=n_runs, warmup=1)
+    gigatoken_median, gigatoken_times, _ = timed(encode_gigatoken, n_runs=n_runs, warmup=1)
     hf_median, hf_times, _ = timed(encode_hf, n_runs=n_runs, warmup=1)
     hf_batch_median, hf_batch_times, _ = timed(encode_hf_batch, n_runs=n_runs, warmup=1)
 
     def throughput(t):
         return total_mb / t if t > 0 else float("inf")
 
-    speedup_seq = hf_median / jeton_median if jeton_median > 0 else float("inf")
-    speedup_batch = hf_batch_median / jeton_median if jeton_median > 0 else float("inf")
+    speedup_seq = hf_median / gigatoken_median if gigatoken_median > 0 else float("inf")
+    speedup_batch = hf_batch_median / gigatoken_median if gigatoken_median > 0 else float("inf")
 
     print(
         f" {'Implementation':<20} {'Median (s)':>10} {'MB/s':>10} {'vs HF seq':>10}"
@@ -211,7 +211,7 @@ def bench_encoding(text_size_kb: int = 100, n_runs: int = 5):
         f" {'HF batch':<20} {hf_batch_median:>10.3f} {throughput(hf_batch_median):>10.1f} {hf_median / hf_batch_median:>9.1f}x"
     )
     print(
-        f" {'Jeton sequential':<20} {jeton_median:>10.3f} {throughput(jeton_median):>10.1f} {speedup_seq:>9.1f}x"
+        f" {'Gigatoken sequential':<20} {gigatoken_median:>10.3f} {throughput(gigatoken_median):>10.1f} {speedup_seq:>9.1f}x"
     )
     print()
 
@@ -219,14 +219,14 @@ def bench_encoding(text_size_kb: int = 100, n_runs: int = 5):
     sample = lines[:10]
     mismatches = 0
     for text in sample:
-        jeton_ids = list(jeton_tok.encode(text))
+        gigatoken_ids = gigatoken_tok.encode(text).tolist()
         hf_ids = hf_tok.encode(text, add_special_tokens=False).ids
-        if jeton_ids != hf_ids:
+        if gigatoken_ids != hf_ids:
             mismatches += 1
             if mismatches <= 3:
                 print(
                     f"  Mismatch: {text[:50]!r}..."
-                    f"\n    Jeton: {jeton_ids[:8]}... ({len(jeton_ids)} tokens)"
+                    f"\n    Gigatoken: {gigatoken_ids[:8]}... ({len(gigatoken_ids)} tokens)"
                     f"\n    HF:    {hf_ids[:8]}... ({len(hf_ids)} tokens)"
                 )
     if mismatches == 0:
@@ -267,12 +267,12 @@ def bench_trained_encoding(corpus_size_kb: int = 256, vocab_size: int = 1000, n_
     print(f" Training corpus:  {actual_mb:.1f} MB, vocab_size={vocab_size}")
     print()
 
-    # Train Jeton
-    print(" Training with Jeton...", flush=True)
+    # Train Gigatoken
+    print(" Training with Gigatoken...", flush=True)
     start = time.perf_counter()
     vocab, merges = train_bpe(corpus_bytes, vocab_size, [])
-    jeton_train_t = time.perf_counter() - start
-    print(f"   done in {jeton_train_t:.2f}s")
+    gigatoken_train_t = time.perf_counter() - start
+    print(f"   done in {gigatoken_train_t:.2f}s")
 
     # Train HF
     print(" Training with HF tokenizers...", flush=True)
@@ -291,14 +291,14 @@ def bench_trained_encoding(corpus_size_kb: int = 256, vocab_size: int = 1000, n_
     hf_train_t = time.perf_counter() - start
     print(f"   done in {hf_train_t:.2f}s")
 
-    # Convert Jeton to HF tokenizer
+    # Convert Gigatoken to HF tokenizer
     hf_vocab = {bytes_to_unicode(v): k for k, v in vocab.items()}
     hf_merges = [(bytes_to_unicode(a), bytes_to_unicode(b)) for a, b in merges]
-    jeton_hf_tok = Tokenizer(models.BPE(vocab=hf_vocab, merges=hf_merges))
-    jeton_hf_tok.pre_tokenizer = pre_tokenizers.ByteLevel(
+    gigatoken_hf_tok = Tokenizer(models.BPE(vocab=hf_vocab, merges=hf_merges))
+    gigatoken_hf_tok.pre_tokenizer = pre_tokenizers.ByteLevel(
         add_prefix_space=False, use_regex=True
     )
-    jeton_hf_tok.decoder = decoders.ByteLevel()
+    gigatoken_hf_tok.decoder = decoders.ByteLevel()
 
     # Encode test texts
     test_texts = [line for line in corpus.split("\n") if line.strip()][:500]
@@ -308,19 +308,19 @@ def bench_trained_encoding(corpus_size_kb: int = 256, vocab_size: int = 1000, n_
         for t in test_texts:
             tok.encode(t)
 
-    jeton_enc_median, _, _ = timed(lambda: encode_with(jeton_hf_tok), n_runs=n_runs, warmup=1)
+    gigatoken_enc_median, _, _ = timed(lambda: encode_with(gigatoken_hf_tok), n_runs=n_runs, warmup=1)
     hf_enc_median, _, _ = timed(lambda: encode_with(hf_tok), n_runs=n_runs, warmup=1)
 
     # Compare compression
-    jeton_total_tokens = sum(len(jeton_hf_tok.encode(t).ids) for t in test_texts)
+    gigatoken_total_tokens = sum(len(gigatoken_hf_tok.encode(t).ids) for t in test_texts)
     hf_total_tokens = sum(len(hf_tok.encode(t).ids) for t in test_texts)
 
     print()
-    print(f" {'Metric':<30} {'Jeton-trained':>15} {'HF-trained':>15}")
+    print(f" {'Metric':<30} {'Gigatoken-trained':>15} {'HF-trained':>15}")
     print(f" {'-'*30} {'-'*15} {'-'*15}")
-    print(f" {'Total tokens (500 lines)':<30} {jeton_total_tokens:>15,} {hf_total_tokens:>15,}")
-    print(f" {'Chars / token':<30} {total_chars/jeton_total_tokens:>15.2f} {total_chars/hf_total_tokens:>15.2f}")
-    print(f" {'Encode time (s)':<30} {jeton_enc_median:>15.4f} {hf_enc_median:>15.4f}")
+    print(f" {'Total tokens (500 lines)':<30} {gigatoken_total_tokens:>15,} {hf_total_tokens:>15,}")
+    print(f" {'Chars / token':<30} {total_chars/gigatoken_total_tokens:>15.2f} {total_chars/hf_total_tokens:>15.2f}")
+    print(f" {'Encode time (s)':<30} {gigatoken_enc_median:>15.4f} {hf_enc_median:>15.4f}")
     print()
 
 

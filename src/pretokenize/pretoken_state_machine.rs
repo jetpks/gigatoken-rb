@@ -1,11 +1,9 @@
+//! Hand-rolled state-machine pretokenizer. Kept as a reference implementation
+//! and benchmark baseline; the production pretokenizer is
+//! `fast::r50k::FastR50kPretokenizer` (see `pretokenize_as_iter`).
 use crate::input::DocRef;
 use crate::pretokenize::pretoken::Pretoken;
 use crate::pretokenize::unicode;
-
-/// Toggle pretokenizer implementation at compile time.
-/// `true`  = winnow combinator   (`pretoken_combinator.rs`)
-/// `false` = hand-rolled state machine (this file)
-const USE_COMBINATOR: bool = true;
 
 // ---------------------------------------------------------------------------
 // State-machine implementation
@@ -52,17 +50,6 @@ enum ApostropheResult {
 pub(crate) struct OutOfBytesError {}
 
 impl<'a> UTF8Iterator<'a> {
-    pub(crate) fn new(doc: DocRef<'a>) -> Self {
-        Self { bytes: doc, pos: 0 }
-    }
-
-    pub fn replace_bytes<'b>(&self, bytes: &'b [u8]) -> UTF8Iterator<'b> {
-        UTF8Iterator {
-            bytes: bytes.into(),
-            pos: self.pos,
-        }
-    }
-
     fn next_codepoint_and_length(&mut self) -> Option<(char, usize)> {
         let cp = unsafe { str::from_utf8_unchecked(&self.bytes[self.pos..]) }
             .chars()
@@ -243,13 +230,12 @@ impl<'a> UTF8Iterator<'a> {
 }
 
 // ---------------------------------------------------------------------------
-// PretokenizerIter — unified type that dispatches based on USE_COMBINATOR
+// PretokenizerIter — state-machine pretokenizer
 // ---------------------------------------------------------------------------
 
 pub struct PretokenizerIter<'a> {
     bytes: &'a [u8],
     pos: usize,
-    // State-machine fields (unused when USE_COMBINATOR is true, optimised away)
     state: PretokenizerState,
 }
 
@@ -267,31 +253,11 @@ impl<'a> Iterator for PretokenizerIter<'a> {
     type Item = Pretoken<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if USE_COMBINATOR {
-            self.next_combinator()
-        } else {
-            self.next_state_machine()
-        }
+        self.next_state_machine()
     }
 }
 
 impl<'a> PretokenizerIter<'a> {
-    // ---- Combinator path ----
-
-    #[inline]
-    fn next_combinator(&mut self) -> Option<Pretoken<'a>> {
-        if self.pos >= self.bytes.len() {
-            return None;
-        }
-        let mut input = unsafe { std::str::from_utf8_unchecked(&self.bytes[self.pos..]) };
-        let before_len = input.len();
-        let tok = crate::pretokenize::pretoken_combinator::pretoken_next(&mut input)?;
-        self.pos += before_len - input.len();
-        Some(tok)
-    }
-
-    // ---- State-machine path ----
-
     #[inline]
     fn next_state_machine(&mut self) -> Option<Pretoken<'a>> {
         let mut iter = UTF8Iterator {
@@ -352,7 +318,10 @@ impl<'a> PretokenizerIter<'a> {
                         if saved_token.is_empty() {
                             PretokenizerState::Save
                         } else {
-                            break (PretokenizerState::Save, saved_token);
+                            // The next token starts fresh at the reserved last
+                            // whitespace char; resuming in `Save` would emit an
+                            // empty span and end the stream.
+                            break (PretokenizerState::Start, saved_token);
                         }
                     }
                     Err(OutOfBytesError {}) => PretokenizerState::Finish,
@@ -392,25 +361,5 @@ impl<'a> PretokenizerIter<'a> {
         }
         Some(Pretoken(new_pretoken))
     }
-
-    pub fn replace_bytes<'b>(&self, bytes: &'b [u8]) -> PretokenizerIter<'b> {
-        PretokenizerIter {
-            bytes,
-            pos: self.pos,
-            state: self.state.clone(),
-        }
-    }
 }
 
-impl PretokenizerIter<'static> {
-    pub fn py_next<'a>(&mut self, bytes: &'a [u8]) -> Option<&'a [u8]> {
-        let mut py_self = self.replace_bytes(bytes);
-        let result = py_self.next();
-        *self = py_self.replace_bytes(&[]);
-        Some(result?.0)
-    }
-}
-
-pub fn pretokenize_as_iter(bytes: &[u8]) -> PretokenizerIter<'_> {
-    PretokenizerIter::new(bytes)
-}
