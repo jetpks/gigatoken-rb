@@ -68,7 +68,10 @@ pub(crate) fn fill_spans_keyed_mask<'a, S: mask::MaskScheme>(
 /// to its scheme's [`fill_spans_keyed_mask`] monomorphization.
 macro_rules! impl_mask_pretoken_spans {
     ($pretokenizer:ident, $scheme:ty) => {
-        impl<'a> crate::pretokenize::PretokenSpans<'a> for $pretokenizer<'a> {
+        // SAFETY: delegates to `fill_spans_keyed_mask`, whose bodies
+        // (`fill_spans_keyed_with_buf` / `fill_spans_two_phase`) write
+        // exactly the first `n` entries from live spans of `self.bytes`.
+        unsafe impl<'a> crate::pretokenize::PretokenSpans<'a> for $pretokenizer<'a> {
             #[inline]
             fn fill_spans_keyed(
                 &mut self,

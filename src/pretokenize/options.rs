@@ -116,7 +116,9 @@ impl<'a> Iterator for FastPretokenizerDispatch<'a> {
     }
 }
 
-impl<'a> crate::pretokenize::PretokenSpans<'a> for FastPretokenizerDispatch<'a> {
+// SAFETY: pure delegation to the concrete pretokenizers' (contract-upholding)
+// fills; no entries are written here.
+unsafe impl<'a> crate::pretokenize::PretokenSpans<'a> for FastPretokenizerDispatch<'a> {
     /// One dispatch per chunk instead of one per pretoken, delegating to
     /// the concrete pretokenizers' fused chunk fills.
     #[inline]

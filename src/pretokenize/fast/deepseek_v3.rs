@@ -66,7 +66,9 @@ impl<'a> Iterator for FastDeepSeekV3Pretokenizer<'a> {
     }
 }
 
-impl<'a> crate::pretokenize::PretokenSpans<'a> for FastDeepSeekV3Pretokenizer<'a> {
+// SAFETY: delegates to `fill_spans_keyed_with_buf`, which writes exactly
+// the first `n` entries from live in-bounds spans of `self.bytes`.
+unsafe impl<'a> crate::pretokenize::PretokenSpans<'a> for FastDeepSeekV3Pretokenizer<'a> {
     /// Chunked pull with the cursor in a local across the whole chunk (the
     /// per-`next` store-load of `self.pos` costs real time in the encode
     /// loop's register-starved surroundings).

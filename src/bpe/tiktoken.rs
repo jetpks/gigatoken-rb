@@ -315,8 +315,31 @@ impl Tokenizer {
         let arena_cap = (expected_bytes / 256).min(1 << 24);
         let long_cap = (expected_bytes / 8192).min(1 << 20);
         let mut token_arena = Vec::with_capacity(arena_cap);
-        let pretoken_cache =
+        let mut pretoken_cache =
             Self::seeded_pretoken_cache(&self.vocab, &mut token_arena, cache_slots);
+        // Re-apply the added-token seed overwrites (see
+        // [`Self::add_special_token`]): the descending vocab seed above
+        // resolves a duplicated byte string to its HIGHEST vocab ID, but
+        // the parent's cache holds `vocab_inv`'s resolution for every
+        // short added-token content (seed-time equivalence plus the
+        // `add_special_token` overwrite). Without this, a fork could emit
+        // a different ID than its parent for the same short pretoken.
+        for (content, _) in &self.added_tokens {
+            if !(1..=15).contains(&content.len()) {
+                continue;
+            }
+            // Query with `Q = Arc<[u8]>` (not `[u8]`): the miss path's
+            // hot `vocab_inv.get::<[u8]>` monomorphization must stay
+            // single-caller so it keeps inlining into
+            // `encode_pretoken_miss` (verified by asm diff).
+            let Some(&id) = self.vocab_inv.get(content) else {
+                continue;
+            };
+            let key = pack_pretoken_key(content).expect("length checked <= 15");
+            let h = pretoken_key_hash(key);
+            let (val, ext) = Self::pack_val(&[id], &mut token_arena);
+            pretoken_cache.replace(key, h, val, ext);
+        }
         Tokenizer {
             merges: Arc::clone(&self.merges),
             pair_ranks: self.pair_ranks.clone(),
@@ -338,6 +361,11 @@ impl Tokenizer {
         }
     }
 
+    /// Loader-phase mutator: like every `Tokenizer` mutation, this must
+    /// run before any `WorkerPool` forks workers from this tokenizer —
+    /// already-forked workers keep the old state (see [`WorkerPool`]).
+    ///
+    /// [`WorkerPool`]: crate::batch::WorkerPool
     pub fn set_pretokenizer_type(&mut self, pretokenizer_type: PretokenizerType) {
         self.pretokenizer_type = pretokenizer_type;
     }
@@ -354,6 +382,12 @@ impl Tokenizer {
 
     /// Set the added tokens matched atomically by
     /// [`Self::encode_with_added_tokens`]. Empty contents are ignored.
+    ///
+    /// Loader-phase mutator: must run before any `WorkerPool` forks
+    /// workers from this tokenizer — already-forked workers keep the old
+    /// added-token set (see [`WorkerPool`]).
+    ///
+    /// [`WorkerPool`]: crate::batch::WorkerPool
     pub fn set_added_tokens(&mut self, added_tokens: Vec<(Vec<u8>, TokenId)>) {
         let mut added_tokens: Vec<(Arc<[u8]>, TokenId)> = added_tokens
             .into_iter()
@@ -373,6 +407,12 @@ impl Tokenizer {
     /// Register one additional added token, extending the decode vocab when
     /// its id lies outside the base ranks (mirrors the out-of-vocab
     /// added-token handling in the HF loader).
+    ///
+    /// Loader-phase mutator: must run before any `WorkerPool` forks
+    /// workers from this tokenizer — already-forked workers keep the old
+    /// vocab, matcher, and cache seed (see [`WorkerPool`]).
+    ///
+    /// [`WorkerPool`]: crate::batch::WorkerPool
     pub fn add_special_token(&mut self, content: Vec<u8>, id: TokenId) {
         let idx = id.0 as usize;
         // Loader-phase mutation of the shared model tables: `make_mut`
@@ -387,17 +427,20 @@ impl Tokenizer {
             Arc::make_mut(&mut self.vocab_inv).insert(vocab[idx].clone(), id);
             // Keep the vocab seed in sync (see `seeded_pretoken_cache`): a
             // short pretoken matching this content must resolve to `id`
-            // without the miss path's reverse-vocab probe. An existing cache
-            // entry (a previously encoded pretoken) keeps its encoding, as
-            // it would have before seeding existed.
+            // without the miss path's reverse-vocab probe. OVERWRITE any
+            // existing entry, mirroring the unconditional `vocab_inv`
+            // overwrite above — if `content` duplicates an already-seeded
+            // vocab byte string, the cache must switch to the new ID just
+            // like `vocab_inv` does (and like the pre-seeding cold-cache
+            // `vocab_inv` probe would have). Forks re-apply this overwrite
+            // after their vocab reseed (see [`Self::fork_sized`]), so
+            // parent and forked workers agree.
             if (1..=15).contains(&content.len())
                 && let Some(key) = pack_pretoken_key(&content)
             {
                 let h = pretoken_key_hash(key);
-                if self.pretoken_cache.get(key, h).is_none() {
-                    let (val, ext) = Self::pack_val(&[id], &mut self.token_arena);
-                    self.pretoken_cache.insert(key, h, val, ext);
-                }
+                let (val, ext) = Self::pack_val(&[id], &mut self.token_arena);
+                self.pretoken_cache.replace(key, h, val, ext);
             }
         }
         let mut added: Vec<(Vec<u8>, TokenId)> = self
@@ -963,6 +1006,61 @@ mod tests {
         }
         assert_eq!(idx, cached.len(), "cached encode produced extra tokens");
         eprintln!("all {idx} tokens match on {} MB", input.len() / 1_000_000);
+    }
+
+    /// `add_special_token` whose content duplicates an existing vocab byte
+    /// string must resolve to the added ID everywhere: `vocab_inv`, the
+    /// parent's seeded cache (overwritten, not insert-if-absent), and
+    /// forked workers (vocab reseed plus re-applied added-token
+    /// overwrites). Regression test for the three-way disagreement where
+    /// the parent kept the stale seed entry (old ID) while a fork's
+    /// descending reseed picked the new ID.
+    #[test]
+    fn add_special_token_duplicate_content_agrees_across_forks() {
+        let encode = |t: &mut Tokenizer, input: &[u8]| -> Vec<TokenId> {
+            let mut out = Vec::new();
+            t.memoized_encode(crate::pretokenize::pretokenize_as_iter(input), |tokens| {
+                out.extend_from_slice(tokens)
+            });
+            out
+        };
+
+        // Case 1: added ID above the duplicate's ID.
+        let mut merges: HashMap<(TokenId, TokenId), TokenId, rustc_hash::FxBuildHasher> =
+            HashMap::with_hasher(rustc_hash::FxBuildHasher {});
+        merges.insert((TokenId(104), TokenId(105)), TokenId(256)); // 'h' 'i' -> "hi"
+        let mut vocab: Vec<Vec<u8>> = (0..=255u32).map(|b| vec![b as u8]).collect();
+        vocab.push(b"hi".to_vec()); // id 256 = "hi"
+        let mut tok = Tokenizer::new(merges, vocab, None);
+        tok.add_special_token(b"hi".to_vec(), TokenId(1000));
+        assert_eq!(tok.vocab_inv.get(b"hi".as_slice()), Some(&TokenId(1000)));
+        let mut fork = tok.fork();
+        assert_eq!(
+            encode(&mut tok, b"hi"),
+            vec![TokenId(1000)],
+            "parent cache must resolve the duplicate to the added ID (vocab_inv's answer)"
+        );
+        assert_eq!(
+            encode(&mut fork, b"hi"),
+            vec![TokenId(1000)],
+            "forked worker must agree with the parent"
+        );
+
+        // Case 2 (mirror): added ID fills an empty placeholder BELOW the
+        // duplicate's ID; the fork's descending reseed alone would pick
+        // the higher ID, diverging from vocab_inv and the parent.
+        let mut merges: HashMap<(TokenId, TokenId), TokenId, rustc_hash::FxBuildHasher> =
+            HashMap::with_hasher(rustc_hash::FxBuildHasher {});
+        merges.insert((TokenId(104), TokenId(105)), TokenId(257)); // 'h' 'i' -> "hi"
+        let mut vocab: Vec<Vec<u8>> = (0..=255u32).map(|b| vec![b as u8]).collect();
+        vocab.push(Vec::new()); // id 256: empty placeholder
+        vocab.push(b"hi".to_vec()); // id 257 = "hi"
+        let mut tok = Tokenizer::new(merges, vocab, None);
+        tok.add_special_token(b"hi".to_vec(), TokenId(256));
+        assert_eq!(tok.vocab_inv.get(b"hi".as_slice()), Some(&TokenId(256)));
+        let mut fork = tok.fork();
+        assert_eq!(encode(&mut tok, b"hi"), vec![TokenId(256)]);
+        assert_eq!(encode(&mut fork, b"hi"), vec![TokenId(256)]);
     }
 
     /// GPT-2 must take the PairRankTable fast path, with the table agreeing

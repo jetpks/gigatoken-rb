@@ -290,6 +290,37 @@ impl ShortPretokenCache {
         self.len += 1;
     }
 
+    /// Insert `key`, overwriting its value if the key is already present
+    /// (the plain [`Self::insert`] assumes absence). Cold loader-phase
+    /// entry point for the vocab-seed sync (`add_special_token` and
+    /// `fork_sized`'s added-token re-apply), where an added token's
+    /// content can duplicate an already-seeded vocab byte string and must
+    /// take over its entry.
+    pub(crate) fn replace(&mut self, key: u128, h: u64, val: u64, ext: u64) {
+        debug_assert_ne!(key, EMPTY_KEY);
+        let mut idx = (h as usize) & self.mask & !1;
+        loop {
+            // SAFETY: idx is masked and even, so idx + 1 <= mask.
+            let (k0, k1) = unsafe { (self.slots.get(idx).key, self.slots.get(idx + 1).key) };
+            if k0 == key {
+                // SAFETY: idx is in bounds (masked above).
+                unsafe { *self.slots.get_mut(idx) = Entry { key, val, ext } };
+                return;
+            }
+            if k1 == key {
+                // SAFETY: idx + 1 <= mask (masked, even idx).
+                unsafe { *self.slots.get_mut(idx + 1) = Entry { key, val, ext } };
+                return;
+            }
+            if k0 == EMPTY_KEY || k1 == EMPTY_KEY {
+                // Absent: a fresh insert (with its own growth check).
+                self.insert(key, h, val, ext);
+                return;
+            }
+            idx = (idx + 2) & self.mask;
+        }
+    }
+
     #[cold]
     fn grow(&mut self) {
         let new_cap = self.slots.cap * 2;

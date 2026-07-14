@@ -383,6 +383,17 @@ pub(crate) fn assemble_ragged(chunks: Vec<ChunkTokens>) -> (Vec<u32>, Vec<i64>) 
 /// encode_files. One slot per rayon thread, forked lazily on first use and
 /// retained for the tokenizer's lifetime, so each worker's pretoken cache
 /// stays warm when encoding is invoked repeatedly (e.g. in a loop).
+///
+/// Invariant: the prototype tokenizer must not be mutated between encodes
+/// that share a pool. Workers are forked lazily (first use of each slot)
+/// and never refreshed, so mutating the prototype (`add_special_token`,
+/// `set_added_tokens`, `set_pretokenizer_type`, ...) after some slots have
+/// forked leaves those workers on the OLD state while slots forked later
+/// (or rebuilt after a worker panic) capture the new one — a chunk's
+/// tokens would then depend on which slot the handout gave it. Finish all
+/// model mutation before the pool's first encode (the loaders do), or use
+/// a fresh pool after mutating. The Python bindings uphold this by
+/// construction: no mutator is exposed after the pyclass is built.
 pub struct WorkerPool {
     slots: OnceLock<Vec<Mutex<Option<Tokenizer>>>>,
 }
@@ -405,6 +416,11 @@ impl WorkerPool {
     /// more tasks concurrently than it has threads, and there is one slot
     /// per thread, so a free slot always exists; the yield loop only spins
     /// when non-rayon threads encode at the same time.
+    ///
+    /// `proto` must be the same, unmutated prototype on every call for a
+    /// given pool: forks are cached per slot and never compared against
+    /// `proto` again, so a mutated (or different) prototype yields stale
+    /// workers for already-filled slots (see the type-level invariant).
     fn with_worker<R>(
         &self,
         proto: &Tokenizer,
@@ -442,6 +458,11 @@ impl WorkerPool {
 /// boundaries), encode with pooled workers, and assemble the ragged result
 /// (one flat id buffer plus per-document row lengths). Public so Rust
 /// benches exercise the identical parallel path as the Python bindings.
+///
+/// Environment: setting `GIGATOK_NO_LPT` (to any value, empty included)
+/// disables LPT chunk sizing in favor of uniform chunks — token- and
+/// order-identical output, chunk shaping only; see `lpt_from_env`. The
+/// variable is read once per call, never in per-chunk loops.
 pub fn encode_docs_ragged(
     workers: &WorkerPool,
     proto: &Tokenizer,

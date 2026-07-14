@@ -71,6 +71,14 @@ pub(crate) fn pack_mask_halves(n: usize) -> (u64, u64) {
     (lo, hi)
 }
 
+// The key packers below (`pack_pretoken_key`, `fill_spans_keyed_with_buf`,
+// phase B of the two-phase walker) read span bytes as native-endian words
+// and mask, and the emit loop stores packed token lanes as one native-endian
+// word — all little-endian layouts. A big-endian build would silently
+// produce wrong keys and swapped tokens, so refuse to compile instead.
+#[cfg(target_endian = "big")]
+compile_error!("gigatoken's key packing and token-lane stores assume little-endian byte order");
+
 /// Pack a pretoken of ≤ 15 bytes into a `u128` cache key: bytes in the low
 /// 15 lanes, length in the top byte (so keys of different lengths never
 /// collide, and a real key is never 0). Returns `None` for longer
@@ -115,13 +123,19 @@ pub(crate) fn pack_pretoken_key(bytes: &[u8]) -> Option<u128> {
 }
 
 /// Hash of a packed pretoken key. Quality is noncritical for correctness
-/// (the table compares full keys), but every consumer — the fill loops,
-/// `ShortPretokenCache::grow`, `encode_bytes_cached` — must derive it
-/// through this one function: the two implementations below produce
-/// different values and may never mix in one process image. Both map key 0
-/// to hash 0, which the fill loops' long-pretoken route stores.
+/// (the table compares full keys), but every consumer — the fill loops
+/// (`fill_spans_keyed_with{,_buf}`, `fill_spans_two_phase`),
+/// `ShortPretokenCache::grow`'s rehash, and the vocab-seeding paths
+/// (`seeded_pretoken_cache`, `add_special_token`, `fork_sized`) — must
+/// derive it through this one function: the two implementations below
+/// produce different values and may never mix in one process image. Both
+/// map key 0 to hash 0, which the fill loops' long-pretoken route stores.
 #[inline(always)]
 pub(crate) fn pretoken_key_hash(key: u128) -> u64 {
+    // Note: `crc` is in the default feature set for aarch64-apple-darwin
+    // but NOT for aarch64-unknown-linux-gnu — generic aarch64 Linux builds
+    // need `-C target-feature=+crc` (e.g. via RUSTFLAGS) to get this fast
+    // hash; without it they silently take the multiply fold below.
     #[cfg(all(target_arch = "aarch64", target_feature = "crc"))]
     {
         // Hardware CRC32: two 3-cycle ops replace the 5-op multiply fold.
@@ -163,12 +177,16 @@ pub(crate) fn pretoken_key_hash(key: u128) -> u64 {
 ///   `pretoken_key_hash(0) == 0` is what the old layout recorded anyway.
 ///   Prefetching `meta` as if it were a hash touches an arbitrary
 ///   (masked, in-bounds) table line — harmless, long pretokens are rare.
+/// Fields are `pub(crate)`: only the in-crate fill loops may write entries
+/// (safe external writes of an arbitrary `ptr`/`key` would let safe code
+/// drive [`SpanBatch::span`]'s `from_raw_parts` with garbage — see the
+/// [`PretokenSpans`] safety contract).
 #[derive(Clone, Copy)]
 #[repr(C, align(32))]
 pub struct BatchEntry {
-    pub key: u128,
-    pub ptr: *const u8,
-    pub meta: u64,
+    pub(crate) key: u128,
+    pub(crate) ptr: *const u8,
+    pub(crate) meta: u64,
 }
 
 const _: () = assert!(std::mem::size_of::<BatchEntry>() == 32);
@@ -194,7 +212,9 @@ pub const SPAN_BATCH_SLACK: usize = 16;
 /// the record layout. Fills only ever write the first [`PRETOKEN_CHUNK`]
 /// entries; the tail is prefetch slack (see [`SPAN_BATCH_SLACK`]).
 pub struct SpanBatch<'a> {
-    pub entries: [BatchEntry; PRETOKEN_CHUNK + SPAN_BATCH_SLACK],
+    /// `pub(crate)`: writable only by the in-crate fill loops, which uphold
+    /// the [`PretokenSpans`] safety contract on every entry they write.
+    pub(crate) entries: [BatchEntry; PRETOKEN_CHUNK + SPAN_BATCH_SLACK],
     /// The entries' `ptr`s borrow the spans' backing storage.
     _spans: std::marker::PhantomData<&'a [u8]>,
 }
@@ -239,7 +259,26 @@ impl Default for SpanBatch<'_> {
 /// same loop because the span walker is a serial dependency chain (IPC
 /// ~1.7 standalone): the independent per-span key math fills its idle
 /// issue slots nearly for free, where a separate pass paid for it in full.
-pub trait PretokenSpans<'a> {
+///
+/// # Safety
+///
+/// The consumer trusts every fill unconditionally: after
+/// [`Self::fill_spans_keyed`] returns `n`, the emit loop calls
+/// [`SpanBatch::span`] (a raw `from_raw_parts`) on any entry `i < n`.
+/// Implementations must therefore uphold, for every call returning `n`:
+///
+/// - `batch.entries[0..n]` were all written by THIS call (no stale entries
+///   counted), and
+/// - each written entry holds a valid `(ptr, len)` into caller-live input
+///   bytes of lifetime `'a`: `ptr` non-null and readable for
+///   [`BatchEntry::span_len`] bytes, with `key`/`meta` derived from exactly
+///   those bytes via `pack_pretoken_key`/`pretoken_key_hash` semantics.
+///
+/// The entry fields are `pub(crate)`, so implementations outside this
+/// crate cannot write entries at all and can only soundly return 0; the
+/// in-crate fill helpers (`fill_spans_keyed_with{,_buf}`,
+/// `fill_spans_two_phase`) uphold the contract.
+pub unsafe trait PretokenSpans<'a> {
     /// Fill `batch` from the front with the next pretoken spans, calling
     /// `prefetch(hash)` for each. Returns how many were written; a short
     /// count (including 0) means the input is exhausted. (Recomputing the
@@ -349,7 +388,9 @@ pub(crate) fn fill_spans_keyed_with_buf<'a>(
 /// un-inlined behind a real call, costing ~23% of warm encode time.
 pub struct SpanIter<I>(pub I);
 
-impl<'a, I: Iterator<Item = Pretoken<'a>>> PretokenSpans<'a> for SpanIter<I> {
+// SAFETY: delegates to `fill_spans_keyed_with`, which writes exactly the
+// first `n` entries from the iterator's live `'a` spans.
+unsafe impl<'a, I: Iterator<Item = Pretoken<'a>>> PretokenSpans<'a> for SpanIter<I> {
     #[inline(never)]
     fn fill_spans_keyed(&mut self, batch: &mut SpanBatch<'a>, prefetch: &impl Fn(u64)) -> usize {
         fill_spans_keyed_with(|| self.0.next().map(|p| p.0), batch, prefetch)
