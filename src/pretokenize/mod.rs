@@ -127,8 +127,8 @@ pub(crate) fn pack_pretoken_key(bytes: &[u8]) -> Option<u128> {
 /// (`fill_spans_keyed_with{,_buf}`, `fill_spans_two_phase`),
 /// `ShortPretokenCache::grow`'s rehash, and the vocab-seeding paths
 /// (`seeded_pretoken_cache`, `add_special_token`, `fork_sized`) — must
-/// derive it through this one function: the two implementations below
-/// produce different values and may never mix in one process image. Both
+/// derive it through this one function: the implementations below produce
+/// different values and may never mix in one process image. All of them
 /// map key 0 to hash 0, which the fill loops' long-pretoken route stores.
 #[inline(always)]
 pub(crate) fn pretoken_key_hash(key: u128) -> u64 {
@@ -145,7 +145,30 @@ pub(crate) fn pretoken_key_hash(key: u128) -> u64 {
         // SAFETY: gated on the `crc` target feature at compile time.
         unsafe { __crc32d(__crc32d(0, key as u64), (key >> 64) as u64) as u64 }
     }
-    #[cfg(not(all(target_arch = "aarch64", target_feature = "crc")))]
+    #[cfg(all(target_arch = "x86_64", target_feature = "sse4.2"))]
+    {
+        // Hardware CRC32C (SSE4.2): same shape and rationale as the
+        // aarch64 CRC32 above — linear over GF(2) so the low bits (the
+        // table index) see every key bit, 3-cycle latency and one µop per
+        // `crc32` on Zen 2 (two chained ops vs the 5-op multiply fold),
+        // and `_mm_crc32_u64(0, 0) == 0` preserves the key 0 -> hash 0
+        // property the fill loops' long-pretoken route stores.
+        //
+        // Note: `sse4.2` is NOT in the baseline x86-64 target — plain
+        // x86_64 builds silently take the multiply fold below. Production
+        // (EPYC) builds need `-C target-cpu=znver2` (or any x86-64-v2+
+        // cpu/feature setting, e.g. `-C target-feature=+sse4.2`) for this
+        // path. Compile-time gated like the aarch64 arm, so the whole
+        // process image agrees on one hash: grows, seeding, and fills all
+        // derive through this single function.
+        use core::arch::x86_64::_mm_crc32_u64;
+        // SAFETY: gated on the `sse4.2` target feature at compile time.
+        unsafe { _mm_crc32_u64(_mm_crc32_u64(0, key as u64), (key >> 64) as u64) }
+    }
+    #[cfg(not(any(
+        all(target_arch = "aarch64", target_feature = "crc"),
+        all(target_arch = "x86_64", target_feature = "sse4.2")
+    )))]
     {
         // One folded multiply, the cheapest mix whose low bits still see
         // every key bit.

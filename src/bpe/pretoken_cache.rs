@@ -437,7 +437,38 @@ impl ProbeView {
             }
             (val, ext)
         };
-        #[cfg(not(target_arch = "aarch64"))]
+        #[cfg(target_arch = "x86_64")]
+        let (val, ext) = {
+            // Same value-select discipline as the aarch64 csel pair: LLVM
+            // re-canonicalizes every pure-Rust spelling here too. The mask
+            // arithmetic below compiles (znver2 and x86-64-v3 alike) to a
+            // cmov of the slot ADDRESS feeding a dependent load
+            // (`cmove %r9, %rax; mov (%rax), ...`) plus a computed-index
+            // load for `ext` (`setne; shl $5; mov 16(%r9,%r8), ...`) —
+            // exactly the extra L1 latency on the probe's critical path
+            // this function exists to avoid. The asm pins register-value
+            // `cmovne`s over the four unconditionally loaded words. cmov
+            // is baseline x86-64: no feature gate. Default options declare
+            // the flags clobber that `test` needs.
+            let (mut val, mut ext) = (e1.val, e1.ext);
+            // SAFETY: register-only test + conditional moves; no memory
+            // access, no stack use.
+            unsafe {
+                core::arch::asm!(
+                    "test {m}, {m}",
+                    "cmovne {val}, {v0}",
+                    "cmovne {ext}, {x0}",
+                    m = in(reg) m0 as u64,
+                    val = inout(reg) val,
+                    ext = inout(reg) ext,
+                    v0 = in(reg) e0.val,
+                    x0 = in(reg) e0.ext,
+                    options(pure, nomem, nostack),
+                );
+            }
+            (val, ext)
+        };
+        #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
         let (val, ext) = {
             let sel = (m0 as u64).wrapping_neg();
             (
