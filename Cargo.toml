@@ -53,6 +53,20 @@ libc = "0.2"
 [profile.release]
 lto = "fat"
 
+# Profiling parity: benches keep the release codegen (fat LTO, same inlining)
+# but carry full debug info so profilers can resolve inlined frames and source
+# lines. Debug info does not change generated code; parity is verified by
+# comparing bench throughput against a stripped release build (within noise).
+[profile.bench]
+inherits = "release"
+debug = true
+strip = "none"
+split-debuginfo = "packed"
+
+[profile.bench.package."*"]
+debug = true
+strip = "none"
+
 [profile.profiling]
 inherits = "release"
 debug = 2
