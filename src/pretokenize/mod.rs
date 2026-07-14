@@ -51,8 +51,8 @@ pub fn pretokenize_as_iter(bytes: &[u8]) -> FastR50kPretokenizer<'_> {
 // Batched pretoken pulling (the encode loop's input interface)
 // ---------------------------------------------------------------------------
 
-/// Chunk size of [`PretokenSpans::fill_spans`] — one batch of the encode
-/// loop's phase arrays.
+/// Chunk size of [`PretokenSpans::fill_spans_keyed`] — the live entries of
+/// one [`SpanBatch`] fill.
 pub const PRETOKEN_CHUNK: usize = 256;
 
 /// Both 64-bit halves of the per-length pack mask, in scalar ALU ops. A
@@ -143,22 +143,81 @@ pub(crate) fn pretoken_key_hash(key: u128) -> u64 {
     }
 }
 
+/// One batch slot: a pretoken span with its packed cache key and key hash,
+/// as one 32-byte record (half a cache line, never straddling one thanks
+/// to the alignment).
+///
+/// AoS instead of the previous three parallel arrays for dataflow on both
+/// sides: the fill loops store one record with two `stp`s on a single
+/// store stream (the parallel arrays cost 4 store µops across 3 streams —
+/// the split u128 key store alone was two), and the probe loop's per-`i`
+/// `(key, hash)` read touches one cache line instead of three.
+///
+/// `meta` carries the field the consumer needs next, keyed on `key`:
+/// - `key != 0` (short pretoken, ≤ 15 bytes): `meta` is the full 64-bit
+///   key hash. The span length rides in the key's top byte, so `ptr` +
+///   `key >> 120` reconstructs the span on the (rare) slow path.
+/// - `key == 0` (long pretoken, or an empty span through the public
+///   adapter): `meta` is the span length in bytes. The hash is not stored:
+///   the long route never probes the short table, and
+///   `pretoken_key_hash(0) == 0` is what the old layout recorded anyway.
+///   Prefetching `meta` as if it were a hash touches an arbitrary
+///   (masked, in-bounds) table line — harmless, long pretokens are rare.
+#[derive(Clone, Copy)]
+#[repr(C, align(32))]
+pub struct BatchEntry {
+    pub key: u128,
+    pub ptr: *const u8,
+    pub meta: u64,
+}
+
+const _: () = assert!(std::mem::size_of::<BatchEntry>() == 32);
+
+impl BatchEntry {
+    /// Span length, independent of the short/long route.
+    #[inline(always)]
+    pub fn span_len(&self) -> usize {
+        if self.key != 0 { (self.key >> 120) as usize } else { self.meta as usize }
+    }
+}
+
+/// Readable slack entries past a full chunk, so the emit loop's
+/// prefetch-ahead `entries[i + D].meta` load needs no index clamp (a
+/// per-pretoken `add + cmp + csel` in the hottest loop). Slack entries
+/// are never written by a fill; prefetching a stale or zero `meta`
+/// requests an arbitrary masked (in-bounds) table line — harmless.
+pub const SPAN_BATCH_SLACK: usize = 16;
+
 /// One chunk of pretoken spans with their packed cache keys (0 = longer
 /// than 15 bytes, routed to the slice-keyed fallback map) and key hashes,
-/// filled by [`PretokenSpans::fill_spans_keyed`].
+/// filled by [`PretokenSpans::fill_spans_keyed`]. See [`BatchEntry`] for
+/// the record layout. Fills only ever write the first [`PRETOKEN_CHUNK`]
+/// entries; the tail is prefetch slack (see [`SPAN_BATCH_SLACK`]).
 pub struct SpanBatch<'a> {
-    pub spans: [&'a [u8]; PRETOKEN_CHUNK],
-    pub keys: [u128; PRETOKEN_CHUNK],
-    pub hashes: [u64; PRETOKEN_CHUNK],
+    pub entries: [BatchEntry; PRETOKEN_CHUNK + SPAN_BATCH_SLACK],
+    /// The entries' `ptr`s borrow the spans' backing storage.
+    _spans: std::marker::PhantomData<&'a [u8]>,
 }
 
 impl<'a> SpanBatch<'a> {
     pub fn new() -> Self {
         SpanBatch {
-            spans: [&[]; PRETOKEN_CHUNK],
-            keys: [0; PRETOKEN_CHUNK],
-            hashes: [0; PRETOKEN_CHUNK],
+            entries: [BatchEntry { key: 0, ptr: std::ptr::null(), meta: 0 };
+                PRETOKEN_CHUNK + SPAN_BATCH_SLACK],
+            _spans: std::marker::PhantomData,
         }
+    }
+
+    /// Reconstruct entry `i`'s span.
+    ///
+    /// # Safety
+    /// Entry `i` must have been written by the most recent fill (`i` below
+    /// its returned count), so `ptr` still points at a live span of `'a`.
+    #[inline(always)]
+    pub unsafe fn span(&self, i: usize) -> &'a [u8] {
+        let e = &self.entries[i];
+        // SAFETY: per the contract, `ptr` points at `span_len()` live bytes.
+        unsafe { std::slice::from_raw_parts(e.ptr, e.span_len()) }
     }
 }
 
@@ -211,9 +270,10 @@ pub(crate) fn fill_spans_keyed_with<'a>(
             None => (0, 0),
         };
         prefetch(h);
-        batch.spans[n] = span;
-        batch.keys[n] = key;
-        batch.hashes[n] = h;
+        // Long (and empty) spans record their length; short spans their
+        // hash (see `BatchEntry::meta`).
+        let meta = if key != 0 { h } else { span.len() as u64 };
+        batch.entries[n] = BatchEntry { key, ptr: span.as_ptr(), meta };
         n += 1;
     }
     n
@@ -270,13 +330,12 @@ pub(crate) fn fill_spans_keyed_with_buf<'a>(
             lanes[..len].copy_from_slice(span);
             u128::from_le_bytes(lanes) | ((len as u128) << 120)
         };
-        // pretoken_key_hash(0) == 0, so long spans store hash 0 exactly as
-        // the fallible-packer route does.
         let h = pretoken_key_hash(key);
         prefetch(h);
-        batch.spans[n] = span;
-        batch.keys[n] = key;
-        batch.hashes[n] = h;
+        // Long spans record their length instead of the (unused) hash —
+        // see `BatchEntry::meta`.
+        let meta = if long { len as u64 } else { h };
+        batch.entries[n] = BatchEntry { key, ptr: span.as_ptr(), meta };
         n += 1;
     }
     n
@@ -721,13 +780,20 @@ mod span_source_tests {
                 prefetched.set(prefetched.get() + 1)
             });
             for i in 0..n {
-                let span = batch.spans[i];
+                // SAFETY: i < n, the count just returned by the fill.
+                let span = unsafe { batch.span(i) };
                 let (want_key, want_hash) = match pack_pretoken_key(span) {
                     Some(key) => (key, pretoken_key_hash(key)),
                     None => (0, 0),
                 };
-                assert_eq!(batch.keys[i], want_key, "{scheme}: bad key for {span:?}");
-                assert_eq!(batch.hashes[i], want_hash, "{scheme}: bad hash for {span:?}");
+                let e = &batch.entries[i];
+                assert_eq!(e.key, want_key, "{scheme}: bad key for {span:?}");
+                let want_meta = if want_key != 0 {
+                    want_hash
+                } else {
+                    span.len() as u64
+                };
+                assert_eq!(e.meta, want_meta, "{scheme}: bad meta for {span:?}");
                 got.push(span);
             }
             if n < PRETOKEN_CHUNK {

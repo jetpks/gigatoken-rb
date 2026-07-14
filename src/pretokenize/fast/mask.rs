@@ -800,7 +800,7 @@ impl MaskState {
     /// boundary positions into a flat buffer (branchless [`flatten_bits`]
     /// per clean batch; the scheme's scalar `advance` through bad zones,
     /// with `next_span`'s exact segment/overrun/tail trust rules), then
-    /// phase B turns consecutive boundary pairs into spans + keys + hashes
+    /// phase B turns consecutive boundary pairs into batch entries
     /// in a counted loop with no data-dependent branch. The per-span
     /// refill ladder, pop-exit and pack mispredicts of the fused
     /// `next_span` loop (the dominant share of encode's 25% discarded
@@ -982,9 +982,12 @@ impl MaskState {
                     None => (0, 0),
                 };
                 prefetch(h);
-                batch.spans[n] = span;
-                batch.keys[n] = key;
-                batch.hashes[n] = h;
+                let meta = if key != 0 { h } else { span.len() as u64 };
+                batch.entries[n] = crate::pretokenize::BatchEntry {
+                    key,
+                    ptr: span.as_ptr(),
+                    meta,
+                };
                 n += 1;
                 pending = end;
                 continue 'refill;
@@ -996,21 +999,14 @@ impl MaskState {
             // routes through the careful per-span pack.
             let m = nb.min(needed);
             let last_end = unsafe { *bufp.add(m - 1) } as usize;
-            let spans = &mut batch.spans[n..n + m];
-            let keys = &mut batch.keys[n..n + m];
-            let hashes = &mut batch.hashes[n..n + m];
+            let entries = &mut batch.entries[n..n + m];
             let base_ptr = unsafe { bytes.as_ptr().add(fill_base) };
             // `prev`/`end` in usize: the u16 boundary domain forced two
             // `& 0xffff` masks and a duplicated 15-compare per span (the
             // compiler cannot see end >= prev in u16 subtraction).
             let mut prev = 0usize;
             if fill_base + last_end + 16 <= len {
-                for (i, ((sp, k), h)) in spans
-                    .iter_mut()
-                    .zip(keys.iter_mut())
-                    .zip(hashes.iter_mut())
-                    .enumerate()
-                {
+                for (i, e) in entries.iter_mut().enumerate() {
                     let end = unsafe { *bufp.add(i) } as usize;
                     let tok_len = end - prev;
                     let p = unsafe { base_ptr.add(prev) };
@@ -1037,19 +1033,16 @@ impl MaskState {
                     let key = (klo as u128) | ((khi as u128) << 64);
                     let hv = pretoken_key_hash(key);
                     prefetch(hv);
-                    // SAFETY: fill_base + end <= len (boundaries are token
-                    // ends within the input).
-                    *sp = unsafe { std::slice::from_raw_parts(p, tok_len) };
-                    *k = key;
-                    *h = hv;
+                    // meta = hash for short spans, length for long ones
+                    // (see `BatchEntry::meta`), in the same AND-mask style
+                    // as the key routing — a select gets if-converted.
+                    let meta = (hv & keep) | (tok_len as u64 & !keep);
+                    e.key = key;
+                    e.ptr = p;
+                    e.meta = meta;
                 }
             } else {
-                for (i, ((sp, k), h)) in spans
-                    .iter_mut()
-                    .zip(keys.iter_mut())
-                    .zip(hashes.iter_mut())
-                    .enumerate()
-                {
+                for (i, e) in entries.iter_mut().enumerate() {
                     let end = unsafe { *bufp.add(i) } as usize;
                     let tok_len = end - prev;
                     let p = unsafe { base_ptr.add(prev) };
@@ -1061,9 +1054,10 @@ impl MaskState {
                         None => (0, 0),
                     };
                     prefetch(hv);
-                    *sp = span;
-                    *k = key;
-                    *h = hv;
+                    let meta = if key != 0 { hv } else { tok_len as u64 };
+                    e.key = key;
+                    e.ptr = p;
+                    e.meta = meta;
                 }
             }
             n += m;
