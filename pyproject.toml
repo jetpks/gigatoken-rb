@@ -88,5 +88,9 @@ dev = [
 [tool.ruff]
 line-length = 180
 
+[tool.ruff.format]
+preview = true
+
+
 [tool.ty.src]
 exclude = ["notebooks"]
