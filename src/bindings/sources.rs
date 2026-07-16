@@ -1,9 +1,11 @@
-//! The FileSource Python classes and the helpers that turn an encode_files
-//! or train_bpe argument into loaded, format-tagged file contents.
+//! The FileSource/BytesSource Python classes and the helpers that turn an
+//! encode_files or train_bpe argument into loaded, format-tagged file
+//! contents.
 
 use crate::input::Resource;
 use crate::input::file_source::{DocFormat, LoadedFile, detect_default_format, load_file};
 use pyo3::prelude::*;
+use pyo3::pybacked::PyBackedBytes;
 use std::path::PathBuf;
 
 /// Base class for file sources. Not directly constructible from Python —
@@ -38,9 +40,26 @@ impl FileSource {
     }
 }
 
-/// Plain-text files. With `separator`, documents are the pieces between
-/// separator occurrences (the separator itself belongs to no document);
-/// without one, each file is a single document.
+/// A `separator` argument: bytes used as-is, or str encoded to its UTF-8
+/// bytes.
+#[derive(FromPyObject)]
+pub(crate) enum Separator {
+    Bytes(Vec<u8>),
+    Str(String),
+}
+
+impl Separator {
+    fn into_bytes(self) -> Vec<u8> {
+        match self {
+            Separator::Bytes(b) => b,
+            Separator::Str(s) => s.into_bytes(),
+        }
+    }
+}
+
+/// Plain-text files. With `separator` (str or bytes), documents are the
+/// pieces between separator occurrences (the separator itself belongs to no
+/// document); without one, each file is a single document.
 #[pyclass(extends = FileSource)]
 pub(crate) struct TextFileSource;
 
@@ -48,10 +67,12 @@ pub(crate) struct TextFileSource;
 impl TextFileSource {
     #[new]
     #[pyo3(signature = (paths, separator = None))]
-    fn new(paths: Vec<PathBuf>, separator: Option<Vec<u8>>) -> PyClassInitializer<Self> {
+    fn new(paths: Vec<PathBuf>, separator: Option<Separator>) -> PyClassInitializer<Self> {
         PyClassInitializer::from(FileSource {
             paths,
-            format: DocFormat::Text { separator },
+            format: DocFormat::Text {
+                separator: separator.map(Separator::into_bytes),
+            },
         })
         .add_subclass(Self)
     }
@@ -73,6 +94,58 @@ impl JsonlFileSource {
             },
         })
         .add_subclass(Self)
+    }
+}
+
+/// In-memory bytes for encode_batch, the buffer analog of TextFileSource:
+/// with `separator` (str or bytes), each buffer's documents are the pieces
+/// between separator occurrences (the separator itself belongs to no
+/// document, and empty pieces are skipped); without one, each buffer is a
+/// single document. The buffers are borrowed, not copied, and split during
+/// the (parallel) encode itself — handing a whole corpus over as a few
+/// buffers plus a separator is much faster than pre-splitting it into
+/// per-document Python objects.
+#[pyclass(frozen)]
+pub(crate) struct BytesSource {
+    pub(crate) buffers: Vec<PyBackedBytes>,
+    pub(crate) format: DocFormat,
+}
+
+#[pymethods]
+impl BytesSource {
+    #[new]
+    #[pyo3(signature = (data, separator = None))]
+    fn new(data: &Bound<'_, PyAny>, separator: Option<Separator>) -> PyResult<Self> {
+        let buffers = if let Ok(buffer) = data.extract::<PyBackedBytes>() {
+            vec![buffer]
+        } else {
+            data.extract::<Vec<PyBackedBytes>>().map_err(|_| {
+                PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                    "expected bytes or a list of bytes, got {}",
+                    data.get_type()
+                ))
+            })?
+        };
+        Ok(Self {
+            buffers,
+            format: DocFormat::Text {
+                separator: separator.map(Separator::into_bytes),
+            },
+        })
+    }
+
+    fn __repr__(&self) -> String {
+        let n = self.buffers.len();
+        let total: usize = self.buffers.iter().map(|b| b.len()).sum();
+        match &self.format {
+            DocFormat::Text {
+                separator: Some(sep),
+            } => format!(
+                "BytesSource(data=[{n} buffers, {total} bytes], separator={:?})",
+                String::from_utf8_lossy(sep)
+            ),
+            _ => format!("BytesSource(data=[{n} buffers, {total} bytes])"),
+        }
     }
 }
 

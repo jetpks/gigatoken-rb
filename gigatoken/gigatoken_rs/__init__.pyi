@@ -11,13 +11,14 @@ class FileSource:
     def __repr__(self) -> str: ...
 
 class TextFileSource(FileSource):
-    """Plain-text files. With `separator`, documents are the pieces between
-    separator occurrences; without one, each file is a single document."""
+    """Plain-text files. With `separator` (str separators are encoded to
+    UTF-8 bytes), documents are the pieces between separator occurrences;
+    without one, each file is a single document."""
 
     def __init__(
         self,
         paths: list[str | Path | PathLike[str]],
-        separator: bytes | None = None,
+        separator: bytes | str | None = None,
     ) -> None: ...
 
 class JsonlFileSource(FileSource):
@@ -28,6 +29,20 @@ class JsonlFileSource(FileSource):
         paths: list[str | Path | PathLike[str]],
         field: str = "text",
     ) -> None: ...
+
+class BytesSource:
+    """In-memory bytes for encode_batch, the buffer analog of TextFileSource:
+    documents are the pieces between separator occurrences (empty pieces
+    skipped), or one document per buffer without a separator. Buffers are
+    borrowed and split inside the parallel encode — pass whole buffers plus
+    a separator rather than pre-splitting."""
+
+    def __init__(
+        self,
+        data: bytes | list[bytes],
+        separator: bytes | str | None = None,
+    ) -> None: ...
+    def __repr__(self) -> str: ...
 
 def train_bpe(
     in_data: bytes | Path | str | FileSource,
@@ -69,7 +84,7 @@ class BPETokenizer:
     def encode(self, input: str | bytes) -> npt.NDArray[np.uint32]: ...
     def encode_batch(
         self,
-        inputs: list[str] | list[bytes] | ak.Array,
+        inputs: list[str] | list[bytes] | BytesSource | ak.Array,
         *,
         parallel: bool = True,
     ) -> ak.Array:
@@ -78,7 +93,7 @@ class BPETokenizer:
         workers; gigatoken.Tokenizer passes it automatically."""
     def encode_batch_list(
         self,
-        inputs: list[str] | list[bytes] | ak.Array,
+        inputs: list[str] | list[bytes] | BytesSource | ak.Array,
         *,
         parallel: bool = True,
     ) -> list[list[int]]:
@@ -95,7 +110,7 @@ class BPETokenizer:
         with row assembly options (see _WrapTruncate)."""
     def encode_batch_padded(
         self,
-        inputs: list[str] | list[bytes] | ak.Array,
+        inputs: list[str] | list[bytes] | BytesSource | ak.Array,
         options: PadTruncate,
         *,
         parallel: bool = True,
@@ -136,7 +151,7 @@ class SentencePieceTokenizer:
     def encode(self, input: str | bytes) -> npt.NDArray[np.uint32]: ...
     def encode_batch(
         self,
-        inputs: list[str] | list[bytes] | ak.Array,
+        inputs: list[str] | list[bytes] | BytesSource | ak.Array,
         *,
         parallel: bool = True,
     ) -> ak.Array:
@@ -145,7 +160,7 @@ class SentencePieceTokenizer:
         workers; gigatoken.Tokenizer passes it automatically."""
     def encode_batch_padded(
         self,
-        inputs: list[str] | list[bytes] | ak.Array,
+        inputs: list[str] | list[bytes] | BytesSource | ak.Array,
         options: PadTruncate,
         *,
         parallel: bool = True,
@@ -155,7 +170,7 @@ class SentencePieceTokenizer:
         gigatoken.Tokenizer.encode_batch_padded."""
     def encode_batch_list(
         self,
-        inputs: list[str] | list[bytes] | ak.Array,
+        inputs: list[str] | list[bytes] | BytesSource | ak.Array,
         *,
         parallel: bool = True,
     ) -> list[list[int]]:

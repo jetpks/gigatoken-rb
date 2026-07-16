@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from gigatoken._hf_compat import HFCompat
     from gigatoken._load.hf import HFTokenizerLike
     from gigatoken._tiktoken_compat import TiktokenCompat
-    from gigatoken.gigatoken_rs import FileSource, _WrapTruncate
+    from gigatoken.gigatoken_rs import BytesSource, FileSource, _WrapTruncate
 
 _BACKEND_TYPES = (BPETokenizer, SentencePieceTokenizer)
 
@@ -168,7 +168,7 @@ class Tokenizer:
 
     def encode_batch(
         self,
-        inputs: list[str] | list[bytes] | ak.Array,
+        inputs: list[str] | list[bytes] | BytesSource | ak.Array,
         *,
         parallel: bool | None = None,
     ) -> ak.Array:
@@ -184,7 +184,7 @@ class Tokenizer:
 
     def encode_batch_padded(
         self,
-        inputs: list[str] | list[bytes] | ak.Array,
+        inputs: list[str] | list[bytes] | BytesSource | ak.Array,
         pad_id: int,
         max_length: int | None = None,
         pad_to_max_length: bool = False,
@@ -214,7 +214,7 @@ class Tokenizer:
 
     def encode_batch_list(
         self,
-        inputs: list[str] | list[bytes] | ak.Array,
+        inputs: list[str] | list[bytes] | BytesSource | ak.Array,
         *,
         parallel: bool | None = None,
     ) -> list[list[int]]:

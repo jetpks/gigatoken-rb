@@ -1,4 +1,5 @@
 from gigatoken.gigatoken_rs import (
+    BytesSource,
     FileSource,
     JsonlFileSource,
     TextFileSource,
@@ -11,6 +12,7 @@ from gigatoken._tiktoken_compat import TiktokenCompat
 from gigatoken._tokenizer import Tokenizer
 
 __all__ = [
+    "BytesSource",
     "FileSource",
     "HFCompat",
     "JsonlFileSource",

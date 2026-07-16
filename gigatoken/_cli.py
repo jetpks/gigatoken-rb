@@ -121,28 +121,29 @@ def bench(
 
     import awkward as ak
 
+    from gigatoken import BytesSource, TextFileSource
+
     gt_tokenizer = _load_tokenizer(tokenizer)
 
-    # gigatoken pass. Without --in-memory and without a separator the files
-    # are read inside Rust via encode_files, so timing includes disk IO.
-    docs: list[bytes] | None = None
+    # gigatoken pass. A separator is handed to gigatoken along with the whole
+    # files (documents are split inside Rust, during the encode itself) —
+    # never pre-split into per-document objects here, which is several times
+    # slower. Without --in-memory the files are also read inside Rust via
+    # encode_files, so timing includes disk IO. Byte counts are whole-file
+    # bytes, separators included.
     if in_memory:
-        docs = _read_docs(files, separator)
-        gt_bytes = sum(len(doc) for doc in docs)
+        raws = [file.read_bytes() for file in files]
+        gt_bytes = sum(len(raw) for raw in raws)
         start = time.perf_counter()
-        encoded = gt_tokenizer.encode_batch(docs)
-        gt_seconds = time.perf_counter() - start
-    elif separator is None:
-        gt_bytes = sum(file.stat().st_size for file in files)
-        start = time.perf_counter()
-        encoded = gt_tokenizer.encode_files(list(files))
+        encoded = gt_tokenizer.encode_batch(BytesSource(raws, separator=separator))
         gt_seconds = time.perf_counter() - start
     else:
+        gt_bytes = sum(file.stat().st_size for file in files)
+        # Bare paths keep their extension-based format detection (.jsonl).
+        source = list(files) if separator is None else TextFileSource(list(files), separator=separator)
         start = time.perf_counter()
-        docs = _read_docs(files, separator)
-        encoded = gt_tokenizer.encode_batch(docs)
+        encoded = gt_tokenizer.encode_files(source)
         gt_seconds = time.perf_counter() - start
-        gt_bytes = sum(len(doc) for doc in docs)
     _report("gigatoken", gt_seconds, gt_bytes, int(ak.count(encoded)))
 
     if compare_to != "hf":
@@ -161,8 +162,10 @@ def bench(
         raise typer.Exit(1)
     hf_tokenizer = HFTokenizer.from_str(hf_json.decode("utf-8") if isinstance(hf_json, bytes) else hf_json)
 
-    if docs is None:
-        docs = _read_docs(files, separator)
+    # The comparison needs one Python object per document (tokenizers takes
+    # a str per document, and validation compares per-document ids), so here
+    # — outside any timed region — the files are split in Python.
+    docs = _read_docs(files, separator)
     subset, last_truncated = _subset_docs(docs, limit_bytes)
     if not subset:
         typer.echo("error: --comparison-limit is smaller than the first document; nothing to compare", err=True)

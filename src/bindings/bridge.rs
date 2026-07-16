@@ -3,6 +3,7 @@
 //! other way, and the shared front-ends that resolve an encode_batch input
 //! and hand the ragged result back to Python.
 
+use crate::input::file_source::DocFormat;
 use crate::token::TokenId;
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 use pyo3::prelude::*;
@@ -45,19 +46,6 @@ pub(crate) fn extract_doc(obj: &Bound<'_, PyAny>) -> PyResult<EncodeInput> {
         "expected str or bytes, got {}{hint}",
         obj.get_type()
     )))
-}
-
-/// View one document's bytes as UTF-8 text for the SentencePiece path.
-pub(crate) fn utf8_doc(doc: &[u8]) -> PyResult<&str> {
-    if simdutf::validate_utf8(doc) {
-        // SAFETY: just validated.
-        Ok(unsafe { std::str::from_utf8_unchecked(doc) })
-    } else {
-        let e = std::str::from_utf8(doc).expect_err("simdutf rejected UTF-8 that std accepts");
-        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-            "invalid UTF-8 in document: {e}"
-        )))
-    }
 }
 
 /// decode() input resolved to a `TokenId` slice. A numpy uint32 array is
@@ -219,22 +207,36 @@ pub(crate) fn ragged_to_python<'py>(
     }
 }
 
-/// Shared front-end of encode_batch: extract the documents (a list of str, a
-/// list of bytes, or an awkward Array of strings — whose flat buffer is used
-/// directly, with no per-document Python objects) and run `encode` on the
-/// resolved byte slices with the GIL released, returning the ragged result
-/// as one flat id buffer plus per-document row lengths. `encode`'s second
-/// argument reports whether the documents are known-valid UTF-8, letting
-/// text consumers skip revalidation; it is true only for documents that
-/// came from Python str objects (whose validity CPython guarantees).
-/// Awkward "string" arrays are deliberately not trusted — their type
-/// parameter is a forgeable convention, not an enforced invariant — and
-/// get revalidated downstream.
+/// Format for every non-BytesSource encode_batch input: each byte region
+/// handed to `encode` is exactly one document.
+const WHOLE_DOCS: DocFormat = DocFormat::Text { separator: None };
+
+/// Shared front-end of encode_batch: extract the documents (a BytesSource,
+/// a list of str, a list of bytes, or an awkward Array of strings — whose
+/// flat buffer is used directly, with no per-document Python objects) and
+/// run `encode` on the resolved byte slices with the GIL released,
+/// returning the ragged result as one flat id buffer plus per-document row
+/// lengths. `encode`'s `DocFormat` argument says how its byte regions split
+/// into documents: one document per region for everything except a
+/// BytesSource, whose buffers carry its separator format and are split
+/// during the encode itself. Bytes-shaped inputs are trusted to be valid
+/// UTF-8 by the consumers that care (the SentencePiece backend) — nothing
+/// is validated here or downstream.
 pub(crate) fn encode_batch_flat<'py>(
     py: Python<'py>,
     inputs: &Bound<'py, PyAny>,
-    encode: impl Fn(&[&[u8]], bool) -> PyResult<(Vec<u32>, Vec<i64>)> + Send + Sync,
+    encode: impl Fn(&[&[u8]], &DocFormat) -> PyResult<(Vec<u32>, Vec<i64>)> + Send + Sync,
 ) -> PyResult<(Vec<u32>, Vec<i64>)> {
+    // BytesSource: hand the borrowed buffers over as byte regions together
+    // with the source's separator format.
+    if let Ok(source) = inputs.cast::<super::sources::BytesSource>() {
+        let source = source.get();
+        return py.detach(|| {
+            let regions: Vec<&[u8]> = source.buffers.iter().map(|b| &**b).collect();
+            encode(&regions, &source.format)
+        });
+    }
+
     // Awkward input: encode straight from the flat content buffer.
     if let Some((content, in_counts)) = extract_awkward_docs(inputs)? {
         let content = content.readonly();
@@ -248,13 +250,13 @@ pub(crate) fn encode_batch_flat<'py>(
                 docs.push(&bytes[pos..pos + n as usize]);
                 pos += n as usize;
             }
-            encode(&docs, false)
+            encode(&docs, &WHOLE_DOCS)
         });
     }
 
     let inputs: Vec<Bound<'py, PyAny>> = inputs.extract().map_err(|_| {
         PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-            "expected a list of str, a list of bytes, or an awkward Array of strings",
+            "expected a list of str, a list of bytes, a BytesSource, or an awkward Array of strings",
         )
     })?;
     if inputs.is_empty() {
@@ -272,11 +274,9 @@ pub(crate) fn encode_batch_flat<'py>(
         }
         docs.push(doc);
     }
-    let known_utf8 = matches!(docs[0], EncodeInput::Text(_));
-
     py.detach(|| {
         let slices: Vec<&[u8]> = docs.iter().map(|d| d.as_bytes()).collect();
-        encode(&slices, known_utf8)
+        encode(&slices, &WHOLE_DOCS)
     })
 }
 
@@ -284,7 +284,7 @@ pub(crate) fn encode_batch_flat<'py>(
 pub(crate) fn encode_batch_ragged<'py>(
     py: Python<'py>,
     inputs: &Bound<'py, PyAny>,
-    encode: impl Fn(&[&[u8]], bool) -> PyResult<(Vec<u32>, Vec<i64>)> + Send + Sync,
+    encode: impl Fn(&[&[u8]], &DocFormat) -> PyResult<(Vec<u32>, Vec<i64>)> + Send + Sync,
 ) -> PyResult<Bound<'py, PyAny>> {
     let (flat, counts) = encode_batch_flat(py, inputs, encode)?;
     ragged_to_python(py, flat, counts)
@@ -347,7 +347,7 @@ pub(crate) fn encode_batch_pylist<'py>(
     inputs: &Bound<'py, PyAny>,
     options: Option<&WrapTruncate>,
     parallel: bool,
-    encode: impl Fn(&[&[u8]], bool) -> PyResult<(Vec<u32>, Vec<i64>)> + Send + Sync,
+    encode: impl Fn(&[&[u8]], &DocFormat) -> PyResult<(Vec<u32>, Vec<i64>)> + Send + Sync,
 ) -> PyResult<Bound<'py, PyList>> {
     static PLAIN: WrapTruncate = WrapTruncate {
         prefix: Vec::new(),
@@ -359,11 +359,11 @@ pub(crate) fn encode_batch_pylist<'py>(
     let opts = options.unwrap_or(&PLAIN);
     let (prefix, suffix) = (opts.prefix.as_slice(), opts.suffix.as_slice());
     let truncate_left = opts.truncate_left;
-    let (flat, counts) = encode_batch_flat(py, inputs, |docs, known_utf8| {
+    let (flat, counts) = encode_batch_flat(py, inputs, |docs, format| {
         if let Some(matcher) = &opts.forbid {
             matcher.get().scan_docs(docs, parallel)?;
         }
-        encode(docs, known_utf8)
+        encode(docs, format)
     })?;
     let cap = opts.max_tokens.unwrap_or(usize::MAX);
     let wrap = !prefix.is_empty() || !suffix.is_empty();

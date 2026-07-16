@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from gigatoken import JsonlFileSource, TextFileSource
+from gigatoken import BytesSource, JsonlFileSource, TextFileSource
 from gigatoken.gigatoken_rs import BPETokenizer
 
 DOCS = [
@@ -90,6 +90,80 @@ def test_encode_batch_awkward_rejects_non_strings(tok):
 
 
 # ---------------------------------------------------------------------------
+# encode_batch with a BytesSource: in-memory buffers split on a separator
+# inside Rust, never pre-split into per-document objects
+# ---------------------------------------------------------------------------
+
+
+def test_bytes_source_separator_matches_presplit(tok, expected):
+    blob = "<|sep|>".join(DOCS).encode()
+    assert _ids(tok.encode_batch(BytesSource([blob], separator=b"<|sep|>"))) == expected
+
+
+def test_bytes_source_str_separator(tok, expected):
+    """A str separator is encoded to its UTF-8 bytes."""
+    blob = "<|sep|>".join(DOCS).encode()
+    assert _ids(tok.encode_batch(BytesSource([blob], separator="<|sep|>"))) == expected
+
+
+def test_bytes_source_empty(tok):
+    assert len(tok.encode_batch(BytesSource([]))) == 0
+
+
+def test_bytes_source_repr():
+    assert repr(BytesSource([b"ab", b"c"], separator=b"|")) == 'BytesSource(data=[2 buffers, 3 bytes], separator="|")'
+    assert repr(BytesSource(b"ab")) == "BytesSource(data=[1 buffers, 2 bytes])"
+
+
+def test_bytes_source_without_separator_one_doc_per_buffer(tok, expected):
+    assert _ids(tok.encode_batch(BytesSource([d.encode() for d in DOCS]))) == expected
+
+
+def test_bytes_source_single_buffer(tok, expected):
+    blob = "<|sep|>".join(DOCS[:3]).encode()
+    assert _ids(tok.encode_batch(BytesSource(blob, separator=b"<|sep|>"))) == expected[:3]
+
+
+def test_bytes_source_multiple_buffers_preserve_order(tok, expected):
+    half = len(DOCS) // 2
+    blobs = ["<|sep|>".join(part).encode() for part in (DOCS[:half], DOCS[half:])]
+    assert _ids(tok.encode_batch(BytesSource(blobs, separator=b"<|sep|>"))) == expected
+
+
+def test_bytes_source_skips_empty_documents(tok):
+    """Leading, trailing, and consecutive separators yield no empty rows —
+    the same semantics as TextFileSource."""
+    blob = b"<|sep|>a<|sep|><|sep|>b<|sep|>"
+    got = tok.encode_batch(BytesSource([blob], separator=b"<|sep|>"))
+    assert _ids(got) == _ids(tok.encode_batch(["a", "b"]))
+
+
+def test_bytes_source_parallel_chunking(tok):
+    """A buffer well above the chunk target is cut at separator boundaries
+    and encoded in parallel; ids must match the pre-split batch."""
+    docs = DOCS * 200  # ~1.8 MB, > MIN_CHUNK_BYTES
+    blob = "<|sep|>".join(docs).encode()
+    got = tok.encode_batch(BytesSource([blob], separator=b"<|sep|>"))
+    assert _ids(got) == _ids(tok.encode_batch(docs))
+
+
+def test_bytes_source_parallel_false_matches(tok, expected):
+    blob = "<|sep|>".join(DOCS).encode()
+    got = tok.encode_batch(BytesSource([blob], separator=b"<|sep|>"), parallel=False)
+    assert _ids(got) == expected
+
+
+def test_bytes_source_encode_batch_list(tok, expected):
+    blob = "<|sep|>".join(DOCS).encode()
+    assert tok.encode_batch_list(BytesSource([blob], separator=b"<|sep|>")) == expected
+
+
+def test_bytes_source_rejects_str_data(tok):
+    with pytest.raises(TypeError, match="list of bytes"):
+        BytesSource(["text"])
+
+
+# ---------------------------------------------------------------------------
 # encode_files
 # ---------------------------------------------------------------------------
 
@@ -123,6 +197,13 @@ def test_text_source_with_separator(tok, expected, tmp_path):
     path.write_text("<|sep|>".join(DOCS))
     got = tok.encode_files(TextFileSource([path], separator=b"<|sep|>"))
     assert _ids(got) == expected
+
+
+def test_text_source_str_separator(tok, expected, tmp_path):
+    """A str separator is encoded to its UTF-8 bytes."""
+    path = tmp_path / "docs.txt"
+    path.write_text("<|sep|>".join(DOCS))
+    assert _ids(tok.encode_files(TextFileSource([path], separator="<|sep|>"))) == expected
 
 
 def test_text_source_one_doc_per_file(tok, tmp_path):

@@ -16,7 +16,7 @@ from tokenizers import Tokenizer as HFTokenizer
 from tokenizers import normalizers, pre_tokenizers
 from tokenizers.models import BPE
 
-from gigatoken import Tokenizer
+from gigatoken import BytesSource, Tokenizer
 
 TEXTS = [
     "Hello, world!",
@@ -84,6 +84,26 @@ def test_hf_json_decode_parity(tinyllama_tokenizer_path):
     for text in TEXTS:
         ids = hf_tok.encode(text, add_special_tokens=False).ids
         assert gigatoken_tok.decode(ids).decode("utf-8", "replace") == hf_tok.decode(ids, skip_special_tokens=False)
+
+
+def test_bytes_source_separator_matches_presplit(tinyllama_tokenizer_path):
+    """encode_batch with a BytesSource splits on the separator inside Rust
+    (the SentencePiece backend's region path); ids must match the same
+    documents pre-split in Python."""
+    gigatoken_tok = Tokenizer(tinyllama_tokenizer_path)
+    docs = [t for t in TEXTS if t]  # the separator split skips empty documents
+    blob = "<|sep|>".join(docs).encode()
+    got = gigatoken_tok.encode_batch(BytesSource([blob], separator=b"<|sep|>"))
+    assert got.tolist() == gigatoken_tok.encode_batch(docs).tolist()
+
+
+def test_bytes_source_invalid_utf8_separator_raises(tinyllama_tokenizer_path):
+    """Document bytes are trusted to be valid UTF-8, but a separator that is
+    not valid UTF-8 could cut a document mid-character, so the SentencePiece
+    backend rejects it up front (a constant-time argument check)."""
+    gigatoken_tok = Tokenizer(tinyllama_tokenizer_path)
+    with pytest.raises(ValueError, match="separator"):
+        gigatoken_tok.encode_batch(BytesSource(["é".encode()], separator=b"\xa9"))
 
 
 # ---------------------------------------------------------------------------
