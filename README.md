@@ -52,9 +52,12 @@ Keep in mind that passing Python data structures through this API still incurs t
 
 
 ## FAQ
-### Q: Did you just way over-optimize for a specific CPU and tokenizer?
+### Q: Did you just way over-optimize for a specific CPU and tokenizer? How is it so fast?
 No, I way over-optimized for every combination of these!
 The results are very consistent across CPUs (modern x86 and ARM), and across specific tokenizers.
+
+The major improvements are in optimizing heavily an implementation that usually is outsourced to a Regex engine (pretokenization) using SIMD and other tricks, as well as heavily optimizing caching of pretoken mappings (if a word has been seen before, look it up its encoded tokens efficiently).
+In addition, interactions with Python are minimized, and threads are minimally interacting with each other.
 
 
 ### Q: How can I quickly check if my tokenizer is supported?
@@ -69,7 +72,12 @@ gigatoken is 2299.75x faster than hf (by MB/s)
 validation OK: 1 documents match
 ```
 You can see help for these flags with `uvx gigatoken bench --help`.
-Keep in mind that you might need to run twice on macOS to get a good reading since the first run will always to a security scan.
+Keep in mind that you might need to run twice on macOS to get a good reading since the first run will always perform a security scan.
+
+
+### Q: I've found a mismatch/slow use-case, is this expected?
+Most likely not! Despite reasonably wide testing I don't have every use-case on hand, so please report anything you find in a [GitHub Issue](https://github.com/marcelroed/gigatoken/issues) so I can address it as soon as possible.
+
 
 <!--
 ## How does Gigatoken work?
@@ -96,6 +104,6 @@ In the final stages of the project, AI was used to assist:
 * Implementing the user-facing API
 * Widening of compatibility, for instance generalizing and porting the pretokenizer implementations to support more tokenizers, less interesting features like padding/truncation/unicode normalization
 * Porting SIMD strategies between AVX512/AVX2/NEON
-* Final profiling stages and the last ~4x worth of performance from eliminating branch prediction and improving the pretoken cache hierarchy
+* Final profiling stages and the last ~4x worth of performance from eliminating branching and improving the pretoken cache hierarchy
 * Refactoring and code reuse
 </details>
