@@ -687,7 +687,7 @@ dependencies = [
 
 [[package]]
 name = "gigatoken"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "aho-corasick",
  "arrow-array",
