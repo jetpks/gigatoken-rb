@@ -36,6 +36,9 @@ impl FileSource {
             DocFormat::Text { separator: None } => {
                 format!("TextFileSource(paths=[{n} files])")
             }
+            DocFormat::Parquet { column } => {
+                format!("ParquetFileSource(paths=[{n} files], column={column:?})")
+            }
         }
     }
 }
@@ -91,6 +94,28 @@ impl JsonlFileSource {
             paths,
             format: DocFormat::Jsonl {
                 field: field.to_string(),
+            },
+        })
+        .add_subclass(Self)
+    }
+}
+
+/// Parquet files: one document per row, text taken from `column` (a string
+/// or binary column; null rows become empty documents, so results stay
+/// row-aligned with the table). Parquet handles compression internally, so
+/// no .gz/.zst detection applies.
+#[pyclass(extends = FileSource)]
+pub(crate) struct ParquetFileSource;
+
+#[pymethods]
+impl ParquetFileSource {
+    #[new]
+    #[pyo3(signature = (paths, column = "text"))]
+    fn new(paths: Vec<PathBuf>, column: &str) -> PyClassInitializer<Self> {
+        PyClassInitializer::from(FileSource {
+            paths,
+            format: DocFormat::Parquet {
+                column: column.to_string(),
             },
         })
         .add_subclass(Self)
@@ -169,7 +194,7 @@ pub(crate) fn resolve_files_source(obj: &Bound<'_, PyAny>) -> PyResult<(Vec<Path
         return Ok((paths, format));
     }
     Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
-        "expected a TextFileSource/JsonlFileSource, a path, or a list of paths, got {}",
+        "expected a TextFileSource/JsonlFileSource/ParquetFileSource, a path, or a list of paths, got {}",
         obj.get_type()
     )))
 }
@@ -187,11 +212,46 @@ pub(crate) fn encode_files_ragged<'py>(
 ) -> PyResult<Bound<'py, PyAny>> {
     let (paths, format) = resolve_files_source(source)?;
     let (flat, counts) = py.detach(|| -> PyResult<_> {
+        // Parquet rows can't be split out of the raw file bytes, so they are
+        // materialized as owned documents here and encoded through the
+        // whole-document path (each buffer one document).
+        if let DocFormat::Parquet { column } = &format {
+            let docs = load_parquet_docs(&paths, column, parallel)?;
+            let bytes: Vec<&[u8]> = docs.iter().map(|d| d.as_slice()).collect();
+            return Ok(encode(&bytes, &DocFormat::Text { separator: None }));
+        }
         let files = load_files(&paths, parallel)?;
         let bytes: Vec<&[u8]> = files.iter().map(|f| f.as_bytes()).collect();
         Ok(encode(&bytes, &format))
     })?;
     super::bridge::ragged_to_python(py, flat, counts)
+}
+
+/// Load `column` of every parquet file as one owned document per row, files
+/// in argument order, rows in row order. Parallel across files and row
+/// groups with rayon, or fully on the calling thread when `parallel` is
+/// false (the sequential encode paths must never touch the rayon pool).
+fn load_parquet_docs(
+    paths: &[PathBuf],
+    column: &str,
+    parallel: bool,
+) -> PyResult<Vec<Vec<u8>>> {
+    use crate::input::parquet::read_docs;
+    use rayon::prelude::*;
+    // input::parquet errors already carry the offending path.
+    let to_pyerr = |e: std::io::Error| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string());
+    let per_file: Vec<Vec<Vec<u8>>> = if parallel {
+        paths
+            .par_iter()
+            .map(|p| read_docs(p, column, true).map_err(to_pyerr))
+            .collect::<PyResult<_>>()?
+    } else {
+        paths
+            .iter()
+            .map(|p| read_docs(p, column, false).map_err(to_pyerr))
+            .collect::<PyResult<_>>()?
+    };
+    Ok(per_file.into_iter().flatten().collect())
 }
 
 /// Load all files: mmap when stored uncompressed, decompress .gz/.zst into

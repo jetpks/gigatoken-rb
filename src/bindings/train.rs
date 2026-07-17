@@ -91,16 +91,20 @@ pub(crate) fn train_bpe<'py>(
         if let Some(ext) = path.extension()
             && ext == "parquet"
         {
-            #[cfg(not(feature = "parquet"))]
-            return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                "The 'parquet' feature is not enabled in this build, cannot read parquet files",
-            ));
-            #[cfg(feature = "parquet")]
-            {
-                let counts = pretokenize::pretokenize_par_parquet(&path);
-                let result = bpe_train::train_bpe(counts, vocab_size, special_tokens, tie_breaking);
-                return bpe_result_to_python(py, result);
-            }
+            // A bare path takes the default column "text", matching
+            // detect_default_format; use ParquetFileSource to choose another
+            // column.
+            let spec = FileSourceSpec {
+                paths: vec![path],
+                format: crate::input::file_source::DocFormat::Parquet {
+                    column: "text".to_string(),
+                },
+            };
+            let counts = spec
+                .pretokenize()
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
+            let result = bpe_train::train_bpe(counts, vocab_size, special_tokens, tie_breaking);
+            return bpe_result_to_python(py, result);
         }
         mmap_resource = MmappedFile::open(&path).map_err(|e| {
             PyErr::new::<pyo3::exceptions::PyIOError, _>(format!(

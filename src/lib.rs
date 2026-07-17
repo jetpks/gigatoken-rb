@@ -24,7 +24,8 @@ use crate::bindings::matcher::{SpecialTokenFound, SubstringMatcher};
 use crate::bindings::padding;
 use crate::bindings::pretokenize::{PretokenizerIter, pretokenized_counts, pretokenizer};
 use crate::bindings::sources::{
-    BytesSource, FileSource, JsonlFileSource, TextFileSource, encode_files_ragged,
+    BytesSource, FileSource, JsonlFileSource, ParquetFileSource, TextFileSource,
+    encode_files_ragged,
 };
 use crate::bindings::train::train_bpe;
 use crate::input::file_source::DocFormat;
@@ -521,6 +522,7 @@ fn gigatoken_rs<'py>(py: Python, m: &Bound<'py, PyModule>) -> PyResult<()> {
     m.add_class::<FileSource>()?;
     m.add_class::<TextFileSource>()?;
     m.add_class::<JsonlFileSource>()?;
+    m.add_class::<ParquetFileSource>()?;
     m.add_class::<BytesSource>()?;
     m.add_class::<PretokenizerIter>()?;
     m.add_class::<SubstringMatcher>()?;

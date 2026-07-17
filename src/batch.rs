@@ -71,6 +71,12 @@ pub(crate) fn for_each_doc(bytes: &[u8], format: &DocFormat, mut f: impl FnMut(&
             }
         }
         DocFormat::Text { .. } => f(bytes),
+        // Parquet rows are materialized into whole documents before encoding
+        // (encode_files_ragged rewrites the format to Text { separator: None }),
+        // so parquet bytes must never arrive here.
+        DocFormat::Parquet { .. } => {
+            unreachable!("parquet files are materialized into documents before encoding")
+        }
     }
 }
 

@@ -25,6 +25,7 @@ pub(crate) enum Compression {
 pub enum ContentFormat {
     PlainText,
     Jsonl,
+    Parquet,
 }
 
 /// Strip compression extension and detect compression type.
@@ -43,6 +44,8 @@ fn detect_compression(name: &str) -> (&str, Compression) {
 fn detect_content_format(stem: &str) -> ContentFormat {
     if stem.ends_with(".jsonl") {
         ContentFormat::Jsonl
+    } else if stem.ends_with(".parquet") {
+        ContentFormat::Parquet
     } else {
         ContentFormat::PlainText
     }
@@ -72,6 +75,12 @@ pub enum DocFormat {
     Text { separator: Option<Vec<u8>> },
     /// JSON Lines: one document per line, text taken from `field`.
     Jsonl { field: String },
+    /// Parquet: one document per row, text taken from `column` (a string or
+    /// binary column; null rows become empty documents). Unlike the byte-
+    /// stream formats, parquet files are materialized into owned documents
+    /// up front (see `input::parquet`) and never reach the byte-region
+    /// chunking machinery.
+    Parquet { column: String },
 }
 
 impl DocFormat {
@@ -80,18 +89,21 @@ impl DocFormat {
     fn separator(&self) -> &[u8] {
         match self {
             DocFormat::Text { separator } => separator.as_deref().unwrap_or(b""),
-            DocFormat::Jsonl { .. } => b"",
+            DocFormat::Jsonl { .. } | DocFormat::Parquet { .. } => b"",
         }
     }
 }
 
 /// Default format for a bare path: JSONL (field "text") if the uncompressed
-/// name ends in .jsonl, otherwise plain text with the whole file as one
-/// document.
+/// name ends in .jsonl, parquet (column "text") if it ends in .parquet,
+/// otherwise plain text with the whole file as one document.
 pub fn detect_default_format(path: &Path) -> DocFormat {
     match detect_format(path).0 {
         ContentFormat::Jsonl => DocFormat::Jsonl {
             field: "text".to_string(),
+        },
+        ContentFormat::Parquet => DocFormat::Parquet {
+            column: "text".to_string(),
         },
         ContentFormat::PlainText => DocFormat::Text { separator: None },
     }
@@ -184,6 +196,12 @@ pub fn chunk_ranges(
         }
         // One chunk spanning the whole file (a single Range element, not 0..len values).
         DocFormat::Text { .. } => std::iter::once(0..len).collect(),
+        // Parquet documents are materialized before any byte-region chunking
+        // (encode_files_ragged and pretokenize_file branch on the format
+        // first), so parquet bytes must never arrive here.
+        DocFormat::Parquet { .. } => {
+            unreachable!("parquet files are materialized into documents before chunking")
+        }
     }
 }
 
@@ -265,6 +283,11 @@ fn pretokenize_streaming(
                 count_pretokens(&doc);
             }
         }
+        // pretokenize_file handles parquet before any streaming/compression
+        // path (parquet compresses internally).
+        DocFormat::Parquet { .. } => {
+            unreachable!("parquet files are pretokenized by input::parquet, not streamed")
+        }
     }
     counts
 }
@@ -276,6 +299,12 @@ fn pretokenize_file(
 ) -> Result<HashMap<Vec<u8>, usize, FxBuildHasher>, std::io::Error> {
     eprintln!("Processing {:?} ({:?}, {:?})", path, format, compression);
 
+    // Parquet handles its own compression and parallelism (per row group);
+    // it never goes through the mmap/streaming byte paths below.
+    if let DocFormat::Parquet { column } = format {
+        return crate::input::parquet::pretokenize_par(path, column);
+    }
+
     // Uncompressed files: memory-map for parallel processing
     if matches!(compression, Compression::None) {
         let resource = MmappedFile::open(path)?;
@@ -284,6 +313,7 @@ fn pretokenize_file(
                 pretokenize_plain_text_bytes(resource.as_bytes(), format.separator())
             }
             DocFormat::Jsonl { field } => pretokenize_jsonl_par(resource.as_bytes(), field),
+            DocFormat::Parquet { .. } => unreachable!("handled above"),
         });
     }
 

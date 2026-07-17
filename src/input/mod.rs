@@ -12,6 +12,7 @@ use std::path::Path;
 pub(crate) mod decompress;
 pub mod file_source;
 pub mod jsonl;
+pub mod parquet;
 
 // ---------------------------------------------------------------------------
 // Document — owned/borrowed byte buffer used by jsonl iterator

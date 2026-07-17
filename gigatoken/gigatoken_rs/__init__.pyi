@@ -6,7 +6,8 @@ import numpy as np
 import numpy.typing as npt
 
 class FileSource:
-    """Base class for file sources; construct TextFileSource or JsonlFileSource."""
+    """Base class for file sources; construct TextFileSource, JsonlFileSource,
+    or ParquetFileSource."""
 
     def __repr__(self) -> str: ...
 
@@ -28,6 +29,17 @@ class JsonlFileSource(FileSource):
         self,
         paths: list[str | Path | PathLike[str]],
         field: str = "text",
+    ) -> None: ...
+
+class ParquetFileSource(FileSource):
+    """Parquet files: one document per row, text taken from `column` (a
+    string or binary column). Null rows become empty documents, so results
+    stay row-aligned with the table."""
+
+    def __init__(
+        self,
+        paths: list[str | Path | PathLike[str]],
+        column: str = "text",
     ) -> None: ...
 
 class BytesSource:
