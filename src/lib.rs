@@ -61,15 +61,6 @@ impl BPETokenizer {
 
 #[pymethods]
 impl BPETokenizer {
-    #[new]
-    fn __new__() -> PyResult<Self> {
-        let data_dir = std::env::home_dir().unwrap().join("data");
-        let tiktoken_path = data_dir.join("tokenizers/r50k_base.tiktoken");
-        Ok(Self {
-            tokenizer: load_tokenizer::tiktoken::load_tiktoken(tiktoken_path)?,
-            workers: WorkerPool::new(),
-        })
-    }
     #[staticmethod]
     fn from_tiktoken(path: PathBuf) -> PyResult<Self> {
         Ok(Self {
