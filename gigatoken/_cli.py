@@ -7,7 +7,10 @@ with) the HuggingFace `tokenizers` library.
 
 from __future__ import annotations
 
+import os
+import platform
 import re
+import subprocess
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
@@ -44,6 +47,57 @@ def _parse_size(text: str) -> int:
     if match is None:
         raise typer.BadParameter(f"cannot parse size {text!r}; expected something like 100MB")
     return int(float(match.group(1)) * _SIZE_UNITS[match.group(2)])
+
+
+def _cpu_info() -> str:
+    """The benchmark machine's CPU as 'name, N cores', plus ', M sockets'
+    when there is more than one socket."""
+    name: str | None = None
+    cores: int | None = None
+    sockets: int | None = None
+    system = platform.system()
+    if system == "Darwin":
+
+        def _sysctl(key: str) -> str | None:
+            try:
+                return subprocess.run(["sysctl", "-n", key], capture_output=True, text=True, check=True).stdout.strip() or None
+            except (OSError, subprocess.CalledProcessError):
+                return None
+
+        name = _sysctl("machdep.cpu.brand_string")
+        if (value := _sysctl("hw.physicalcpu")) is not None and value.isdigit():
+            cores = int(value)
+        if (value := _sysctl("hw.packages")) is not None and value.isdigit():
+            sockets = int(value)
+    elif system == "Linux":
+        # Within each processor block "physical id" precedes "core id", so
+        # (socket, core) pairs count physical cores across sockets.
+        physical_ids: set[str] = set()
+        socket_core_ids: set[tuple[str, str]] = set()
+        physical_id = ""
+        try:
+            for line in Path("/proc/cpuinfo").read_text().splitlines():
+                key, _, value = line.partition(":")
+                key, value = key.strip(), value.strip()
+                if key == "model name" and name is None:
+                    name = value
+                elif key == "physical id":
+                    physical_id = value
+                    physical_ids.add(value)
+                elif key == "core id":
+                    socket_core_ids.add((physical_id, value))
+        except OSError:
+            pass
+        cores = len(socket_core_ids) or None
+        sockets = len(physical_ids) or None
+    name = name or platform.processor() or platform.machine() or "unknown CPU"
+    cores = cores or os.cpu_count()
+    parts = [name]
+    if cores is not None:
+        parts.append(f"{cores} core" + ("s" if cores != 1 else ""))
+    if sockets is not None and sockets > 1:
+        parts.append(f"{sockets} sockets")
+    return ", ".join(parts)
 
 
 def _load_tokenizer(spec: str) -> Tokenizer:
@@ -118,6 +172,8 @@ def bench(
     if comparison_limit is not None and compare_to is None:
         raise typer.BadParameter("--comparison-limit requires --compare-to hf (or --validate)")
     limit_bytes = _parse_size(comparison_limit) if comparison_limit is not None else None
+
+    typer.echo(f"{'cpu':>9}: {_cpu_info()}")
 
     import awkward as ak
 
