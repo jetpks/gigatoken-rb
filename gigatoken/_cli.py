@@ -234,7 +234,7 @@ def bench(
     hf_seconds = time.perf_counter() - start
     hf_ids = [encoding.ids for encoding in hf_encodings]
     _report("hf", hf_seconds, subset_bytes, sum(len(ids) for ids in hf_ids))
-    typer.echo(f"gigatoken is {(gt_bytes / gt_seconds) / (subset_bytes / hf_seconds):.2f}x faster than hf (by MB/s)")
+    typer.echo(f"gigatoken is {(gt_bytes / gt_seconds) / (subset_bytes / hf_seconds):.2f}x faster than hf")
 
     if not validate:
         return
