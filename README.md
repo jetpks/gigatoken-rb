@@ -74,10 +74,19 @@ uvx --with tokenizers gigatoken bench 'openai-community/gpt2' owt_train.txt \
     --in-memory --validate --comparison-limit 100MB \
     --separator "<|endoftext|>"
 ```
-```bash
-gigatoken:    1.557 s |   11920.51 MB at  7653.89 MB/s |  2701.65 Mtok at 1734.67 Mtok/s
-       hf:   15.268 s |     100.00 MB at     6.55 MB/s |    22.76 Mtok at    1.49 Mtok/s
-gigatoken is 1168.58x faster than hf (by MB/s)
+```
+      cpu: Apple M4 Max, 16 cores
+gigatoken:    1.432 s |   11920.51 MB at  8327.05 MB/s |  2701.65 Mtok at 1887.23 Mtok/s
+       hf:   16.250 s |     100.00 MB at     6.15 MB/s |    22.76 Mtok at    1.40 Mtok/s
+gigatoken is 1353.13x faster than hf (by MB/s)
+validation OK: 20401 documents match
+```
+
+```
+      cpu: AMD EPYC 9565 72-Core Processor, 144 cores, 2 sockets
+gigatoken:    0.584 s |   11920.51 MB at 20412.35 MB/s |  2701.65 Mtok at 4626.23 Mtok/s
+       hf:    3.738 s |     100.00 MB at    26.75 MB/s |    22.76 Mtok at    6.09 Mtok/s
+gigatoken is 763.08x faster than hf (by MB/s)
 validation OK: 20401 documents match
 ```
 This example uses the train sample from [this dataset](https://huggingface.co/datasets/stanford-cs336/owt-sample).
