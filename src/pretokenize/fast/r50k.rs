@@ -118,49 +118,45 @@ fn batch_masks(bytes: &[u8], scan: usize) -> (u64, u64) {
     }
 }
 
-/// AVX-512 counterpart of the NEON `batch_masks`: the classification is
-/// one 64-byte load and one k-register compare per class
-/// ([`mask::ascii_masks_avx512`]); the boundary algebra and the extended
-/// (non-ASCII) path are the same shared scalar code. Runtime-gated:
-/// [`MaskState`] routes here only after
-/// [`mask::avx512_scanner_available`] reported AVX-512 support.
+/// x86 counterpart of the NEON `batch_masks`, monomorphized on the SIMD
+/// tier: the classification is [`mask::ascii_masks_avx512`] (one 64-byte
+/// load and one k-register compare per class) or
+/// [`mask::ascii_masks_avx2`] (two 32-byte loads, compare + vpmovmskb per
+/// class); the boundary algebra and the extended (non-ASCII) path are the
+/// same shared scalar code. `#[inline(always)]` (with no `target_feature`
+/// of its own) so the body fuses into whichever feature region calls it —
+/// the tier-monomorphized fill wrappers
+/// (`MaskState::fill_spans_two_phase_{avx512,avx2}_crc`), where LLVM's
+/// cost model declined to inline the previous `#[target_feature]` form
+/// and left a call per 64-byte batch, or the runtime-dispatched
+/// `MaskScheme::batch_masks` that `next_span` uses.
+///
+/// # Safety
+///
+/// The selected tier must have been runtime-detected
+/// ([`mask::avx512_scanner_available`] /
+/// [`mask::avx2_scanner_available`]).
 #[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx512f,avx512bw,avx512vl,bmi1,bmi2,lzcnt,popcnt")]
-#[inline]
-fn batch_masks_avx512(bytes: &[u8], scan: usize) -> (u64, u64) {
+#[inline(always)]
+unsafe fn batch_masks_x86<const AVX512: bool>(bytes: &[u8], scan: usize) -> (u64, u64) {
     let len = bytes.len();
     if scan + 70 > len {
         // Not enough lookahead for the batch-edge char classification
         // (up to a 4-byte char starting at scan + 66); scalar batch.
         return (0, u64::MAX);
     }
-    let am = mask::ascii_masks_avx512(bytes, scan);
+    let am = if AVX512 {
+        // SAFETY: the caller detected the AVX-512 tier (fn contract).
+        unsafe { mask::ascii_masks_avx512(bytes, scan) }
+    } else {
+        // SAFETY: the caller detected the AVX2 tier (fn contract).
+        unsafe { mask::ascii_masks_avx2(bytes, scan) }
+    };
     let wsa = am.s | am.wt | am.n;
     if am.hi != 0 {
-        return extended_masks(bytes, scan, am.l, am.d, am.s, wsa, am.hi, am.ap);
-    }
-    ascii_batch_algebra(bytes, scan, am.l, am.d, am.s, wsa, am.ap)
-}
-
-/// AVX2 tier of the same front-end, for x86_64 CPUs without AVX-512
-/// (Haswell+, Zen 1-3): the classification is [`mask::ascii_masks_avx2`]
-/// (two 32-byte loads, compare + vpmovmskb per class); everything after
-/// the masks is the identical shared code. Runtime-gated on
-/// [`mask::avx2_scanner_available`].
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2,bmi1,bmi2,lzcnt,popcnt")]
-#[inline]
-fn batch_masks_avx2(bytes: &[u8], scan: usize) -> (u64, u64) {
-    let len = bytes.len();
-    if scan + 70 > len {
-        // Not enough lookahead for the batch-edge char classification
-        // (up to a 4-byte char starting at scan + 66); scalar batch.
-        return (0, u64::MAX);
-    }
-    let am = mask::ascii_masks_avx2(bytes, scan);
-    let wsa = am.s | am.wt | am.n;
-    if am.hi != 0 {
-        return extended_masks(bytes, scan, am.l, am.d, am.s, wsa, am.hi, am.ap);
+        // SAFETY: both detected tiers include the BMI1/BMI2/LZCNT/POPCNT
+        // bit features `extended_masks` re-declares (fn contract).
+        return unsafe { extended_masks(bytes, scan, am.l, am.d, am.s, wsa, am.hi, am.ap) };
     }
     ascii_batch_algebra(bytes, scan, am.l, am.d, am.s, wsa, am.ap)
 }
@@ -450,20 +446,9 @@ impl MaskScheme for R50kScheme {
 
     #[cfg(target_arch = "x86_64")]
     #[inline(always)]
-    fn batch_masks(bytes: &[u8], scan: usize) -> (u64, u64) {
-        debug_assert!(mask::simd_scanner_available());
-        // The tier check is a cached atomic load + bit test and the
-        // branch is perfectly predicted, so it is noise next to the
-        // batch classification it selects.
-        if mask::avx512_scanner_available() {
-            // SAFETY: runtime AVX-512 detection right above.
-            unsafe { batch_masks_avx512(bytes, scan) }
-        } else {
-            // SAFETY: MaskState enables the mask-scanner path only after
-            // runtime detection (mask::simd_scanner_available); without
-            // AVX-512 that detection was the AVX2 tier's.
-            unsafe { batch_masks_avx2(bytes, scan) }
-        }
+    unsafe fn batch_masks_x86<const AVX512: bool>(bytes: &[u8], scan: usize) -> (u64, u64) {
+        // SAFETY: the caller detected the tier (trait contract).
+        unsafe { batch_masks_x86::<AVX512>(bytes, scan) }
     }
 }
 

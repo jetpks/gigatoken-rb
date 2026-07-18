@@ -12,7 +12,10 @@
 //!   (cl100k keeps trailing whitespace at EOS as one token via `\s+$`)
 
 #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+#[cfg(target_arch = "aarch64")]
 use super::cl100k_family::batch_masks;
+#[cfg(target_arch = "x86_64")]
+use super::cl100k_family::batch_masks_x86;
 use super::mask::{MaskScheme, MaskState};
 use super::{
     decode_cp, is_ascii_ws, is_digit, is_letter, letter_end_at, scan_letters_from,
@@ -29,10 +32,17 @@ impl MaskScheme for Qwen2Scheme {
         advance_pos(bytes, pos)
     }
 
-    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+    #[cfg(target_arch = "aarch64")]
     #[inline(always)]
     fn batch_masks(bytes: &[u8], scan: usize) -> (u64, u64) {
         batch_masks(bytes, scan, false, unicode::class_of)
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[inline(always)]
+    unsafe fn batch_masks_x86<const AVX512: bool>(bytes: &[u8], scan: usize) -> (u64, u64) {
+        // SAFETY: the caller detected the tier (trait contract).
+        unsafe { batch_masks_x86::<AVX512>(bytes, scan, false, unicode::class_of) }
     }
 }
 

@@ -535,14 +535,98 @@ pub(crate) trait MaskScheme {
     /// `(usable, bad)` for `bytes[scan..scan+64]` (`scan+64 <= len`):
     /// `usable` bit k = trustworthy token start at scan+k; `bad` bit k =
     /// byte scan+k needs the scalar path. `usable & bad` must be 0.
-    ///
-    /// On x86_64 the implementations dispatch into AVX-512 or AVX2 code
-    /// and must only be called when [`simd_scanner_available`] is true —
-    /// [`MaskState`] guarantees this by never leaving the scalar path
-    /// otherwise.
-    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+    #[cfg(target_arch = "aarch64")]
     fn batch_masks(bytes: &[u8], scan: usize) -> (u64, u64);
+
+    /// The x86_64 batch classifier, monomorphized on the SIMD tier
+    /// (`AVX512` = true → the AVX-512 front-end, false → AVX2); same
+    /// `(usable, bad)` contract as the aarch64 `batch_masks`. The fill
+    /// wrappers instantiate this inside a matching `#[target_feature]`
+    /// region, so the tier function inlines into the fill loop and no
+    /// per-batch dispatch survives (the codegen a `-C target-cpu=native`
+    /// build gets).
+    ///
+    /// # Safety
+    ///
+    /// The selected tier must have been runtime-detected:
+    /// [`avx512_scanner_available`] for `AVX512` = true,
+    /// [`avx2_scanner_available`] for `AVX512` = false.
+    #[cfg(target_arch = "x86_64")]
+    unsafe fn batch_masks_x86<const AVX512: bool>(bytes: &[u8], scan: usize) -> (u64, u64);
+
+    /// Runtime-dispatched form of [`Self::batch_masks_x86`] for call
+    /// sites outside a tier-monomorphized region (`next_span`): a cached
+    /// tier check plus a non-inlined call per batch into a per-tier
+    /// `#[target_feature]` wrapper ([`batch_masks_dyn_avx512`] /
+    /// [`batch_masks_dyn_avx2`]), so the classifier body still compiles
+    /// under the full tier feature set. Must only be called when
+    /// [`simd_scanner_available`] is true — [`MaskState`] guarantees this
+    /// by never leaving the scalar path otherwise.
+    #[cfg(target_arch = "x86_64")]
+    #[inline(always)]
+    fn batch_masks(bytes: &[u8], scan: usize) -> (u64, u64)
+    where
+        Self: Sized,
+    {
+        debug_assert!(simd_scanner_available());
+        // The tier check is a cached atomic load + bit test and the
+        // branch is perfectly predicted, so it is noise next to the
+        // batch classification it selects.
+        if avx512_scanner_available() {
+            // SAFETY: runtime AVX-512 detection right above.
+            unsafe { batch_masks_dyn_avx512::<Self>(bytes, scan) }
+        } else {
+            // SAFETY: MaskState enables the mask-scanner path only after
+            // runtime detection (simd_scanner_available); without AVX-512
+            // that detection was the AVX2 tier's.
+            unsafe { batch_masks_dyn_avx2::<Self>(bytes, scan) }
+        }
+    }
 }
+
+/// AVX-512 feature region for the runtime-dispatched
+/// `MaskScheme::batch_masks`: the scheme's `#[inline(always)]`
+/// `batch_masks_x86` body fuses into this wrapper, so the per-batch call
+/// `next_span` pays runs full-tier codegen (without this region the body
+/// would inline into the plain-feature caller, where the inner
+/// `#[target_feature]` mask classifiers can't inline and the boundary
+/// algebra loses BMI/LZCNT codegen — measured ~25% slower).
+///
+/// # Safety
+///
+/// The CPU must support the AVX-512 scanner tier
+/// ([`avx512_scanner_available`]).
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f,avx512bw,avx512vl,bmi1,bmi2,lzcnt,popcnt")]
+#[inline]
+unsafe fn batch_masks_dyn_avx512<S: MaskScheme>(bytes: &[u8], scan: usize) -> (u64, u64) {
+    // SAFETY: the caller detected the AVX-512 tier (fn contract).
+    unsafe { S::batch_masks_x86::<true>(bytes, scan) }
+}
+
+/// AVX2 counterpart of [`batch_masks_dyn_avx512`].
+///
+/// # Safety
+///
+/// The CPU must support the AVX2 scanner tier
+/// ([`avx2_scanner_available`]).
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,bmi1,bmi2,lzcnt,popcnt")]
+#[inline]
+unsafe fn batch_masks_dyn_avx2<S: MaskScheme>(bytes: &[u8], scan: usize) -> (u64, u64) {
+    // SAFETY: the caller detected the AVX2 tier (fn contract).
+    unsafe { S::batch_masks_x86::<false>(bytes, scan) }
+}
+
+/// x86 SIMD-tier selector for the monomorphized fill bodies
+/// ([`MaskState::fill_spans_two_phase_impl`]): `DYN` keeps the per-batch
+/// runtime dispatch of the provided `MaskScheme::batch_masks`; `AVX2` /
+/// `AVX512` pin the tier, chosen once per fill inside a matching
+/// `#[target_feature]` wrapper. Meaningless (and always `DYN`) off
+/// x86_64.
+pub(crate) const X86_TIER_DYN: u8 = 0;
+pub(crate) const X86_TIER_AVX2: u8 = 1;
+pub(crate) const X86_TIER_AVX512: u8 = 2;
 
 /// Scheme-agnostic mask-scanner state: pops trusted boundary bits, walks
 /// bad zones through the scheme's scalar `advance`, runs the buffer tail
@@ -849,19 +933,79 @@ impl MaskState {
         batch: &mut crate::pretokenize::SpanBatch<'a>,
         prefetch: &impl Fn(u64),
     ) -> usize {
-        // Hash-arm dispatch, once per fill (≤ PRETOKEN_CHUNK spans), on
-        // the process-immutable `crc_hash_selected` bit — see
-        // `fill_span_hash` for why this keeps every hash site consistent.
+        // Tier + hash-arm dispatch, once per fill (≤ PRETOKEN_CHUNK
+        // spans), on process-immutable bits (see `fill_span_hash` for the
+        // hash-arm contract). Inside the tier wrappers the scheme's batch
+        // classifier inlines into the harvest loop and the bit-scan loops
+        // get BMI/LZCNT codegen — the per-batch tier branch and call that
+        // the provided `MaskScheme::batch_masks` pays (~2% of end-to-end
+        // encode) exist only in the DYN instantiation, which real
+        // hardware never takes: fill callers require a SIMD tier, and
+        // every AVX2/AVX-512 CPU has SSE4.2.
         #[cfg(target_arch = "x86_64")]
         if crate::pretokenize::crc_hash_selected() {
+            if avx512_scanner_available() {
+                // SAFETY: AVX-512 tier + SSE4.2 detected right above.
+                return unsafe {
+                    self.fill_spans_two_phase_avx512_crc::<S>(bytes, batch, prefetch)
+                };
+            }
+            if avx2_scanner_available() {
+                // SAFETY: AVX2 tier + SSE4.2 detected right above.
+                return unsafe {
+                    self.fill_spans_two_phase_avx2_crc::<S>(bytes, batch, prefetch)
+                };
+            }
             // SAFETY: `crc_hash_selected` verified SSE4.2 support.
             return unsafe { self.fill_spans_two_phase_crc::<S>(bytes, batch, prefetch) };
         }
-        self.fill_spans_two_phase_impl::<S, false>(bytes, batch, prefetch)
+        self.fill_spans_two_phase_impl::<S, false, X86_TIER_DYN>(bytes, batch, prefetch)
     }
 
-    /// The SSE4.2 (CRC-hash) monomorphization of
-    /// [`Self::fill_spans_two_phase`].
+    /// The AVX-512-tier, CRC-hash monomorphization of
+    /// [`Self::fill_spans_two_phase`]. The feature set is the AVX-512
+    /// scanner tier plus `sse4.2` for the CRC hash arm (implied by
+    /// `avx512f`, spelled out because the `X86_CRC = true` body requires
+    /// it — see `fill_span_hash`'s reachability contract).
+    ///
+    /// # Safety
+    ///
+    /// The CPU must support the AVX-512 scanner tier
+    /// ([`avx512_scanner_available`]) and SSE4.2 (`crc_hash_selected`).
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx512f,avx512bw,avx512vl,bmi1,bmi2,lzcnt,popcnt,sse4.2")]
+    unsafe fn fill_spans_two_phase_avx512_crc<'a, S: MaskScheme>(
+        &mut self,
+        bytes: &'a [u8],
+        batch: &mut crate::pretokenize::SpanBatch<'a>,
+        prefetch: &impl Fn(u64),
+    ) -> usize {
+        self.fill_spans_two_phase_impl::<S, true, X86_TIER_AVX512>(bytes, batch, prefetch)
+    }
+
+    /// The AVX2-tier, CRC-hash monomorphization of
+    /// [`Self::fill_spans_two_phase`] (Haswell+, Zen 1-3; `sse4.2` is
+    /// implied by `avx` but spelled out for the CRC arm's contract).
+    ///
+    /// # Safety
+    ///
+    /// The CPU must support the AVX2 scanner tier
+    /// ([`avx2_scanner_available`]) and SSE4.2 (`crc_hash_selected`).
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2,bmi1,bmi2,lzcnt,popcnt,sse4.2")]
+    unsafe fn fill_spans_two_phase_avx2_crc<'a, S: MaskScheme>(
+        &mut self,
+        bytes: &'a [u8],
+        batch: &mut crate::pretokenize::SpanBatch<'a>,
+        prefetch: &impl Fn(u64),
+    ) -> usize {
+        self.fill_spans_two_phase_impl::<S, true, X86_TIER_AVX2>(bytes, batch, prefetch)
+    }
+
+    /// The SSE4.2-only (CRC-hash, per-batch tier dispatch)
+    /// monomorphization of [`Self::fill_spans_two_phase`]: unreachable on
+    /// real hardware (every AVX2/AVX-512 CPU has SSE4.2, so one of the
+    /// tier wrappers wins), kept for CPUID-masking hypervisors.
     ///
     /// # Safety
     ///
@@ -877,13 +1021,16 @@ impl MaskState {
         batch: &mut crate::pretokenize::SpanBatch<'a>,
         prefetch: &impl Fn(u64),
     ) -> usize {
-        self.fill_spans_two_phase_impl::<S, true>(bytes, batch, prefetch)
+        self.fill_spans_two_phase_impl::<S, true, X86_TIER_DYN>(bytes, batch, prefetch)
     }
 
     /// [`Self::fill_spans_two_phase`]'s body, monomorphized on the hash
-    /// arm (`X86_CRC` — see `fill_span_hash`'s reachability contract).
+    /// arm (`X86_CRC` — see `fill_span_hash`'s reachability contract) and
+    /// the x86 SIMD tier (`X86_TIER` — the `X86_TIER_*` constants; the
+    /// AVX2/AVX-512 instantiations are only reachable through the
+    /// matching `#[target_feature]` wrappers above).
     #[inline(always)]
-    fn fill_spans_two_phase_impl<'a, S: MaskScheme, const X86_CRC: bool>(
+    fn fill_spans_two_phase_impl<'a, S: MaskScheme, const X86_CRC: bool, const X86_TIER: u8>(
         &mut self,
         bytes: &'a [u8],
         batch: &mut crate::pretokenize::SpanBatch<'a>,
@@ -955,6 +1102,16 @@ impl MaskState {
                     break;
                 }
                 let base = scan;
+                #[cfg(target_arch = "x86_64")]
+                let (usable, bad) = match X86_TIER {
+                    // SAFETY: the tier wrappers instantiate these arms
+                    // only after runtime tier detection (see
+                    // `fill_spans_two_phase`).
+                    X86_TIER_AVX512 => unsafe { S::batch_masks_x86::<true>(bytes, base) },
+                    X86_TIER_AVX2 => unsafe { S::batch_masks_x86::<false>(bytes, base) },
+                    _ => S::batch_masks(bytes, base),
+                };
+                #[cfg(not(target_arch = "x86_64"))]
                 let (usable, bad) = S::batch_masks(bytes, base);
                 // At a resume point r (the pending token's start): usable
                 // bits at or below r are dead (the pending start itself,

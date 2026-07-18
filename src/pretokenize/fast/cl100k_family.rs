@@ -197,38 +197,26 @@ pub(crate) fn batch_masks(
 }
 
 /// x86-64 front-end for the family schemes: same contract as the NEON
-/// `batch_masks` above, dispatching on the runtime-detected SIMD tier
-/// (AVX-512 or AVX2). The tier check is a cached atomic load + bit test
-/// with a perfectly predicted branch — noise next to the batch
-/// classification it selects.
+/// `batch_masks` above, monomorphized on the SIMD tier (see
+/// `MaskScheme::batch_masks_x86`, whose provided `batch_masks` supplies
+/// the runtime-dispatched form). The classification is
+/// [`mask::ascii_masks_avx512`] (one 64-byte load and one k-register
+/// compare per class) or [`mask::ascii_masks_avx2`] (two 32-byte loads,
+/// compare + vpmovmskb per class); the boundary algebra and the extended
+/// (non-ASCII) path are the shared scalar code. `#[inline(always)]` (with
+/// no `target_feature` of its own) so the body fuses into whichever
+/// feature region calls it — LLVM's cost model declined to inline the
+/// previous `#[target_feature]` form into the tier-monomorphized fill
+/// wrappers and left a call per 64-byte batch.
+///
+/// # Safety
+///
+/// The selected tier must have been runtime-detected
+/// ([`mask::avx512_scanner_available`] /
+/// [`mask::avx2_scanner_available`]).
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
-pub(crate) fn batch_masks(
-    bytes: &[u8],
-    scan: usize,
-    digits3: bool,
-    class: impl Fn(u32) -> CharClass + Copy,
-) -> (u64, u64) {
-    debug_assert!(mask::simd_scanner_available());
-    if mask::avx512_scanner_available() {
-        // SAFETY: runtime AVX-512 detection right above.
-        unsafe { batch_masks_avx512(bytes, scan, digits3, class) }
-    } else {
-        // SAFETY: MaskState enables the mask-scanner path only after
-        // runtime detection (mask::simd_scanner_available); without
-        // AVX-512 that detection was the AVX2 tier's.
-        unsafe { batch_masks_avx2(bytes, scan, digits3, class) }
-    }
-}
-
-/// AVX-512 tier: the classification collapses to one 64-byte load and one
-/// k-register compare per class ([`mask::ascii_masks_avx512`]); the
-/// boundary algebra and the extended (non-ASCII) path are the shared
-/// scalar code.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx512f,avx512bw,avx512vl,bmi1,bmi2,lzcnt,popcnt")]
-#[inline]
-fn batch_masks_avx512(
+pub(crate) unsafe fn batch_masks_x86<const AVX512: bool>(
     bytes: &[u8],
     scan: usize,
     digits3: bool,
@@ -240,7 +228,13 @@ fn batch_masks_avx512(
         // (up to a 4-byte char starting at scan + 66); scalar batch.
         return (0, u64::MAX);
     }
-    let am = mask::ascii_masks_avx512(bytes, scan);
+    let am = if AVX512 {
+        // SAFETY: the caller detected the AVX-512 tier (fn contract).
+        unsafe { mask::ascii_masks_avx512(bytes, scan) }
+    } else {
+        // SAFETY: the caller detected the AVX2 tier (fn contract).
+        unsafe { mask::ascii_masks_avx2(bytes, scan) }
+    };
 
     // Any non-ASCII byte in the batch — or within the two carry bytes
     // before it — routes to the extended classifier. (`am.hi` is exact
@@ -249,41 +243,9 @@ fn batch_masks_avx512(
         || (scan >= 1 && bytes[scan - 1] >= 0x80)
         || (scan >= 2 && bytes[scan - 2] >= 0x80)
     {
-        return family_extended_masks(bytes, scan, digits3, class, am);
-    }
-
-    let cr = if scan == 0 { Carries::default() } else { ascii_carries(bytes, scan) };
-    family_algebra(bytes, scan, digits3, am, cr, mask::UniClasses::default())
-}
-
-/// AVX2 tier, for x86_64 CPUs without AVX-512 (Haswell+, Zen 1-3): the
-/// classification is [`mask::ascii_masks_avx2`] (two 32-byte loads,
-/// compare + vpmovmskb per class); everything after the masks is the
-/// identical shared code.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2,bmi1,bmi2,lzcnt,popcnt")]
-#[inline]
-fn batch_masks_avx2(
-    bytes: &[u8],
-    scan: usize,
-    digits3: bool,
-    class: impl Fn(u32) -> CharClass + Copy,
-) -> (u64, u64) {
-    let len = bytes.len();
-    if scan + 70 > len {
-        // Not enough lookahead for the batch-edge char classification
-        // (up to a 4-byte char starting at scan + 66); scalar batch.
-        return (0, u64::MAX);
-    }
-    let am = mask::ascii_masks_avx2(bytes, scan);
-
-    // Any non-ASCII byte in the batch — or within the two carry bytes
-    // before it — routes to the extended classifier.
-    if am.hi != 0
-        || (scan >= 1 && bytes[scan - 1] >= 0x80)
-        || (scan >= 2 && bytes[scan - 2] >= 0x80)
-    {
-        return family_extended_masks(bytes, scan, digits3, class, am);
+        // SAFETY: both detected tiers include the BMI1/BMI2/LZCNT/POPCNT
+        // bit features `family_extended_masks` re-declares (fn contract).
+        return unsafe { family_extended_masks(bytes, scan, digits3, class, am) };
     }
 
     let cr = if scan == 0 { Carries::default() } else { ascii_carries(bytes, scan) };

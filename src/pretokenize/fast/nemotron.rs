@@ -17,10 +17,17 @@ impl MaskScheme for NemotronScheme {
         o200k_family::advance_pos::<false, false>(bytes, pos)
     }
 
-    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+    #[cfg(target_arch = "aarch64")]
     #[inline(always)]
     fn batch_masks(bytes: &[u8], scan: usize) -> (u64, u64) {
         o200k_family::batch_masks::<false, false>(bytes, scan)
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[inline(always)]
+    unsafe fn batch_masks_x86<const AVX512: bool>(bytes: &[u8], scan: usize) -> (u64, u64) {
+        // SAFETY: the caller detected the tier (trait contract).
+        unsafe { o200k_family::batch_masks_x86::<AVX512, false, false>(bytes, scan) }
     }
 }
 

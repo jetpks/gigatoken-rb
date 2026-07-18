@@ -1249,22 +1249,49 @@ pub(crate) fn batch_masks<const CONTRACTIONS: bool, const DIGITS3: bool>(
 }
 
 /// x86-64 front-end: same contract as the NEON `batch_masks` above,
-/// dispatching on the runtime-detected SIMD tier (AVX-512 or AVX2).
+/// monomorphized on the SIMD tier (see `MaskScheme::batch_masks_x86`,
+/// whose provided `batch_masks` supplies the runtime-dispatched form).
+/// `#[inline(always)]` (with no `target_feature` of its own) so the body
+/// fuses into whichever feature region calls it — LLVM's cost model
+/// declined to inline the previous `#[target_feature]` form into the
+/// tier-monomorphized fill wrappers and left a call per 64-byte batch.
+///
+/// # Safety
+///
+/// The selected tier must have been runtime-detected
+/// ([`mask::avx512_scanner_available`] /
+/// [`mask::avx2_scanner_available`]).
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
-pub(crate) fn batch_masks<const CONTRACTIONS: bool, const DIGITS3: bool>(
+pub(crate) unsafe fn batch_masks_x86<
+    const AVX512: bool,
+    const CONTRACTIONS: bool,
+    const DIGITS3: bool,
+>(
     bytes: &[u8],
     scan: usize,
 ) -> (u64, u64) {
-    debug_assert!(mask::simd_scanner_available());
-    if mask::avx512_scanner_available() {
-        // SAFETY: runtime AVX-512 detection right above.
-        unsafe { batch_masks_avx512::<CONTRACTIONS, DIGITS3>(bytes, scan) }
-    } else {
-        // SAFETY: MaskState enables the mask-scanner path only after
-        // runtime detection; without AVX-512 that detection was AVX2's.
-        unsafe { batch_masks_avx2::<CONTRACTIONS, DIGITS3>(bytes, scan) }
+    let len = bytes.len();
+    if scan + 70 > len {
+        return (0, u64::MAX);
     }
+    let (am, ax) = if AVX512 {
+        // SAFETY: the caller detected the AVX-512 tier (fn contract).
+        unsafe { (mask::ascii_masks_avx512(bytes, scan), ascii_extra_avx512(bytes, scan)) }
+    } else {
+        // SAFETY: the caller detected the AVX2 tier (fn contract).
+        unsafe { (mask::ascii_masks_avx2(bytes, scan), ascii_extra_avx2(bytes, scan)) }
+    };
+    if am.hi != 0
+        || (scan >= 1 && bytes[scan - 1] >= 0x80)
+        || (scan >= 2 && bytes[scan - 2] >= 0x80)
+    {
+        // SAFETY: both detected tiers include the BMI1/BMI2/LZCNT/POPCNT
+        // bit features `o200k_extended_masks` re-declares (fn contract).
+        return unsafe { o200k_extended_masks::<CONTRACTIONS, DIGITS3>(bytes, scan, am, ax) };
+    }
+    let cr = ascii_batch_carries(bytes, scan);
+    o200k_algebra::<CONTRACTIONS, DIGITS3>(bytes, scan, am, ax, cr, OUni::default())
 }
 
 /// The strict-uppercase and slash masks for `bytes[scan..scan+64]`,
@@ -1314,52 +1341,6 @@ fn ascii_extra_avx2(bytes: &[u8], scan: usize) -> OAsciiExtra {
         let sl = mm(_mm256_cmpeq_epi8(v0, slc), _mm256_cmpeq_epi8(v1, slc));
         OAsciiExtra { up, sl }
     }
-}
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx512f,avx512bw,avx512vl,bmi1,bmi2,lzcnt,popcnt")]
-#[inline]
-fn batch_masks_avx512<const CONTRACTIONS: bool, const DIGITS3: bool>(
-    bytes: &[u8],
-    scan: usize,
-) -> (u64, u64) {
-    let len = bytes.len();
-    if scan + 70 > len {
-        return (0, u64::MAX);
-    }
-    let am = mask::ascii_masks_avx512(bytes, scan);
-    let ax = ascii_extra_avx512(bytes, scan);
-    if am.hi != 0
-        || (scan >= 1 && bytes[scan - 1] >= 0x80)
-        || (scan >= 2 && bytes[scan - 2] >= 0x80)
-    {
-        return o200k_extended_masks::<CONTRACTIONS, DIGITS3>(bytes, scan, am, ax);
-    }
-    let cr = ascii_batch_carries(bytes, scan);
-    o200k_algebra::<CONTRACTIONS, DIGITS3>(bytes, scan, am, ax, cr, OUni::default())
-}
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2,bmi1,bmi2,lzcnt,popcnt")]
-#[inline]
-fn batch_masks_avx2<const CONTRACTIONS: bool, const DIGITS3: bool>(
-    bytes: &[u8],
-    scan: usize,
-) -> (u64, u64) {
-    let len = bytes.len();
-    if scan + 70 > len {
-        return (0, u64::MAX);
-    }
-    let am = mask::ascii_masks_avx2(bytes, scan);
-    let ax = ascii_extra_avx2(bytes, scan);
-    if am.hi != 0
-        || (scan >= 1 && bytes[scan - 1] >= 0x80)
-        || (scan >= 2 && bytes[scan - 2] >= 0x80)
-    {
-        return o200k_extended_masks::<CONTRACTIONS, DIGITS3>(bytes, scan, am, ax);
-    }
-    let cr = ascii_batch_carries(bytes, scan);
-    o200k_algebra::<CONTRACTIONS, DIGITS3>(bytes, scan, am, ax, cr, OUni::default())
 }
 
 #[cfg(test)]
