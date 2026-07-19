@@ -163,6 +163,64 @@ def test_prepend_replace_normalizer_matches_hf():
     _assert_parity(hf_tok, gigatoken_tok, _MATRIX_TEXTS)
 
 
+def test_boundary_crossing_pieces_match_hf():
+    """gemma-3/4 style: Replace-only normalizer, Split-on-space
+    (MergedWithPrevious) pre-tokenizer, and vocab pieces that cross word-unit
+    boundaries (an interior ▁ like ">▁</", and a trailing ▁ like "p▁"). The
+    unit scanner must skip a split exactly where such a piece occurs, so
+    per-unit BPE stays identical to HF's whole-chunk merge."""
+    vocab = {
+        "<unk>": 0,
+        "<s>": 1,
+        **{f"<0x{b:02X}>": 2 + b for b in range(256)},
+        "▁": 258,
+        "<": 259,
+        ">": 260,
+        "/": 261,
+        "s": 262,
+        "p": 263,
+        "a": 264,
+        "</": 265,
+        ">▁": 266,
+        ">▁</": 267,
+        "p▁": 268,
+        "sp": 269,
+        "▁sp": 270,
+        "▁a": 271,
+    }
+    merges = [
+        ("<", "/"),
+        (">", "▁"),
+        (">▁", "</"),
+        ("p", "▁"),
+        ("s", "p"),
+        ("▁", "sp"),
+        ("▁", "a"),
+    ]
+    texts = [
+        "sp> </sp",  # >▁</ spans a boundary: split must be skipped
+        "a> </a",
+        "> </",
+        "sp> <sp",  # prev byte matches but post doesn't: split is safe
+        "a> a",
+        "sp sp",  # p▁ (empty post) spans every "p "-boundary
+        "sp a sp",
+        "p p p",
+        "sp>  </sp",  # double space: run extension, no crossing occurrence
+        "> </ > </",
+        "sp▁a",  # literal ▁ in the input acts as a mark too
+        "sp>▁</sp",
+        "a  a",
+        " sp",
+        "sp ",
+    ]
+    hf_tok = HFTokenizer(BPE(vocab, merges, unk_token="<unk>", fuse_unk=True, byte_fallback=True))
+    hf_tok.normalizer = normalizers.Replace(" ", "▁")
+    hf_tok.pre_tokenizer = pre_tokenizers.Split(" ", behavior="merged_with_previous")
+    gigatoken_tok = Tokenizer(hf_tok)
+    _assert_parity(hf_tok, gigatoken_tok, texts)
+
+
 def test_unsupported_normalizer_errors():
     """Unknown normalizers must fail at load, not silently diverge."""
     hf_tok = HFTokenizer(BPE(_VOCAB, _MERGES, unk_token="<unk>", fuse_unk=True, byte_fallback=True))

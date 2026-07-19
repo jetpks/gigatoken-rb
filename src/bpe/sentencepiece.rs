@@ -270,6 +270,17 @@ pub struct SentencePieceBPE {
     /// immediately before that byte inside any vocab piece, so no merge can
     /// span the boundary. Empty (all zeros) for non-split bytes.
     pub(crate) split_safe: Vec<[u64; 4]>,
+    /// Decompositions of the vocab pieces that can cross a `▁▁▁word` unit
+    /// boundary, as `(pre, post)` around one interior ▁ — e.g. gemma's
+    /// `>▁</` yields `(">", "</")`. Under `SpaceRuns` the scanner skips a
+    /// split exactly where such a piece occurs spanning the candidate
+    /// boundary (a merge result is always a contiguous vocab piece, so
+    /// every other boundary is provably safe). Set by
+    /// `finalize_speed_paths`; empty under `EveryMark`/`None`.
+    pub(crate) cross_pieces: Vec<(Box<[u8]>, Box<[u8]>)>,
+    /// Bitset over the byte just before a candidate boundary (the last byte
+    /// of some `cross_pieces` pre) for a one-load rejection in the scanner.
+    pub(crate) cross_prev: [u64; 4],
 }
 
 /// How many distinct punctuation bytes the unit splitter checks for.
@@ -404,13 +415,26 @@ impl SentencePieceBPE {
         self.added_matcher = (!self.added_tokens.is_empty()).then(|| {
             aho_corasick::AhoCorasick::builder()
                 .match_kind(aho_corasick::MatchKind::LeftmostLongest)
+                // The scan visits every input byte; a DFA's one lookup per
+                // byte beats the contiguous NFA noticeably when the added
+                // vocabulary is large (gemma-3 carries 6.4k added tokens,
+                // and the scan was ~23% of its encode profile). Prefix
+                // sharing (<unusedNNNN>…) keeps the table small.
+                .kind(Some(aho_corasick::AhoCorasickKind::DFA))
                 .build(self.added_tokens.iter().map(|t| t.content.as_bytes()))
                 .expect("added-token automaton")
         });
 
+        self.cross_pieces = Vec::new();
+        self.cross_prev = [0u64; 4];
         self.word_split = if self.metaspace.as_ref().is_some_and(|ms| ms.split) {
             WordSplit::EveryMark
-        } else if self.vocab_units_are_merge_safe() {
+        } else if let Some(cross) = self.unit_crossing_pieces() {
+            for (pre, _) in &cross {
+                let b = *pre.last().expect("interior ▁ always has a predecessor");
+                self.cross_prev[(b >> 6) as usize] |= 1 << (b & 63);
+            }
+            self.cross_pieces = cross;
             WordSplit::SpaceRuns
         } else {
             WordSplit::None
@@ -453,28 +477,66 @@ impl SentencePieceBPE {
         }
     }
 
-    /// Whether every vocab piece stays inside one `▁▁▁word`-shaped unit: no
-    /// piece may contain a ▁ that follows a non-▁ char. When this holds, no
-    /// merge can cross a unit boundary and per-unit BPE equals global BPE.
-    fn vocab_units_are_merge_safe(&self) -> bool {
-        self.vocab.iter().all(|piece| {
+    /// The vocab pieces that can cross a `▁▁▁word`-shaped unit boundary — a
+    /// unit starts at each ▁ following a non-▁ char, so a piece crosses
+    /// exactly when it contains such an interior ▁ — decomposed as
+    /// `(pre, post)` around that ▁. `Some(vec![])` means units are
+    /// unconditionally safe (per-unit BPE equals global BPE); a non-empty
+    /// list means safe with the scanner's occurrence guard; `None` means a
+    /// crossing piece is too complex for the guard's byte-compare (a ▁ or a
+    /// raw space inside `pre`/`post`, whose raw-mode text form varies) or
+    /// there are too many, so whole-chunk merging must stay.
+    fn unit_crossing_pieces(&self) -> Option<Vec<(Box<[u8]>, Box<[u8]>)>> {
+        // Beyond this the per-boundary guard stops being "a handful of
+        // memcmps on a rare prev byte" and whole-chunk merging is safer.
+        const MAX_CROSS_PIECES: usize = 32;
+        let mut out: Vec<(Box<[u8]>, Box<[u8]>)> = Vec::new();
+        for piece in &self.vocab {
             let Ok(s) = std::str::from_utf8(piece) else {
                 // Byte-fallback pieces are single bytes; they can't hold a ▁.
-                return true;
+                continue;
             };
             let mut prev_is_mark = true; // leading ▁s are fine
-            for c in s.chars() {
+            for (pos, c) in s.char_indices() {
                 if c == SENTENCEPIECE_SPACE {
                     if !prev_is_mark {
-                        return false;
+                        // Interior ▁: the piece spans from `pre`'s unit into
+                        // the one starting at this mark.
+                        let (pre, rest) = s.split_at(pos);
+                        let post = &rest[SP_MARK.len()..];
+                        if pre.contains(SENTENCEPIECE_SPACE)
+                            || post.contains(SENTENCEPIECE_SPACE)
+                            || pre.contains(' ')
+                            || post.contains(' ')
+                            || out.len() == MAX_CROSS_PIECES
+                        {
+                            return None;
+                        }
+                        out.push((pre.as_bytes().into(), post.as_bytes().into()));
                     }
                     prev_is_mark = true;
                 } else {
                     prev_is_mark = false;
                 }
             }
-            true
-        })
+        }
+        Some(out)
+    }
+
+    /// Does some crossing vocab piece occur spanning the candidate unit
+    /// boundary at `mark_pos` (mark of `width` bytes)? Only such an
+    /// occurrence can let a merge cross the boundary; everywhere else the
+    /// split is exact.
+    #[inline(always)]
+    fn piece_spans_boundary(&self, bytes: &[u8], mark_pos: usize, width: usize) -> bool {
+        let prev = bytes[mark_pos - 1];
+        if self.cross_prev[(prev >> 6) as usize] & (1 << (prev & 63)) == 0 {
+            return false;
+        }
+        let after = &bytes[mark_pos + width..];
+        self.cross_pieces
+            .iter()
+            .any(|(pre, post)| bytes[..mark_pos].ends_with(pre) && after.starts_with(post))
     }
 
     /// Raw-fast-path eligibility: the normalizer sequence must reduce to
@@ -944,9 +1006,14 @@ impl SentencePieceBPE {
                         continue;
                     };
                     // SpaceRuns: only a mark that doesn't extend a run
-                    // starts a unit.
+                    // starts a unit — and not where a crossing vocab piece
+                    // spans the boundary (`cross_prev` is all-zero when
+                    // there are none, so the guard is one load + test).
                     let boundary = every_mark || mark_pos != last_mark_end;
-                    if boundary && mark_pos != unit_start {
+                    if boundary
+                        && mark_pos != unit_start
+                        && !self.piece_spans_boundary(bytes, mark_pos, width)
+                    {
                         self.encode_unit(
                             state,
                             &bytes[unit_start..mark_pos],

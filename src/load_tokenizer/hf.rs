@@ -368,6 +368,8 @@ fn build_sentencepiece(tj: &TokenizerJson) -> Result<SentencePieceBPE> {
         added_matcher: None,
         split_bytes: [0; crate::bpe::sentencepiece::NUM_SPLIT_BYTES],
         split_safe: Vec::new(),
+        cross_pieces: Vec::new(),
+        cross_prev: [0; 4],
     };
     model.norm_added_tokens = norm_added_tokens
         .into_iter()
