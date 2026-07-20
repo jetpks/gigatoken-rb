@@ -613,12 +613,11 @@ pub fn safe_split_ranges(
     let max_blocker = blockers.iter().map(|f| f.needle().len()).max().unwrap_or(0);
     // rstrip tokens can only end at a boundary when their last byte is the
     // alphanumeric byte before the boundary space.
-    let end_blockers: Vec<memchr::memmem::Finder> = added_tokens
+    let end_blockers: Vec<&[u8]> = added_tokens
         .iter()
         .filter(|(t, rstrip)| *rstrip && t.last().is_some_and(u8::is_ascii_alphanumeric))
-        .map(|(t, _)| memchr::memmem::Finder::new(t))
+        .map(|&(t, _)| t)
         .collect();
-    let max_end_blocker = end_blockers.iter().map(|f| f.needle().len()).max().unwrap_or(0);
     // Whether an added-token occurrence spans the cut between `p - 1` and
     // `p`. Such an occurrence must start within `max_blocker - 1` bytes
     // before `p`, so searching a window of that radius is exhaustive.
@@ -631,13 +630,7 @@ pub fn safe_split_ranges(
         })
     };
     // Whether an rstrip added-token occurrence ends exactly at `p`.
-    let ends_rstrip_token = |p: usize| -> bool {
-        let lo = p.saturating_sub(max_end_blocker);
-        end_blockers.iter().any(|f| {
-            f.find_iter(&bytes[lo..p])
-                .any(|s| lo + s + f.needle().len() == p)
-        })
-    };
+    let ends_rstrip_token = |p: usize| end_blockers.iter().any(|t| bytes[..p].ends_with(t));
     let len = bytes.len();
     let target = target.max(1);
     let mut out = Vec::new();
@@ -649,7 +642,7 @@ pub fn safe_split_ranges(
                 && bytes[probe - 1].is_ascii_alphanumeric()
                 && bytes[probe + 1].is_ascii_alphabetic()
                 && !(max_blocker > 0 && cuts_added_token(probe))
-                && !(max_end_blocker > 0 && ends_rstrip_token(probe))
+                && !(!end_blockers.is_empty() && ends_rstrip_token(probe))
             {
                 out.push(start..probe);
                 start = probe;
@@ -758,13 +751,9 @@ mod test {
         check_scheme!("deepseek_v3", FastDeepSeekV3Pretokenizer::new);
     }
 
-    /// Boundaries must never cut an occurrence of a space-containing added
-    /// token, while splitting still proceeds elsewhere in the document.
-    #[test]
-    fn test_safe_split_ranges_avoids_added_tokens() {
-        let special: &[u8] = b"<|multi word special|>";
-        // Deterministic LCG so word lengths vary and split probes hit the
-        // special token at every possible phase.
+    /// Deterministic LCG word soup so word lengths vary and split probes
+    /// hit `special` (followed by `sep`) at every possible phase.
+    fn lcg_words(special: &[u8], sep: &[u8], period: usize) -> Vec<u8> {
         let mut rng = 0x9e3779b97f4a7c15u64;
         let mut next = move || {
             rng = rng
@@ -776,10 +765,20 @@ mod test {
         let mut input = Vec::new();
         for _ in 0..4000 {
             input.extend_from_slice(words[next() % words.len()]);
-            if next() % 9 == 0 {
+            if next() % period == 0 {
                 input.extend_from_slice(special);
+                input.extend_from_slice(sep);
             }
         }
+        input
+    }
+
+    /// Boundaries must never cut an occurrence of a space-containing added
+    /// token, while splitting still proceeds elsewhere in the document.
+    #[test]
+    fn test_safe_split_ranges_avoids_added_tokens() {
+        let special: &[u8] = b"<|multi word special|>";
+        let input = lcg_words(special, b"", 9);
 
         let ranges = safe_split_ranges(&input, 300, &[(special, false)]);
         assert!(ranges.len() > 50, "expected many splits, got {}", ranges.len());
@@ -814,24 +813,7 @@ mod test {
     #[test]
     fn test_safe_split_ranges_avoids_rstrip_token_ends() {
         let special: &[u8] = b"TOK1";
-        // Deterministic LCG so word lengths vary and split probes land right
-        // after the special token at every possible phase.
-        let mut rng = 0x9e3779b97f4a7c15u64;
-        let mut next = move || {
-            rng = rng
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
-            (rng >> 33) as usize
-        };
-        let words: [&[u8]; 5] = [b"alpha ", b"be ", b"gamma7 ", b"x ", b"delta "];
-        let mut input = Vec::new();
-        for _ in 0..4000 {
-            input.extend_from_slice(words[next() % words.len()]);
-            if next() % 6 == 0 {
-                input.extend_from_slice(special);
-                input.extend_from_slice(b" ");
-            }
-        }
+        let input = lcg_words(special, b" ", 6);
         let ends_at = |p: usize| p >= special.len() && &input[p - special.len()..p] == special;
 
         let ranges = safe_split_ranges(&input, 200, &[(special, true)]);

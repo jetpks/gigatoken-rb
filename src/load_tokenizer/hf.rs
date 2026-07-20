@@ -591,8 +591,8 @@ fn detect_pretokenizer_type(
 }
 
 /// Whether a `ByteLevel` pre-tokenizer anywhere in the chain sets
-/// `add_prefix_space` (RoBERTa-style exports): each added-token-split
-/// segment then gets a leading space prepended before pretokenization.
+/// `add_prefix_space` (see the `Tokenizer::add_prefix_space` field for the
+/// semantics).
 fn detect_add_prefix_space(pre_tokenizer: &Option<PreTokenizerJson>) -> bool {
     fn walk(pt: &PreTokenizerJson) -> bool {
         (pt.kind == "ByteLevel" && pt.add_prefix_space == Some(true))
@@ -703,7 +703,7 @@ fn build_bpe(tj: &TokenizerJson) -> Result<bpe::tiktoken::Tokenizer> {
     // Llama-3, ...). Fairseq-heritage vocabs (RoBERTa/OPT/DeBERTa) order IDs
     // by corpus frequency instead; those carry their explicit list position
     // as the rank.
-    let id_order_ok = entries.windows(2).all(|w| w[0].2 <= w[1].2);
+    let id_order_ok = entries.is_sorted_by_key(|&(_, _, merged)| merged);
     let mut tokenizer = if id_order_ok {
         let mut merges: HashMap<(TokenId, TokenId), TokenId, FxBuildHasher> =
             HashMap::with_capacity_and_hasher(entries.len(), FxBuildHasher);
@@ -732,7 +732,7 @@ fn build_bpe(tj: &TokenizerJson) -> Result<bpe::tiktoken::Tokenizer> {
         tj.added_tokens
             .iter()
             .map(|t| bpe::tiktoken::AddedTokenDef {
-                content: t.content.as_bytes().to_vec(),
+                content: t.content.as_bytes().into(),
                 id: TokenId::from(t.id),
                 lstrip: t.lstrip,
                 rstrip: t.rstrip,
@@ -813,12 +813,7 @@ mod tests {
         merges: &[(&str, &str)],
         added_tokens_json: &str,
     ) -> Vec<u8> {
-        byte_level_json_with_pretok(
-            extra_vocab,
-            merges,
-            added_tokens_json,
-            "{\"type\": \"ByteLevel\"}",
-        )
+        byte_level_json_with_pretok(extra_vocab, merges, added_tokens_json, r#"{"type": "ByteLevel"}"#)
     }
 
     fn byte_level_json_with_pretok(
@@ -894,8 +889,8 @@ mod tests {
     /// to a match, like HF's AddedVocabulary.
     #[test]
     fn test_added_token_lstrip_rstrip() {
-        let added = "{\"id\": 400, \"content\": \"<m>\", \"lstrip\": true, \"special\": true}, \
-                     {\"id\": 401, \"content\": \"<r>\", \"rstrip\": true, \"special\": true}";
+        let added = r#"{"id": 400, "content": "<m>", "lstrip": true, "special": true},
+                     {"id": 401, "content": "<r>", "rstrip": true, "special": true}"#;
         let json = byte_level_json(&[], &[], added);
         let HfTokenizer::Bpe(mut tok) = load_hf_slice(&json).unwrap() else {
             panic!("expected ByteLevel BPE");
@@ -923,12 +918,12 @@ mod tests {
     /// segments (adjacent added tokens, leading added token) do not.
     #[test]
     fn test_byte_level_add_prefix_space() {
-        let added = "{\"id\": 400, \"content\": \"<m>\", \"lstrip\": true, \"special\": true}";
+        let added = r#"{"id": 400, "content": "<m>", "lstrip": true, "special": true}"#;
         let json = byte_level_json_with_pretok(
             &[],
             &[],
             added,
-            "{\"type\": \"ByteLevel\", \"add_prefix_space\": true}",
+            r#"{"type": "ByteLevel", "add_prefix_space": true}"#,
         );
         let HfTokenizer::Bpe(mut tok) = load_hf_slice(&json).unwrap() else {
             panic!("expected ByteLevel BPE");

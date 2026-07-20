@@ -914,21 +914,10 @@ pub fn ranked_merge_key(a: TokenId, b: TokenId) -> u64 {
 
 /// Ranked-merge variant of [`bpe_merge_symbols_small`]: allocation-free BPE
 /// for short symbol sequences (the overwhelming majority of cache-missing
-/// units), with priority taken from the merge table's explicit rank.
-fn bpe_merge_symbols_ranked_small<S: std::hash::BuildHasher>(
-    merges: &HashMap<u64, (TokenId, u32), S>,
-    symbols: &mut Vec<TokenId>,
-) {
-    let n = symbols.len();
-    let new_len = bpe_merge_symbols_ranked_slice(merges, &mut symbols[..n]);
-    symbols.truncate(new_len);
-}
-
-/// Slice core of [`bpe_merge_symbols_ranked_small`], shared with the ByteLevel
-/// tokenizer's stack-buffer miss path for rank-mapped vocabularies (fairseq
-/// heritage: RoBERTa/OPT, where vocab IDs are frequency-ordered and carry no
-/// rank information). Merges `symbols` in place and returns the surviving
-/// count; the caller truncates or slices to it.
+/// units), with priority taken from the merge table's explicit rank. Also
+/// the stack-buffer miss path of the ByteLevel tokenizer for rank-mapped
+/// vocabularies (see `ranked_merges` there). Merges `symbols` in place and
+/// returns the surviving count; the caller truncates or slices to it.
 pub(crate) fn bpe_merge_symbols_ranked_slice<S: std::hash::BuildHasher>(
     merges: &HashMap<u64, (TokenId, u32), S>,
     symbols: &mut [TokenId],
@@ -1017,7 +1006,8 @@ pub fn bpe_merge_symbols_ranked<S: std::hash::BuildHasher>(
     // Short sequences (the overwhelming majority of word units) skip the
     // heap and its allocations entirely.
     if n <= SMALL_MERGE_MAX {
-        bpe_merge_symbols_ranked_small(merges, symbols);
+        let new_len = bpe_merge_symbols_ranked_slice(merges, symbols);
+        symbols.truncate(new_len);
         return;
     }
 
