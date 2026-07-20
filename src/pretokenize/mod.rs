@@ -583,25 +583,42 @@ impl Pretokenize for [u8] {
 /// three ASCII bytes also cannot sit inside a multi-byte UTF-8 character.
 ///
 /// `added_tokens` are the byte sequences matched atomically *before*
-/// pretokenization (see `Tokenizer::encode_with_added_tokens`); a candidate
-/// boundary is rejected when an occurrence of one straddles it, since the
-/// halves would otherwise be BPE-encoded as plain text. Only tokens that
-/// contain a space can ever straddle a boundary (every boundary sits on a
-/// space byte), so for typical vocabularies the check costs nothing. If no
-/// occurrence crosses a boundary, greedy leftmost-longest matching restarted
-/// there reproduces the single-pass matches: the matcher's only state is its
-/// scan position, and no match can carry it across the boundary.
+/// pretokenization (see `Tokenizer::encode_with_added_tokens`), each paired
+/// with its `rstrip` flag; a candidate boundary is rejected when an
+/// occurrence of one straddles it, since the halves would otherwise be
+/// BPE-encoded as plain text. Only tokens that contain a space can ever
+/// straddle a boundary (every boundary sits on a space byte), so for typical
+/// vocabularies the check costs nothing. If no occurrence crosses a
+/// boundary, greedy leftmost-longest matching restarted there reproduces the
+/// single-pass matches: the matcher's only state is its scan position, and
+/// no match can carry it across the boundary.
+///
+/// An `rstrip` token absorbs the whitespace after its match, so a boundary
+/// is also rejected when such an occurrence ends exactly at it — the space
+/// opening the next chunk would encode as plain text instead of being
+/// absorbed. (`lstrip` needs no counterpart: a boundary space preceding a
+/// match lands at the start of the next chunk and is trimmed identically
+/// there, and a boundary can never sit inside a longer whitespace run
+/// because the byte before it must be alphanumeric.)
 pub fn safe_split_ranges(
     bytes: &[u8],
     target: usize,
-    added_tokens: &[&[u8]],
+    added_tokens: &[(&[u8], bool)],
 ) -> Vec<std::ops::Range<usize>> {
     let blockers: Vec<memchr::memmem::Finder> = added_tokens
         .iter()
-        .filter(|t| t.contains(&b' '))
-        .map(memchr::memmem::Finder::new)
+        .filter(|(t, _)| t.contains(&b' '))
+        .map(|(t, _)| memchr::memmem::Finder::new(t))
         .collect();
     let max_blocker = blockers.iter().map(|f| f.needle().len()).max().unwrap_or(0);
+    // rstrip tokens can only end at a boundary when their last byte is the
+    // alphanumeric byte before the boundary space.
+    let end_blockers: Vec<memchr::memmem::Finder> = added_tokens
+        .iter()
+        .filter(|(t, rstrip)| *rstrip && t.last().is_some_and(u8::is_ascii_alphanumeric))
+        .map(|(t, _)| memchr::memmem::Finder::new(t))
+        .collect();
+    let max_end_blocker = end_blockers.iter().map(|f| f.needle().len()).max().unwrap_or(0);
     // Whether an added-token occurrence spans the cut between `p - 1` and
     // `p`. Such an occurrence must start within `max_blocker - 1` bytes
     // before `p`, so searching a window of that radius is exhaustive.
@@ -611,6 +628,14 @@ pub fn safe_split_ranges(
         blockers.iter().any(|f| {
             f.find_iter(&bytes[lo..hi])
                 .any(|s| lo + s < p && lo + s + f.needle().len() > p)
+        })
+    };
+    // Whether an rstrip added-token occurrence ends exactly at `p`.
+    let ends_rstrip_token = |p: usize| -> bool {
+        let lo = p.saturating_sub(max_end_blocker);
+        end_blockers.iter().any(|f| {
+            f.find_iter(&bytes[lo..p])
+                .any(|s| lo + s + f.needle().len() == p)
         })
     };
     let len = bytes.len();
@@ -624,6 +649,7 @@ pub fn safe_split_ranges(
                 && bytes[probe - 1].is_ascii_alphanumeric()
                 && bytes[probe + 1].is_ascii_alphabetic()
                 && !(max_blocker > 0 && cuts_added_token(probe))
+                && !(max_end_blocker > 0 && ends_rstrip_token(probe))
             {
                 out.push(start..probe);
                 start = probe;
@@ -755,7 +781,7 @@ mod test {
             }
         }
 
-        let ranges = safe_split_ranges(&input, 300, &[special]);
+        let ranges = safe_split_ranges(&input, 300, &[(special, false)]);
         assert!(ranges.len() > 50, "expected many splits, got {}", ranges.len());
         assert_eq!(ranges.first().unwrap().start, 0);
         assert_eq!(ranges.last().unwrap().end, input.len());
@@ -779,6 +805,47 @@ mod test {
         assert!(
             unaware[1..].iter().any(|r| cuts_occurrence(r.start)),
             "test input never places a naive boundary inside the special token"
+        );
+    }
+
+    /// A boundary must never sit right after an rstrip added-token
+    /// occurrence: the boundary space would open the next chunk as plain
+    /// text instead of being absorbed by the token's rstrip.
+    #[test]
+    fn test_safe_split_ranges_avoids_rstrip_token_ends() {
+        let special: &[u8] = b"TOK1";
+        // Deterministic LCG so word lengths vary and split probes land right
+        // after the special token at every possible phase.
+        let mut rng = 0x9e3779b97f4a7c15u64;
+        let mut next = move || {
+            rng = rng
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (rng >> 33) as usize
+        };
+        let words: [&[u8]; 5] = [b"alpha ", b"be ", b"gamma7 ", b"x ", b"delta "];
+        let mut input = Vec::new();
+        for _ in 0..4000 {
+            input.extend_from_slice(words[next() % words.len()]);
+            if next() % 6 == 0 {
+                input.extend_from_slice(special);
+                input.extend_from_slice(b" ");
+            }
+        }
+        let ends_at = |p: usize| p >= special.len() && &input[p - special.len()..p] == special;
+
+        let ranges = safe_split_ranges(&input, 200, &[(special, true)]);
+        assert!(ranges.len() > 50, "expected many splits, got {}", ranges.len());
+        for r in &ranges[1..] {
+            assert!(!ends_at(r.start), "boundary {} follows an rstrip token", r.start);
+        }
+
+        // The input must actually tempt the splitter: without the rstrip
+        // flag, some boundary lands right after an occurrence.
+        let unaware = safe_split_ranges(&input, 200, &[(special, false)]);
+        assert!(
+            unaware[1..].iter().any(|r| ends_at(r.start)),
+            "test input never places a naive boundary after the rstrip token"
         );
     }
 

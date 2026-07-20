@@ -590,6 +590,17 @@ fn detect_pretokenizer_type(
     })
 }
 
+/// Whether a `ByteLevel` pre-tokenizer anywhere in the chain sets
+/// `add_prefix_space` (RoBERTa-style exports): each added-token-split
+/// segment then gets a leading space prepended before pretokenization.
+fn detect_add_prefix_space(pre_tokenizer: &Option<PreTokenizerJson>) -> bool {
+    fn walk(pt: &PreTokenizerJson) -> bool {
+        (pt.kind == "ByteLevel" && pt.add_prefix_space == Some(true))
+            || pt.pretokenizers.iter().any(walk)
+    }
+    pre_tokenizer.as_ref().is_some_and(walk)
+}
+
 // ---------------------------------------------------------------------------
 // GPT-2 / ByteLevel BPE loader
 // ---------------------------------------------------------------------------
@@ -662,8 +673,7 @@ fn build_bpe(tj: &TokenizerJson) -> Result<bpe::tiktoken::Tokenizer> {
 
     // Build merges from the merge list. Each merge "a b" means:
     // look up token IDs for "a" and "b", the merged token is vocab[concat(a,b)].
-    let mut merges: HashMap<(TokenId, TokenId), TokenId, FxBuildHasher> =
-        HashMap::with_capacity_and_hasher(tj.model.merges.len(), FxBuildHasher);
+    let mut entries: Vec<(TokenId, TokenId, TokenId)> = Vec::with_capacity(tj.model.merges.len());
     for [str_a, str_b] in &tj.model.merges {
         let bytes_a = unicode_to_bytes(str_a, &u2b);
         let bytes_b = unicode_to_bytes(str_b, &u2b);
@@ -681,25 +691,52 @@ fn build_bpe(tj: &TokenizerJson) -> Result<bpe::tiktoken::Tokenizer> {
             Some(&id) => id,
             None => continue,
         };
-        merges.entry((id_a, id_b)).or_insert(id_merged);
+        entries.push((id_a, id_b, id_merged));
     }
 
     let byte_remapping = bpe::ByteRemapping::from_byte_vocab(&vocab)?;
+    let vocab: Vec<Vec<u8>> = vocab.into_iter().map(|a| a.to_vec()).collect();
 
-    let mut tokenizer = bpe::tiktoken::Tokenizer::new(
-        merges,
-        vocab.into_iter().map(|a| a.to_vec()).collect(),
-        byte_remapping,
-    );
+    // The fast merge loops take the merged token's ID as the merge priority,
+    // which is only correct when the merge list produces IDs in rank order
+    // (true for every tiktoken-style vocab: GPT-2, cl100k, o200k, Qwen,
+    // Llama-3, ...). Fairseq-heritage vocabs (RoBERTa/OPT/DeBERTa) order IDs
+    // by corpus frequency instead; those carry their explicit list position
+    // as the rank.
+    let id_order_ok = entries.windows(2).all(|w| w[0].2 <= w[1].2);
+    let mut tokenizer = if id_order_ok {
+        let mut merges: HashMap<(TokenId, TokenId), TokenId, FxBuildHasher> =
+            HashMap::with_capacity_and_hasher(entries.len(), FxBuildHasher);
+        for (id_a, id_b, id_merged) in entries {
+            merges.entry((id_a, id_b)).or_insert(id_merged);
+        }
+        bpe::tiktoken::Tokenizer::new(merges, vocab, byte_remapping)
+    } else {
+        let mut merges: bpe::tiktoken::RankedMerges =
+            HashMap::with_capacity_and_hasher(entries.len(), FxBuildHasher);
+        for (rank, (id_a, id_b, id_merged)) in entries.into_iter().enumerate() {
+            merges
+                .entry(bpe::ranked_merge_key(id_a, id_b))
+                .or_insert((id_merged, rank as u32));
+        }
+        bpe::tiktoken::Tokenizer::new_ranked(merges, vocab, byte_remapping)
+    };
     tokenizer.set_pretokenizer_type(detect_pretokenizer_type(&tj.pre_tokenizer)?);
     tokenizer.set_normalize_nfc(detect_nfc_normalizer(&tj.normalizer)?);
+    tokenizer.set_add_prefix_space(detect_add_prefix_space(&tj.pre_tokenizer));
     tokenizer.set_ignore_merges(tj.model.ignore_merges);
     // All added tokens (special and non-special) are matched atomically in the
-    // raw input by HF's AddedVocabulary; mirror that.
+    // raw input by HF's AddedVocabulary; mirror that, including the
+    // whitespace-stripping flags.
     tokenizer.set_added_tokens(
         tj.added_tokens
             .iter()
-            .map(|t| (t.content.as_bytes().to_vec(), TokenId::from(t.id)))
+            .map(|t| bpe::tiktoken::AddedTokenDef {
+                content: t.content.as_bytes().to_vec(),
+                id: TokenId::from(t.id),
+                lstrip: t.lstrip,
+                rstrip: t.rstrip,
+            })
             .collect(),
     );
     Ok(tokenizer)
@@ -765,6 +802,147 @@ mod tests {
         eprintln!("Encoded: {:?}", ids);
         let decoded = tokenizer.decode(&ids);
         assert_eq!(decoded, b"Hello world");
+    }
+
+    /// Build a minimal ByteLevel tokenizer.json: the 256 byte tokens (ID ==
+    /// byte value), plus `extra_vocab` entries and `merges` given as raw
+    /// text (converted to the GPT-2 unicode encoding here), plus raw
+    /// `added_tokens` JSON.
+    fn byte_level_json(
+        extra_vocab: &[(&str, u32)],
+        merges: &[(&str, &str)],
+        added_tokens_json: &str,
+    ) -> Vec<u8> {
+        byte_level_json_with_pretok(
+            extra_vocab,
+            merges,
+            added_tokens_json,
+            "{\"type\": \"ByteLevel\"}",
+        )
+    }
+
+    fn byte_level_json_with_pretok(
+        extra_vocab: &[(&str, u32)],
+        merges: &[(&str, &str)],
+        added_tokens_json: &str,
+        pre_tokenizer_json: &str,
+    ) -> Vec<u8> {
+        let (b2u, _) = build_byte_unicode_tables();
+        let esc = |s: String| -> String { s.replace('\\', "\\\\").replace('"', "\\\"") };
+        let enc = |s: &str| -> String { esc(s.bytes().map(|b| b2u[b as usize]).collect()) };
+        let mut vocab_entries: Vec<String> = (0u16..=255)
+            .map(|b| format!("\"{}\": {}", esc(b2u[b as usize].to_string()), b))
+            .collect();
+        for (text, id) in extra_vocab {
+            vocab_entries.push(format!("\"{}\": {}", enc(text), id));
+        }
+        let merges_entries: Vec<String> = merges
+            .iter()
+            .map(|(a, b)| format!("[\"{}\", \"{}\"]", enc(a), enc(b)))
+            .collect();
+        format!(
+            "{{\"added_tokens\": [{}], \"pre_tokenizer\": {}, \
+             \"model\": {{\"type\": \"BPE\", \"vocab\": {{{}}}, \"merges\": [{}]}}}}",
+            added_tokens_json,
+            pre_tokenizer_json,
+            vocab_entries.join(", "),
+            merges_entries.join(", ")
+        )
+        .into_bytes()
+    }
+
+    fn encode_bpe(tok: &mut bpe::tiktoken::Tokenizer, text: &str) -> Vec<u32> {
+        let mut out = Vec::new();
+        tok.encode_with_added_tokens_flat(text.as_bytes(), &mut out);
+        out
+    }
+
+    /// Merge priority must follow the merge list's order even when the
+    /// merged token IDs do not (fairseq-heritage vocabs: RoBERTa/OPT).
+    #[test]
+    fn test_rank_mapped_merges_follow_list_order() {
+        // Rank 0 produces ID 350, rank 1 produces ID 300: IDs are NOT in
+        // rank order, so id-as-rank would apply "a"+"b" (300) before
+        // "b"+"c" (350) and produce [300, 99] on "abc".
+        let json = byte_level_json(
+            &[("bc", 350), ("ab", 300)],
+            &[("b", "c"), ("a", "b")],
+            "",
+        );
+        let HfTokenizer::Bpe(mut tok) = load_hf_slice(&json).unwrap() else {
+            panic!("expected ByteLevel BPE");
+        };
+        assert_eq!(encode_bpe(&mut tok, "abc"), vec![97, 350]);
+        // Rank order also decides between two live candidates mid-word.
+        assert_eq!(encode_bpe(&mut tok, "ab"), vec![300]);
+        assert_eq!(encode_bpe(&mut tok, "bc"), vec![350]);
+
+        // Same merges with IDs in rank order stay on the id-as-rank fast
+        // path and agree.
+        let json = byte_level_json(
+            &[("bc", 300), ("ab", 350)],
+            &[("b", "c"), ("a", "b")],
+            "",
+        );
+        let HfTokenizer::Bpe(mut tok) = load_hf_slice(&json).unwrap() else {
+            panic!("expected ByteLevel BPE");
+        };
+        assert_eq!(encode_bpe(&mut tok, "abc"), vec![97, 300]);
+    }
+
+    /// `lstrip`/`rstrip` added-token flags absorb the whitespace adjacent
+    /// to a match, like HF's AddedVocabulary.
+    #[test]
+    fn test_added_token_lstrip_rstrip() {
+        let added = "{\"id\": 400, \"content\": \"<m>\", \"lstrip\": true, \"special\": true}, \
+                     {\"id\": 401, \"content\": \"<r>\", \"rstrip\": true, \"special\": true}";
+        let json = byte_level_json(&[], &[], added);
+        let HfTokenizer::Bpe(mut tok) = load_hf_slice(&json).unwrap() else {
+            panic!("expected ByteLevel BPE");
+        };
+        // lstrip: the whitespace before the match is absorbed, including
+        // multi-char and non-ASCII whitespace; whitespace after it is not.
+        assert_eq!(encode_bpe(&mut tok, "a <m> b"), vec![97, 400, 32, 98]);
+        assert_eq!(encode_bpe(&mut tok, "a \t\n<m>"), vec![97, 400]);
+        assert_eq!(
+            encode_bpe(&mut tok, "a\u{a0}<m>"),
+            vec![97, 400],
+            "U+00A0 is `\\s` whitespace and must be absorbed"
+        );
+        // rstrip: the whitespace after the match is absorbed.
+        assert_eq!(encode_bpe(&mut tok, "a <r> b"), vec![97, 32, 401, 98]);
+        assert_eq!(encode_bpe(&mut tok, "<r>\n\n\nb"), vec![401, 98]);
+        // Back-to-back: <r>'s rstrip consumes the gap before <m>.
+        assert_eq!(encode_bpe(&mut tok, "<r> <m>"), vec![401, 400]);
+        // No flags on plain text.
+        assert_eq!(encode_bpe(&mut tok, "a b"), vec![97, 32, 98]);
+    }
+
+    /// `ByteLevel(add_prefix_space=true)` (RoBERTa-style exports): every
+    /// non-empty added-token-split segment gets a leading space; empty
+    /// segments (adjacent added tokens, leading added token) do not.
+    #[test]
+    fn test_byte_level_add_prefix_space() {
+        let added = "{\"id\": 400, \"content\": \"<m>\", \"lstrip\": true, \"special\": true}";
+        let json = byte_level_json_with_pretok(
+            &[],
+            &[],
+            added,
+            "{\"type\": \"ByteLevel\", \"add_prefix_space\": true}",
+        );
+        let HfTokenizer::Bpe(mut tok) = load_hf_slice(&json).unwrap() else {
+            panic!("expected ByteLevel BPE");
+        };
+        // "ab" -> " ab" (one pretoken), already-spaced input unchanged.
+        assert_eq!(encode_bpe(&mut tok, "ab"), vec![32, 97, 98]);
+        assert_eq!(encode_bpe(&mut tok, " ab"), vec![32, 97, 98]);
+        // Each segment around an added token gets its own prefix; the empty
+        // segment between adjacent tokens gets none (HF parity, verified
+        // against tokenizers on obi/deid_roberta_i2b2).
+        assert_eq!(encode_bpe(&mut tok, "a<m>b"), vec![32, 97, 400, 32, 98]);
+        assert_eq!(encode_bpe(&mut tok, "<m><m>"), vec![400, 400]);
+        // lstrip trim happens before the prefix is applied.
+        assert_eq!(encode_bpe(&mut tok, "x <m> y"), vec![32, 120, 400, 32, 121]);
     }
 
     #[test]

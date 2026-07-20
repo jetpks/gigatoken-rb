@@ -919,6 +919,20 @@ fn bpe_merge_symbols_ranked_small<S: std::hash::BuildHasher>(
     merges: &HashMap<u64, (TokenId, u32), S>,
     symbols: &mut Vec<TokenId>,
 ) {
+    let n = symbols.len();
+    let new_len = bpe_merge_symbols_ranked_slice(merges, &mut symbols[..n]);
+    symbols.truncate(new_len);
+}
+
+/// Slice core of [`bpe_merge_symbols_ranked_small`], shared with the ByteLevel
+/// tokenizer's stack-buffer miss path for rank-mapped vocabularies (fairseq
+/// heritage: RoBERTa/OPT, where vocab IDs are frequency-ordered and carry no
+/// rank information). Merges `symbols` in place and returns the surviving
+/// count; the caller truncates or slices to it.
+pub(crate) fn bpe_merge_symbols_ranked_slice<S: std::hash::BuildHasher>(
+    merges: &HashMap<u64, (TokenId, u32), S>,
+    symbols: &mut [TokenId],
+) -> usize {
     let get = |a: TokenId, b: TokenId| -> (TokenId, u32) {
         merges
             .get(&ranked_merge_key(a, b))
@@ -979,7 +993,7 @@ fn bpe_merge_symbols_ranked_small<S: std::hash::BuildHasher>(
         write += 1;
         i = next[i] as usize;
     }
-    symbols.truncate(write);
+    write
 }
 
 /// Apply BPE merges using explicit merge ranks for priority (lower rank = first).

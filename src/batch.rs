@@ -173,7 +173,7 @@ fn build_doc_chunks<'a>(
     docs: &[&'a [u8]],
     total: usize,
     target: usize,
-    added_tokens: &[&[u8]],
+    added_tokens: &[(&[u8], bool)],
     lpt: bool,
 ) -> Vec<EncodeChunk<'a>> {
     let (head_bytes, group_big, frag_big, tail_target) = if lpt {
@@ -246,7 +246,7 @@ fn push_fragment_chunks<'a>(
     head_len: usize,
     big: usize,
     tail_target: usize,
-    added_tokens: &[&[u8]],
+    added_tokens: &[(&[u8], bool)],
 ) {
     let mut first = true;
     for r in crate::pretokenize::safe_split_ranges(doc, big, added_tokens) {
@@ -757,7 +757,7 @@ pub(crate) fn encode_docs_ragged_with(
     lpt: bool,
 ) -> (Vec<u32>, Vec<i64>) {
     let total: usize = docs.iter().map(|d| d.len()).sum();
-    let added = proto.added_token_contents();
+    let added = proto.added_token_split_blockers();
     let chunks = build_doc_chunks(docs, total, chunk_target_bytes(total), &added, lpt);
     encode_chunks_gathered(workers, proto, &chunks, total)
 }
@@ -1040,8 +1040,8 @@ mod tests {
         use std::io::Read;
         let tokenizer_path = crate::test_hub::gpt2_tokenizer_json();
         let proto = load_hf_bpe(&tokenizer_path).expect("load GPT-2 tokenizer");
-        let added = proto.added_token_contents();
-        let sep: Vec<u8> = added.first().expect("GPT-2 has an added token").to_vec();
+        let added = proto.added_token_split_blockers();
+        let sep: Vec<u8> = added.first().expect("GPT-2 has an added token").0.to_vec();
 
         let path = std::env::home_dir().unwrap().join("data/owt_train.txt");
         let f = std::fs::File::open(&path).expect("open ~/data/owt_train.txt");
@@ -1153,7 +1153,7 @@ mod tests {
         let owned: Vec<Vec<u8>> = (0..20).map(|_| text(1 << 20)).collect();
         let docs: Vec<&[u8]> = owned.iter().map(|d| d.as_slice()).collect();
         let total: usize = docs.iter().map(|d| d.len()).sum();
-        let added = proto.added_token_contents();
+        let added = proto.added_token_split_blockers();
         let chunks = build_doc_chunks(&docs, total, chunk_target_bytes(total), &added, true);
         assert!(chunks.len() > 1, "test must exercise the parallel path");
 
