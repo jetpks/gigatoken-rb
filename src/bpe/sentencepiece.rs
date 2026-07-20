@@ -181,6 +181,21 @@ impl PrecompiledCharsmap {
     }
 }
 
+/// Position of a section (the text between added-token matches) within its
+/// document, which decides whether the raw fast path ▁-prefixes the
+/// section's first unit.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SectionPos {
+    /// The very start of the document (Metaspace `first` prepends only here).
+    First,
+    /// After an added-token match; per-section prepends still apply.
+    Middle,
+    /// Continues a section begun in an earlier fragment of a split document
+    /// (see [`SentencePieceBPE::safe_fragment_ranges`]): never prefixed —
+    /// the section's prefix, if any, was emitted with its first unit.
+    Continuation,
+}
+
 /// When the Metaspace pre-tokenizer prepends ▁ to a chunk.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PrependScheme {
@@ -539,6 +554,184 @@ impl SentencePieceBPE {
             .any(|(pre, post)| bytes[..mark_pos].ends_with(pre) && after.starts_with(post))
     }
 
+    /// Whether an oversized document can be split into fragments that encode
+    /// independently with token-identical output (see
+    /// [`Self::safe_fragment_ranges`]). Requires the raw fast path: its
+    /// per-unit encoding is what makes a provable unit boundary a safe cut.
+    /// The materialized-normalizer path applies whole-section ops (Strip
+    /// trims section edges, charsmaps span graphemes, Prepend re-fires per
+    /// section), so no interior cut has a local safety argument there — and
+    /// `WordSplit::None` merges whole chunks, so nothing can be split at all.
+    pub(crate) fn supports_fragment_split(&self) -> bool {
+        self.raw_prepend.is_some()
+    }
+
+    /// Split raw text into ranges of roughly `target` bytes at cuts the raw
+    /// scanner provably treats as unit boundaries, so encoding the first
+    /// range with `encode_raw_cb` and each later one with
+    /// `encode_raw_fragment_cb` and concatenating the token streams is
+    /// identical to encoding `text` in one call. Only valid when
+    /// [`Self::supports_fragment_split`] holds.
+    ///
+    /// A cut at `p` is safe when the serial scan is guaranteed to close a
+    /// unit exactly at `p` and every decision it makes is local to one side:
+    ///
+    /// - `p` starts a mark — a raw space, or a complete ▁ (0xE2 always
+    ///   leads a 3-byte char in valid UTF-8, so neither test can misread a
+    ///   continuation byte) — and, under `SpaceRuns`, does not extend a
+    ///   mark run (the char before it is not a mark) and no crossing vocab
+    ///   piece occurrence spans it (`piece_spans_boundary`). The scanner's
+    ///   remaining decisions cannot reach across `p`: a crossing piece's
+    ///   `pre`/`post` contain no space or ▁ (see `unit_crossing_pieces`),
+    ///   so no occurrence of one can span the mark at `p`; mark-run state
+    ///   resets at every non-mark char; and the punctuation split test
+    ///   reads one preceding byte.
+    /// - No added-token occurrence blocks `p` (see
+    ///   `added_token_cut_blocks`): leftmost-longest matching carries no
+    ///   state across an occurrence-free point, so restarting it at `p`
+    ///   reproduces the single-pass matches, and lstrip/rstrip whitespace
+    ///   trimming stays within one fragment.
+    ///
+    /// Where no safe cut exists the scan keeps probing forward, so a range
+    /// can exceed `target` (in the worst case it is the rest of the
+    /// document — output stays exact, only parallelism degrades).
+    pub(crate) fn safe_fragment_ranges(
+        &self,
+        text: &str,
+        target: usize,
+    ) -> Vec<std::ops::Range<usize>> {
+        debug_assert!(self.supports_fragment_split());
+        let bytes = text.as_bytes();
+        let len = bytes.len();
+        if len == 0 {
+            // Zero ranges would drop the document's output row.
+            return vec![0..0];
+        }
+        let blocks = self.added_token_cut_blocks(text);
+        let mut bi = 0usize; // cursor into `blocks`; probes are monotone
+        let every_mark = self.word_split == WordSplit::EveryMark;
+        let target = target.max(1);
+        let mut out = Vec::new();
+        let mut start = 0usize;
+        'chunks: while start < len {
+            let mut probe = start + target;
+            while probe < len {
+                let Some(width) = mark_width(bytes, probe, true) else {
+                    probe += 1;
+                    continue;
+                };
+                let extends_run = !every_mark
+                    && (bytes[probe - 1] == b' '
+                        || (probe >= 3 && bytes[probe - 3..probe] == SP_MARK));
+                if extends_run || self.piece_spans_boundary(bytes, probe, width) {
+                    probe += 1;
+                    continue;
+                }
+                while bi < blocks.len() && blocks[bi].end <= probe {
+                    bi += 1;
+                }
+                if bi < blocks.len() && blocks[bi].start <= probe {
+                    // Inside a blocked interval: hop past it (the merged
+                    // intervals are disjoint and sorted).
+                    probe = blocks[bi].end;
+                    continue;
+                }
+                out.push(start..probe);
+                start = probe;
+                continue 'chunks;
+            }
+            out.push(start..len);
+            break;
+        }
+        out
+    }
+
+    /// Sorted, disjoint byte intervals in which no fragment cut may land,
+    /// derived from added-token occurrences. Every occurrence is collected,
+    /// overlapping ones included — a superset of the matches an encode
+    /// selects, which is what makes the blocking conservative and exact:
+    ///
+    /// - inside an occurrence `[s, e)`: the cut halves would BPE-encode as
+    ///   plain text (and truncation could change leftmost-longest choices);
+    /// - at `e` itself, under `Unguarded` prepend only: the fragment's
+    ///   continuation section would go un-prefixed where the serial encode
+    ///   ▁-prefixes the post-match section it opens at `e`. (Guarded
+    ///   schemes skip the prefix on the cut's own mark either way, and both
+    ///   sides then scan the identical section from `e`.);
+    /// - `lstrip`: back through the whitespace run before `s`, whose
+    ///   trimming would otherwise reach into the previous fragment;
+    /// - `rstrip`: forward through the whitespace run after `e`, which the
+    ///   serial match consumes.
+    ///
+    /// A cut only ever lands on a mark start (a space or ▁'s 0xE2 lead), so
+    /// an occurrence's interior can hold one only when its content carries
+    /// such a byte. A token without one, without lstrip/rstrip, on a
+    /// non-`Unguarded` model therefore cannot block anything and is skipped
+    /// without a scan — gemma-3 carries 6.4k added tokens, and one pass per
+    /// token over a multi-hundred-MB document is seconds, not milliseconds.
+    ///
+    /// The surviving tokens' scans are independent and run on the rayon
+    /// pool: gemma keeps 30 ▁-run tokens, and their ~9 GB of memmem over a
+    /// 290 MB document was ~35% of the whole parallel encode when run
+    /// serially. Only the parallel encode entry points fragment documents,
+    /// so touching rayon here is safe (the fork-safe `_serial` paths never
+    /// reach this).
+    fn added_token_cut_blocks(&self, text: &str) -> Vec<std::ops::Range<usize>> {
+        use rayon::prelude::*;
+        let bytes = text.as_bytes();
+        let unguarded = self.raw_prepend == Some(RawPrepend::Unguarded);
+        let mut blocks: Vec<std::ops::Range<usize>> = self
+            .added_tokens
+            .par_iter()
+            .filter(|spec| {
+                let content = spec.content.as_bytes();
+                let interior = content.contains(&b' ') || content.contains(&0xE2);
+                !content.is_empty() && (interior || unguarded || spec.lstrip || spec.rstrip)
+            })
+            .flat_map_iter(|spec| {
+                let content = spec.content.as_bytes();
+                let finder = memchr::memmem::Finder::new(content);
+                let mut out = Vec::new();
+                let mut from = 0usize;
+                while let Some(off) = finder.find(&bytes[from..]) {
+                    let s = from + off;
+                    let e = s + content.len();
+                    // A valid-UTF-8 needle only matches at char boundaries
+                    // (its first byte is a lead byte, and a full match ends
+                    // a complete char), so slicing `text` at `s`/`e` cannot
+                    // panic.
+                    let lo = if spec.lstrip {
+                        text[..s].trim_end().len()
+                    } else {
+                        s + 1
+                    };
+                    let hi = if spec.rstrip {
+                        e + (text[e..].len() - text[e..].trim_start().len())
+                    } else if unguarded {
+                        e
+                    } else {
+                        e - 1 // only the interior (s, e) blocks; `e` is safe
+                    };
+                    if lo <= hi {
+                        out.push(lo..hi + 1);
+                    }
+                    from = s + 1; // step one byte: overlapping occurrences too
+                }
+                out
+            })
+            .collect();
+        blocks.sort_unstable_by_key(|r| r.start);
+        blocks.dedup_by(|next, prev| {
+            if next.start <= prev.end {
+                prev.end = prev.end.max(next.end);
+                true
+            } else {
+                false
+            }
+        });
+        blocks
+    }
+
     /// Raw-fast-path eligibility: the normalizer sequence must reduce to
     /// optional ▁ prepend + literal space→▁, with no normalized added tokens
     /// (those are matched against materialized normalizer output).
@@ -760,6 +953,25 @@ impl<'a> Encoder<'a> {
     pub fn encode_raw_cb<F: FnMut(&[TokenId])>(&mut self, input: &str, f: &mut F) {
         self.model.encode_raw_cb(&mut self.state, input, f);
     }
+
+    /// Like [`Self::encode_raw_cb`] for one fragment of a document split at
+    /// scanner-safe boundaries (see
+    /// [`SentencePieceBPE::safe_fragment_ranges`]). A non-first fragment's
+    /// leading section continues one begun in an earlier fragment, so it is
+    /// never ▁-prefixed.
+    pub fn encode_raw_fragment_cb<F: FnMut(&[TokenId])>(
+        &mut self,
+        input: &str,
+        first: bool,
+        f: &mut F,
+    ) {
+        let pos = if first {
+            SectionPos::First
+        } else {
+            SectionPos::Continuation
+        };
+        self.model.encode_raw_from(&mut self.state, input, pos, f);
+    }
 }
 
 /// Is the byte at `pos` the start of a unit mark? In raw mode both a space
@@ -796,8 +1008,23 @@ impl SentencePieceBPE {
         input: &str,
         f: &mut F,
     ) {
+        self.encode_raw_from(state, input, SectionPos::First, f);
+    }
+
+    /// [`Self::encode_raw_cb`] with the position of the input's leading
+    /// section given explicitly: `First` for a whole document,
+    /// `Continuation` for a non-first fragment of one (see
+    /// [`Self::safe_fragment_ranges`]). Sections after an added-token match
+    /// are always `Middle`.
+    fn encode_raw_from<F: FnMut(&[TokenId])>(
+        &self,
+        state: &mut EncodeState,
+        input: &str,
+        start: SectionPos,
+        f: &mut F,
+    ) {
         let Some(matcher) = &self.added_matcher else {
-            self.encode_section_cb(state, input, true, f);
+            self.encode_section_cb(state, input, start, f);
             return;
         };
 
@@ -805,7 +1032,7 @@ impl SentencePieceBPE {
         // consecutive matches forms the chunks. lstrip/rstrip consume the
         // whitespace adjacent to a match.
         let mut chunk_start = 0usize;
-        let mut first_chunk = true;
+        let mut pos = start;
         for m in matcher.find_iter(input.as_bytes()) {
             let spec = &self.added_tokens[m.pattern().as_usize()];
             if m.start() < chunk_start {
@@ -817,18 +1044,18 @@ impl SentencePieceBPE {
                 chunk = chunk.trim_end();
             }
             if !chunk.is_empty() {
-                self.encode_section_cb(state, chunk, first_chunk, f);
+                self.encode_section_cb(state, chunk, pos, f);
             }
             f(&[spec.id]);
             chunk_start = m.end();
             if spec.rstrip {
                 chunk_start += input[chunk_start..].len() - input[chunk_start..].trim_start().len();
             }
-            first_chunk = false;
+            pos = SectionPos::Middle;
         }
         let chunk = &input[chunk_start..];
         if !chunk.is_empty() {
-            self.encode_section_cb(state, chunk, first_chunk, f);
+            self.encode_section_cb(state, chunk, pos, f);
         }
     }
 
@@ -840,14 +1067,20 @@ impl SentencePieceBPE {
         &self,
         state: &mut EncodeState,
         text: &str,
-        first_chunk: bool,
+        pos: SectionPos,
         f: &mut F,
     ) {
         if let Some(prepend) = self.raw_prepend {
-            self.encode_chunk_raw(state, text, first_chunk, prepend, f);
+            self.encode_chunk_raw(state, text, pos, prepend, f);
             return;
         }
 
+        // Fragment splitting is gated on the raw fast path
+        // (`supports_fragment_split`), so a continuation never reaches the
+        // materialized-normalizer path below — its whole-section ops
+        // (Strip, per-section Prepend, ...) have no continuation form.
+        debug_assert!(pos != SectionPos::Continuation);
+        let first_chunk = pos == SectionPos::First;
         let normed = self.apply_norm_ops(text);
 
         if self.norm_added_tokens.is_empty() {
@@ -894,7 +1127,7 @@ impl SentencePieceBPE {
         &self,
         state: &mut EncodeState,
         chunk: &str,
-        first_chunk: bool,
+        pos: SectionPos,
         prepend: RawPrepend,
         f: &mut F,
     ) {
@@ -904,9 +1137,13 @@ impl SentencePieceBPE {
         let bytes = chunk.as_bytes();
         let starts_with_mark = mark_width(bytes, 0, true).is_some();
         let virtual_prefix = match prepend {
+            // A continuation resumes a section mid-way: its prefix, if any,
+            // was emitted with the section's first unit in an earlier
+            // fragment.
+            _ if pos == SectionPos::Continuation => false,
             RawPrepend::Unguarded => true,
             RawPrepend::GuardedAlways => !starts_with_mark,
-            RawPrepend::GuardedFirst => first_chunk && !starts_with_mark,
+            RawPrepend::GuardedFirst => pos == SectionPos::First && !starts_with_mark,
             RawPrepend::Never => false,
         };
         self.encode_units(state, bytes, virtual_prefix, true, f);

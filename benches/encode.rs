@@ -1,12 +1,9 @@
-//! Whole-file parallel encode benchmark. For ByteLevel BPE tokenizers the
-//! entire input is ONE document handed to the library's parallel encode path
-//! (`encode_docs_ragged`) — the same chunking policy, pretoken-safe
-//! splitting, and persistent worker pool as `BPETokenizer.encode_batch` /
-//! `encode_files` — so this measures gigatoken's own parallelism, not a
-//! bench-local split. SentencePiece-style tokenizers never split a document
-//! (merges can span it), so for those the input is split into ~1 MB
-//! newline-bounded documents first and handed to `sp_encode_docs_ragged`,
-//! which parallelizes across documents.
+//! Whole-file parallel encode benchmark. For both backends the entire input
+//! is ONE document handed to the library's parallel encode path
+//! (`encode_docs_ragged` / `sp_encode_docs_ragged`) — the same chunking
+//! policy, safe-boundary document splitting, and (for BPE) persistent worker
+//! pool as `encode_batch` / `encode_files` — so this measures gigatoken's
+//! own parallelism, not a bench-local split.
 //!
 //! Run with: cargo bench --bench encode                 (full OWT)
 //!           ENCODE_MB=500 cargo bench --bench encode
@@ -23,26 +20,6 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 mod common;
-
-/// Split at the first newline after each `target`-byte stride (documents for
-/// the SP path; a newline is always a char boundary).
-fn split_docs(text: &str, target: usize) -> Vec<&str> {
-    let bytes = text.as_bytes();
-    let mut docs = Vec::new();
-    let mut start = 0;
-    while start < bytes.len() {
-        let mut end = (start + target).min(bytes.len());
-        if end < bytes.len() {
-            end = match memchr::memchr(b'\n', &bytes[end..]) {
-                Some(i) => end + i + 1,
-                None => bytes.len(),
-            };
-        }
-        docs.push(&text[start..end]);
-        start = end;
-    }
-    docs
-}
 
 fn main() {
     common::allow_thp();
@@ -83,14 +60,12 @@ fn main() {
                 Ok(text) => text,
                 Err(e) => std::str::from_utf8(&input[..e.valid_up_to()]).unwrap(),
             };
-            let docs = split_docs(text, 1 << 20);
             eprintln!(
-                "Encoding (SentencePiece, {} documents, {} threads)...",
-                docs.len(),
+                "Encoding (SentencePiece, 1 document, {} threads)...",
                 rayon::current_num_threads()
             );
             let start = Instant::now();
-            let (ids, lens) = sp_encode_docs_ragged(tokenizer, &docs);
+            let (ids, lens) = sp_encode_docs_ragged(tokenizer, &[text]);
             black_box((&ids, lens));
             (ids.len(), start.elapsed().as_secs_f64())
         }

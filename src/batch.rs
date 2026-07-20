@@ -1,8 +1,9 @@
 //! Parallel chunked batch encoding: the engine behind encode_batch and
-//! encode_files. Documents are grouped into coarse chunks (an oversized BPE
-//! document is split at pretoken-safe boundaries), encoded by pooled workers
-//! whose pretoken caches persist across calls, and reassembled into one flat
-//! id buffer plus per-document row lengths.
+//! encode_files. Documents are grouped into coarse chunks (an oversized
+//! document is split internally — at pretoken-safe boundaries for BPE,
+//! scanner-safe unit boundaries for SentencePiece), encoded by pooled
+//! workers whose pretoken caches persist across calls, and reassembled into
+//! one flat id buffer plus per-document row lengths.
 
 use crate::Tokenizer;
 use crate::bpe;
@@ -48,6 +49,23 @@ pub(crate) fn sp_encode_into(
 ) {
     let before = ids.len();
     encoder.encode_raw_cb(text, &mut |tokens| {
+        ids.extend(tokens.iter().map(|&t| u32::from(t)))
+    });
+    lens.push((ids.len() - before) as i64);
+}
+
+/// `sp_encode_into` for one fragment of a split document (see
+/// `SpChunk::Fragment`): a non-first fragment continues a section begun in
+/// an earlier fragment, so its leading section is never ▁-prefixed.
+fn sp_encode_fragment_into(
+    encoder: &mut bpe::sentencepiece::Encoder<'_>,
+    text: &str,
+    first: bool,
+    ids: &mut Vec<u32>,
+    lens: &mut Vec<i64>,
+) {
+    let before = ids.len();
+    encoder.encode_raw_fragment_cb(text, first, &mut |tokens| {
         ids.extend(tokens.iter().map(|&t| u32::from(t)))
     });
     lens.push((ids.len() - before) as i64);
@@ -789,44 +807,111 @@ pub fn encode_docs_ragged_serial(
     })
 }
 
+/// Work unit for parallel SentencePiece encoding, mirroring `EncodeChunk`.
+enum SpChunk<'a> {
+    /// A run of whole documents, one output row each.
+    Docs(Vec<&'a str>),
+    /// A scanner-safe fragment of one oversized document (see
+    /// `SentencePieceBPE::safe_fragment_ranges`). Fragments of a document
+    /// are consecutive chunks; `first` marks the document's first fragment.
+    Fragment { text: &'a str, first: bool },
+}
+
+/// Group documents into parallel chunks of roughly `target` bytes. A
+/// document larger than `2 * target` (the BPE path's oversize threshold) is
+/// split into consecutive Fragment chunks at unit boundaries the scanner
+/// proves safe, so even a single huge document is encoded across all cores
+/// with token-identical output — except on models without the raw fast path
+/// (`supports_fragment_split`), where no interior cut is provably safe and
+/// the document stays one chunk.
+fn sp_build_chunks<'a>(
+    tokenizer: &bpe::SentencePieceBPE,
+    texts: &[&'a str],
+    target: usize,
+) -> Vec<SpChunk<'a>> {
+    let can_split = tokenizer.supports_fragment_split();
+    let mut chunks = Vec::new();
+    let mut group: Vec<&str> = Vec::new();
+    let mut acc = 0usize;
+    for &text in texts {
+        if can_split && text.len() > 2 * target {
+            if !group.is_empty() {
+                chunks.push(SpChunk::Docs(std::mem::take(&mut group)));
+                acc = 0;
+            }
+            let mut first = true;
+            for r in tokenizer.safe_fragment_ranges(text, target) {
+                chunks.push(SpChunk::Fragment {
+                    text: &text[r],
+                    first: std::mem::take(&mut first),
+                });
+            }
+            continue;
+        }
+        group.push(text);
+        acc += text.len();
+        if acc >= target {
+            chunks.push(SpChunk::Docs(std::mem::take(&mut group)));
+            acc = 0;
+        }
+    }
+    if !group.is_empty() {
+        chunks.push(SpChunk::Docs(group));
+    }
+    chunks
+}
+
+/// Encode SentencePiece chunks with a per-chunk Encoder and gather them into
+/// one flat id buffer plus per-document row counts (`row_counts` merges a
+/// continuation fragment's first row into the previous document's row).
+fn sp_encode_chunks(
+    tokenizer: &bpe::SentencePieceBPE,
+    chunks: &[SpChunk],
+) -> (Vec<u32>, Vec<i64>) {
+    let outs = map_maybe_par(chunks, |chunk| {
+        // Reserve the output once from a bytes-per-token estimate on the
+        // low side of natural language, with huge pages before the encode's
+        // stores fault it in — as in `encode_chunk`.
+        let byte_len = match chunk {
+            SpChunk::Docs(group) => group.iter().map(|t| t.len()).sum::<usize>(),
+            SpChunk::Fragment { text, .. } => text.len(),
+        };
+        let mut ids: Vec<u32> = Vec::with_capacity(byte_len / 4 + 16);
+        madvise_hugepage(ids.as_mut_ptr() as *mut u8, ids.capacity() * 4);
+        let mut encoder = tokenizer.encoder();
+        let mut lens: Vec<i64> = Vec::new();
+        let mut continues = false;
+        match chunk {
+            SpChunk::Docs(group) => {
+                for text in group {
+                    sp_encode_into(&mut encoder, text, &mut ids, &mut lens);
+                }
+            }
+            SpChunk::Fragment { text, first } => {
+                sp_encode_fragment_into(&mut encoder, text, *first, &mut ids, &mut lens);
+                continues = !*first;
+            }
+        }
+        ChunkTokens {
+            ids,
+            lens,
+            continues,
+        }
+    });
+    assemble_ragged(outs)
+}
+
 /// SentencePiece analog of `encode_docs_ragged`: group whole documents into
-/// parallel chunks and encode each with its own Encoder. SentencePiece
-/// merges can span the whole document, so oversized documents are never
-/// split.
+/// parallel chunks — splitting an oversized document into scanner-safe
+/// fragments (see `sp_build_chunks`) — and encode each chunk with its own
+/// Encoder.
 pub fn sp_encode_docs_ragged(
     tokenizer: &bpe::SentencePieceBPE,
     texts: &[&str],
 ) -> (Vec<u32>, Vec<i64>) {
     let total: usize = texts.iter().map(|t| t.len()).sum();
-    let target = chunk_target_bytes(total);
-    let mut chunks: Vec<Vec<&str>> = Vec::new();
-    let mut group: Vec<&str> = Vec::new();
-    let mut acc = 0usize;
-    for &text in texts {
-        group.push(text);
-        acc += text.len();
-        if acc >= target {
-            chunks.push(std::mem::take(&mut group));
-            acc = 0;
-        }
-    }
-    if !group.is_empty() {
-        chunks.push(group);
-    }
-    let outs = map_maybe_par(&chunks, |group| {
-        let mut encoder = tokenizer.encoder();
-        let mut ids: Vec<u32> = Vec::new();
-        let mut lens: Vec<i64> = Vec::new();
-        for text in group {
-            sp_encode_into(&mut encoder, text, &mut ids, &mut lens);
-        }
-        ChunkTokens {
-            ids,
-            lens,
-            continues: false,
-        }
-    });
-    assemble_ragged(outs)
+    let chunks = sp_build_chunks(tokenizer, texts, chunk_target_bytes(total));
+    sp_encode_chunks(tokenizer, &chunks)
 }
 
 /// Sequential `sp_encode_docs_ragged`: one Encoder (so one pretoken cache)
@@ -899,14 +984,27 @@ pub(crate) fn encode_files_docs_serial(
     })
 }
 
-/// encode_files core for the SentencePiece backend: cut files into byte
-/// regions at document boundaries and encode each region's documents with a
+/// encode_files core for the SentencePiece backend. With no separator each
+/// file is one document (small files are grouped, huge ones split at
+/// scanner-safe boundaries); otherwise each file is cut into byte regions at
+/// document boundaries and each region's documents are encoded with a
 /// per-chunk Encoder. Documents are assumed to be valid UTF-8.
 pub(crate) fn sp_encode_files_docs(
     tokenizer: &bpe::SentencePieceBPE,
     files: &[&[u8]],
     format: &DocFormat,
 ) -> (Vec<u32>, Vec<i64>) {
+    if matches!(format, DocFormat::Text { separator: None }) {
+        // Whole-file documents: same grouping and oversized-document
+        // fragmenting as the batch path (mirrors `encode_files_docs`).
+        let texts: Vec<&str> = files
+            .iter()
+            // SAFETY: file contents are trusted valid UTF-8 (encode_files'
+            // documented contract, like the unchecked conversion below).
+            .map(|&bytes| unsafe { std::str::from_utf8_unchecked(bytes) })
+            .collect();
+        return sp_encode_docs_ragged(tokenizer, &texts);
+    }
     let total: usize = files.iter().map(|f| f.len()).sum();
     let target = chunk_target_bytes(total);
     let chunks: Vec<(usize, Range<usize>)> = files
@@ -1024,6 +1122,278 @@ mod tests {
         let (flat, lens) = encode_docs_ragged_serial(&workers, &proto, &docs);
         assert_eq!(lens, lens_ref, "lens mismatch (serial)");
         assert_eq!(flat, ids_ref, "ids mismatch (serial)");
+    }
+
+    /// Assert token identity with a readable failure: the position of the
+    /// first divergence and a short window of both streams (a plain
+    /// assert_eq would print millions of ids).
+    #[track_caller]
+    fn assert_ids_match(tag: &str, ids: &[u32], ids_ref: &[u32]) {
+        if ids == ids_ref {
+            return;
+        }
+        let i = ids_ref
+            .iter()
+            .zip(ids)
+            .position(|(a, b)| a != b)
+            .unwrap_or_else(|| ids_ref.len().min(ids.len()));
+        panic!(
+            "{tag}: ids mismatch at token {i}: serial[{i}..] = {:?}, fragmented[{i}..] = {:?}",
+            &ids_ref[i..(i + 8).min(ids_ref.len())],
+            &ids[i..(i + 8).min(ids.len())],
+        );
+    }
+
+    /// SentencePiece parallel chunked encode — grouped documents plus
+    /// oversized documents split into continuation fragments at
+    /// scanner-safe unit boundaries — must be token- and order-identical
+    /// to the serial one-encoder path. The cached HF models cover the raw
+    /// fast-path shapes: TinyLlama (unguarded ▁ prepend), gemma-2b
+    /// (SpaceRuns with `>▁</`-style crossing pieces), gemma-3 (guarded
+    /// prepend, 6.4k added tokens). The input is wall-to-wall
+    /// boundary-hostile content — whitespace runs, literal ▁, multi-byte
+    /// UTF-8 with combining marks, split punctuation, crossing-piece text,
+    /// added tokens mid-text and whitespace-adjacent — and a small explicit
+    /// target forces fragment boundaries all through it.
+    #[test]
+    fn sp_parallel_fragmented_matches_serial() {
+        let models = [
+            "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+            "unsloth/gemma-2b",
+            "google/gemma-3-4b-it",
+        ];
+        let block = concat!(
+            "The  quick   brown fox \u{2014} jumps; over, the: lazy. dog!  \n\n",
+            "\t\tindent()\twide  spacing      here \r\nCRLF\r\n",
+            "<s>raw<s> tokens </s> spaced <unk> out <bos> and <eos>\n",
+            "<start_of_turn>user hello<end_of_turn> <pad>\n",
+            "html-ish <b> </b> crossing > </ pieces >\u{2581}</ literal mark \u{2581}word\n",
+            "日本語のテキストと émojis 🎉🚀, combining a\u{301}e\u{308}o\u{302}, nbsp\u{a0}here ½ ﬁ ㎒\n",
+            "   leading and trailing   \n",
+        );
+        let mut big = String::new();
+        while big.len() < (6 << 20) {
+            big.push_str(block);
+        }
+        let texts: Vec<&str> = vec![
+            "short doc <s> one",
+            block,
+            &big,
+            "",
+            "tail doc </s>",
+            block,
+        ];
+        for repo in models {
+            let Some(path) = crate::test_hub::hf_tokenizer_json(repo) else {
+                eprintln!("Skipping {repo}: tokenizer.json not in the HF cache");
+                continue;
+            };
+            let tok = crate::load_tokenizer::hf::load_hf_sentencepiece(&path).unwrap();
+            assert!(
+                tok.supports_fragment_split(),
+                "{repo} should take the raw fast path (fragment splitting)"
+            );
+            let (ids_ref, lens_ref) = sp_encode_docs_ragged_serial(&tok, &texts);
+
+            // The public parallel path (default target sizing).
+            let (ids, lens) = sp_encode_docs_ragged(&tok, &texts);
+            assert_eq!(lens, lens_ref, "{repo}: lens mismatch (default target)");
+            assert_ids_match(&format!("{repo} (default target)"), &ids, &ids_ref);
+
+            // A small target forces ~a hundred fragment boundaries inside
+            // the hostile content.
+            let chunks = sp_build_chunks(&tok, &texts, 64 << 10);
+            let fragments = chunks
+                .iter()
+                .filter(|c| matches!(c, SpChunk::Fragment { .. }))
+                .count();
+            assert!(
+                fragments > 50,
+                "{repo}: expected many fragments, got {fragments}"
+            );
+            let (ids, lens) = sp_encode_chunks(&tok, &chunks);
+            assert_eq!(lens, lens_ref, "{repo}: lens mismatch (small target)");
+            assert_ids_match(&format!("{repo} (small target)"), &ids, &ids_ref);
+        }
+    }
+
+    /// Fragment cuts vs added-token edge cases on synthetic models covering
+    /// every raw-prepend shape (`Unguarded`, where a mis-placed cut would
+    /// inject a spurious ▁; `GuardedAlways` + `EveryMark`; `GuardedFirst`),
+    /// with lstrip- and rstrip-flagged tokens whose whitespace trimming must
+    /// never straddle a cut, a space-carrying token that can straddle one,
+    /// and a self-overlapping token. A tiny target tries a cut every few
+    /// bytes, so every blocked interval edge in the text gets exercised.
+    #[test]
+    fn sp_fragment_cuts_respect_added_tokens() {
+        use crate::load_tokenizer::hf::load_hf_slice;
+        // Char vocab + byte fallback, no merges (unit and section boundary
+        // divergence is fully visible in char-level ids), Llama-2-style
+        // normalizer, and added tokens with every strip shape.
+        let mut vocab_entries: Vec<String> = (0u16..=255)
+            .map(|b| format!("\"<0x{b:02X}>\": {b}"))
+            .collect();
+        let mut next_id = 256u32;
+        vocab_entries.push(format!("\"\u{2581}\": {next_id}"));
+        next_id += 1;
+        for c in "abcdefghijklmnopqrstuvwxyz.,!?".chars() {
+            vocab_entries.push(format!("\"{c}\": {next_id}"));
+            next_id += 1;
+        }
+        let added = [
+            ("<p>", false, false),
+            ("<l>", true, false),
+            ("<r>", false, true),
+            ("w w", false, false), // can straddle a space cut
+            ("aa", false, false),  // self-overlapping occurrences
+        ];
+        let added_json: Vec<String> = added
+            .iter()
+            .map(|(content, lstrip, rstrip)| {
+                let id = next_id;
+                next_id += 1;
+                format!(
+                    "{{\"id\": {id}, \"content\": \"{content}\", \"lstrip\": {lstrip}, \
+                     \"rstrip\": {rstrip}, \"normalized\": false, \"special\": true}}"
+                )
+            })
+            .collect();
+        // Every raw-prepend shape a cut interacts with: Llama-2's Prepend
+        // normalizer (`Unguarded`, where the added-token `e`-blocking is
+        // load-bearing), Metaspace always+split (`GuardedAlways` +
+        // `EveryMark`: cuts inside mark runs, `e` cuts allowed), and
+        // Metaspace first without split (`GuardedFirst` + `SpaceRuns`).
+        use crate::bpe::sentencepiece::{RawPrepend, WordSplit};
+        let pipelines = [
+            (
+                "{\"type\": \"Sequence\", \"normalizers\": [\
+                   {\"type\": \"Prepend\", \"prepend\": \"\u{2581}\"}, \
+                   {\"type\": \"Replace\", \"pattern\": {\"String\": \" \"}, \"content\": \"\u{2581}\"}]}",
+                "null",
+                RawPrepend::Unguarded,
+                WordSplit::SpaceRuns,
+            ),
+            (
+                "null",
+                "{\"type\": \"Metaspace\", \"replacement\": \"\u{2581}\", \
+                  \"prepend_scheme\": \"always\", \"split\": true}",
+                RawPrepend::GuardedAlways,
+                WordSplit::EveryMark,
+            ),
+            (
+                "null",
+                "{\"type\": \"Metaspace\", \"replacement\": \"\u{2581}\", \
+                  \"prepend_scheme\": \"first\", \"split\": false}",
+                RawPrepend::GuardedFirst,
+                WordSplit::SpaceRuns,
+            ),
+        ];
+
+        // Tokens adjacent to and inside whitespace runs, back to back, and
+        // overlapping ("aaa" holds two "aa" occurrences); words with the
+        // split punctuation; a "w w" occurrence wherever the text has one.
+        let block = concat!(
+            "plain words here <p> and <p><p> doubled\n",
+            "lstrip near ws   <l> and far<l>tight\n",
+            "rstrip eats ws <r>   after and<r>tight\n",
+            "aaa aaaa a aa overlapping aa\n",
+            "w w w w w straddling spaces\n",
+            "punct, split. here! ok? more,words.now\n",
+            "   runs\t\tof   whitespace \n\n",
+            "<l>   <r>   <l><r> adjacent tokens\n",
+        );
+        let mut text = String::new();
+        while text.len() < 100_000 {
+            text.push_str(block);
+        }
+        let texts = [text.as_str()];
+
+        for (normalizer, pre_tokenizer, prepend, word_split) in pipelines {
+            let json = format!(
+                "{{\"added_tokens\": [{}], \
+                  \"normalizer\": {normalizer}, \
+                  \"pre_tokenizer\": {pre_tokenizer}, \
+                  \"model\": {{\"type\": \"BPE\", \"byte_fallback\": true, \
+                    \"vocab\": {{{}}}, \"merges\": []}}}}",
+                added_json.join(", "),
+                vocab_entries.join(", "),
+            );
+            let tok = match load_hf_slice(json.as_bytes()).unwrap() {
+                crate::load_tokenizer::hf::HfTokenizer::SentencePiece(tok) => tok,
+                _ => panic!("synthetic model should load as SentencePiece"),
+            };
+            // Pin the shape under test — a loader change that silently lands
+            // on another fast path would hollow the test out.
+            assert_eq!(tok.raw_prepend, Some(prepend), "unexpected raw prepend");
+            assert_eq!(tok.word_split, word_split, "unexpected word split");
+
+            let (ids_ref, lens_ref) = sp_encode_docs_ragged_serial(&tok, &texts);
+            // A cut attempt every ~48 bytes: thousands of boundaries,
+            // hitting every edge of every blocked interval shape in the
+            // block.
+            let chunks = sp_build_chunks(&tok, &texts, 48);
+            assert!(
+                chunks.len() > 1000,
+                "expected a cut attempt every few bytes, got {} chunks",
+                chunks.len()
+            );
+            let (ids, lens) = sp_encode_chunks(&tok, &chunks);
+            assert_eq!(lens, lens_ref, "{prepend:?}: lens mismatch");
+            assert_ids_match(&format!("{prepend:?}"), &ids, &ids_ref);
+        }
+    }
+
+    /// SentencePiece parallel-vs-serial on REAL text: ~290 MB of OWT
+    /// (owt_valid) as one huge document plus a few multi-MB slices, for
+    /// each cached SP model. Token AND order identity against the serial
+    /// one-encoder encode.
+    /// `cargo test --release verify_sp_parallel_matches_serial_owt -- --ignored --nocapture`
+    #[test]
+    #[ignore = "reads ~290 MB of OWT; run explicitly in release mode"]
+    fn verify_sp_parallel_matches_serial_owt() {
+        let path = std::env::home_dir().unwrap().join("data/owt_valid.txt");
+        let input = std::fs::read(&path).expect("read ~/data/owt_valid.txt");
+        let text = match std::str::from_utf8(&input) {
+            Ok(t) => t,
+            Err(e) => std::str::from_utf8(&input[..e.valid_up_to()]).unwrap(),
+        };
+        // One huge doc (the whole file) plus a few multi-MB slices cut at
+        // char boundaries, so grouped-doc and fragment chunks both appear.
+        let mut texts: Vec<&str> = vec![text];
+        let mut off = 0usize;
+        for mb in [3, 7, 12] {
+            let mut end = (off + (mb << 20)).min(text.len());
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            texts.push(&text[off..end]);
+            off = end;
+        }
+        for repo in [
+            "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+            "unsloth/gemma-2b",
+            "google/gemma-3-4b-it",
+        ] {
+            let Some(path) = crate::test_hub::hf_tokenizer_json(repo) else {
+                eprintln!("Skipping {repo}: tokenizer.json not in the HF cache");
+                continue;
+            };
+            let tok = crate::load_tokenizer::hf::load_hf_sentencepiece(&path).unwrap();
+            let t0 = std::time::Instant::now();
+            let (ids_ref, lens_ref) = sp_encode_docs_ragged_serial(&tok, &texts);
+            let t_serial = t0.elapsed();
+            let t0 = std::time::Instant::now();
+            let (ids, lens) = sp_encode_docs_ragged(&tok, &texts);
+            let t_par = t0.elapsed();
+            eprintln!(
+                "{repo}: {} tokens; serial {:.2?}, parallel {:.2?}",
+                ids_ref.len(),
+                t_serial,
+                t_par
+            );
+            assert_eq!(lens, lens_ref, "{repo}: lens mismatch");
+            assert_ids_match(repo, &ids, &ids_ref);
+        }
     }
 
     /// Parallel-vs-serial at scale on a REAL tokenizer: ~1 GB of OWT as a
