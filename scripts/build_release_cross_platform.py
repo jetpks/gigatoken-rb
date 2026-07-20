@@ -87,6 +87,31 @@ def clang_version(executable: Path) -> int | None:
     return int(match.group(1)) if match else None
 
 
+def write_clang_imsvc_shim(real_clang: Path) -> Path:
+    # ring's build script invokes plain `clang` (GNU driver) when
+    # cross-compiling its assembly to windows-msvc from a non-Windows host,
+    # but inherits maturin/cargo-xwin's clang-cl style CFLAGS. The GNU driver
+    # rejects `/imsvc <dir>`, so translate those pairs to `-isystem <dir>`.
+    shim_dir = Path(tempfile.mkdtemp(prefix="gigatoken-clang-shim-"))
+    shim = shim_dir / "clang"
+    shim.write_text(
+        "#!/bin/bash\n"
+        "args=()\n"
+        "expect_dir=0\n"
+        'for a in "$@"; do\n'
+        '  if [[ $expect_dir == 1 ]]; then args+=("-isystem" "$a"); expect_dir=0; continue; fi\n'
+        '  case "$a" in\n'
+        "    /imsvc) expect_dir=1 ;;\n"
+        '    /imsvc*) args+=("-isystem" "${a#/imsvc}") ;;\n'
+        '    *) args+=("$a") ;;\n'
+        "  esac\n"
+        "done\n"
+        f'exec {shlex.quote(str(real_clang))} "${{args[@]}}"\n'
+    )
+    shim.chmod(0o755)
+    return shim_dir
+
+
 def windows_build_env() -> dict[str, str]:
     candidates = [
         Path("/opt/homebrew/opt/llvm/bin/clang-cl"),
@@ -99,7 +124,8 @@ def windows_build_env() -> dict[str, str]:
     for candidate in candidates:
         if candidate.is_file() and (clang_version(candidate) or 0) >= 19:
             env = os.environ.copy()
-            env["PATH"] = f"{candidate.parent}{os.pathsep}{env['PATH']}"
+            shim_dir = write_clang_imsvc_shim(candidate.parent / "clang")
+            env["PATH"] = f"{shim_dir}{os.pathsep}{candidate.parent}{os.pathsep}{env['PATH']}"
             return env
 
     raise SystemExit("Windows cross-builds require clang-cl 19 or newer. Install it with `brew install llvm`.")
