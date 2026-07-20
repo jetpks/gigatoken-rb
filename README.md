@@ -8,7 +8,7 @@
 
 ![GPT-2 Speedup](https://raw.githubusercontent.com/marcelroed/gigatoken/main/assets/throughput_owt_train_gpt-2.svg)
 
-Keep in mind that both HF tokenizers and tiktoken are already running multithreaded Rust!
+Note that both HF tokenizers and tiktoken are already running multithreaded Rust!
 </div>
 
 ## What is Gigatoken?
@@ -91,7 +91,7 @@ validation OK: 20401 documents match
 ```
 This example uses the train sample from [this dataset](https://huggingface.co/datasets/stanford-cs336/owt-sample).
 You can see help for these flags with `uvx gigatoken bench --help`.
-Keep in mind that you might need to run twice on macOS to get a good reading since the first run will always perform a security scan.
+You might need to run these twice on macOS to get a good reading, since the first run will always perform a security scan.
 
 At the rates we see on the EPYC CPU, you could tokenize the [entirety of Common Crawl](https://arxiv.org/pdf/2211.04325) (often considered to be the entire internet, 130 trillion tokens) in just under 8 hours!
 
