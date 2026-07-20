@@ -33,6 +33,13 @@ tokenizer = gt.Tokenizer(hf_tokenizer).as_hf()
 
 # tokenizer can be used in the same contexts as hf_tokenizer
 tokens = tokenizer.encode_batch(["This is a test string", "And here is another"])
+
+# OR with tiktoken
+tiktokenizer = ...
+tokenizer = gt.Tokenizer(tiktokenizer).as_tiktoken()
+
+# Now works like existing tiktoken tokenizers
+tokens = tokenizer.encode_batch(["This is a test string", "And here is another"])
 ```
 
 A substantial amount of effort has been put into making sure the outputs match exactly with what you would get with HuggingFace Tokenizers in this setting, but this is at a non-negligible cost to performance.
