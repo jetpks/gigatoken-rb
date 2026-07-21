@@ -159,8 +159,9 @@ Tiktoken rows are currently only filled in for tokenizers with official support.
 | Gemma 1 | 1.42 GB/s | 85.7 MB/s | — | 17× | — |
 | Gemma 3 | 1.38 GB/s | 82.2 MB/s | — | 17× | — |
 
-The slowest rows are the SentencePiece-based tokenizers (Mistral 7B and below),
-which remain more expensive to encode than byte-level BPE even with gigatoken's
+The slowest rows are the SentencePiece-based tokenizers (the Gemma, Llama 2,
+and Mistral vocabs), which remain more expensive to encode than byte-level
+BPE even with gigatoken's
 internal SP parallelism; ModernBERT is byte-level BPE with a heavier
 pretokenizer than the GPT-2 family.
 
@@ -218,8 +219,53 @@ Tiktoken rows are currently only filled in for tokenizers with official support.
 | Gemma 1 | 1.14 GB/s | 84.9 MB/s | — | 13× | — |
 | Gemma 3 | 1.12 GB/s | 83.0 MB/s | — | 13× | — |
 
-The slowest rows are the SentencePiece-based tokenizers (Mistral 7B and below),
-which remain more expensive to encode than byte-level BPE even with gigatoken's
+The slowest rows are the SentencePiece-based tokenizers (the Gemma, Llama 2,
+and Mistral vocabs), which remain more expensive to encode than byte-level
+BPE even with gigatoken's
+internal SP parallelism; ModernBERT is byte-level BPE with a heavier
+pretokenizer than the GPT-2 family.
+
+Per-row model coverage is listed under the first table.
+
+</details>
+<details>
+<summary><b>Encoding throughput on owt_train.txt (11.9 GB) — AMD EPYC 9565 72-Core Processor (288 cores)</b></summary>
+
+Best of 3 interleaved rounds, one fresh process per measurement, all libraries with parallelism enabled.
+Gigatoken encodes the whole file un-split, and is thus doing more work than the other tokenizers to find the split boundaries and automatically parallelize.
+HuggingFace tokenizers (`encode_batch_fast`) gets the first 100 MB and tiktoken (`encode_ordinary_batch`) the first 1 GB, both presplit on `<|endoftext|>`.
+This is fair because neither of the compared tokenizers do caching, meaning the speed is roughly uniform throughout.
+Tiktoken rows are currently only filled in for tokenizers with official support.
+
+| Tokenizer | gigatoken | HF tokenizers | tiktoken | vs HF | vs tiktoken |
+|---|---:|---:|---:|---:|---:|
+| GPT-2 | 24.53 GB/s | 24.8 MB/s | 36.0 MB/s | 989× | 681× |
+| Phi-4 | 24.00 GB/s | 29.9 MB/s | — | 801× | — |
+| GPT-OSS | 23.96 GB/s | 49.7 MB/s | 42.8 MB/s | 482× | 560× |
+| OLMo 2 / 3 | 23.06 GB/s | 27.7 MB/s | — | 833× | — |
+| Nemotron 3 | 22.79 GB/s | 49.4 MB/s | — | 462× | — |
+| Qwen 3 | 22.16 GB/s | 34.2 MB/s | — | 648× | — |
+| Llama 3 / 3.1 / 3.2 | 22.15 GB/s | 48.5 MB/s | — | 457× | — |
+| GLM 5 | 20.97 GB/s | 74.8 MB/s | — | 280× | — |
+| Llama 3.3 | 20.82 GB/s | 48.3 MB/s | — | 431× | — |
+| Llama 4 | 20.77 GB/s | 72.7 MB/s | — | 286× | — |
+| GLM 4 | 20.61 GB/s | 72.3 MB/s | — | 285× | — |
+| Phi-4-mini | 20.05 GB/s | 27.6 MB/s | — | 726× | — |
+| DeepSeek V3 / R1 / V4 | 19.69 GB/s | 26.2 MB/s | — | 750× | — |
+| Qwen 2 / 2.5 | 19.12 GB/s | 27.7 MB/s | — | 691× | — |
+| Kimi K2 | 18.85 GB/s | — | — | — | — |
+| Qwen 3.5 / 3.6 | 15.49 GB/s | 27.7 MB/s | — | 558× | — |
+| Gemma 4 | 4.82 GB/s | 334.1 MB/s | — | 14× | — |
+| ModernBERT | 4.18 GB/s | 26.9 MB/s | — | 155× | — |
+| Mistral 7B v0.3 | 3.57 GB/s | 354.7 MB/s | — | 10× | — |
+| TinyLlama / Phi-3 (Llama 2) | 3.48 GB/s | 323.6 MB/s | — | 11× | — |
+| CodeLlama | 3.47 GB/s | 347.4 MB/s | — | 10.0× | — |
+| Gemma 3 | 3.43 GB/s | 357.2 MB/s | — | 9.6× | — |
+| Gemma 1 | 2.51 GB/s | 342.2 MB/s | — | 7.3× | — |
+
+The slowest rows are the SentencePiece-based tokenizers (the Gemma, Llama 2,
+and Mistral vocabs), which remain more expensive to encode than byte-level
+BPE even with gigatoken's
 internal SP parallelism; ModernBERT is byte-level BPE with a heavier
 pretokenizer than the GPT-2 family.
 

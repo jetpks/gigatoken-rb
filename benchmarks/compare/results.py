@@ -212,6 +212,15 @@ COVERS = {
 }
 
 
+# README table order (results.json sorts CPU keys alphabetically); new
+# machines go underneath the existing tables. Unlisted CPUs sort last.
+CPU_ORDER = [
+    "Apple M4 Max (16 cores)",
+    "AMD Ryzen 7 9800X3D 8-Core Processor (16 cores)",
+    "AMD EPYC 9565 72-Core Processor (288 cores)",
+]
+
+
 def fmt_speed(mb_per_s: float | None) -> str:
     if mb_per_s is None:
         return "—"
@@ -267,8 +276,9 @@ def render_table(cpu: str, dataset: str, tokenizers: dict, include_notes: bool =
         )
     lines += [
         "",
-        "The slowest rows are the SentencePiece-based tokenizers (Mistral 7B and below),",
-        "which remain more expensive to encode than byte-level BPE even with gigatoken's",
+        "The slowest rows are the SentencePiece-based tokenizers (the Gemma, Llama 2,",
+        "and Mistral vocabs), which remain more expensive to encode than byte-level",
+        "BPE even with gigatoken's",
         "internal SP parallelism; ModernBERT is byte-level BPE with a heavier",
         "pretokenizer than the GPT-2 family.",
     ]
@@ -291,17 +301,11 @@ def cmd_render(args) -> None:
     if not results:
         raise SystemExit(f"{args.results}: no results to render")
 
-    def peak_gigatoken(tokenizers: dict) -> float:
-        speeds = [
-            group.get("gigatoken", {}).get("mb_per_s") or 0
-            for by_dataset in tokenizers.values()
-            for group in by_dataset.values()
-        ]
-        return max(speeds, default=0)
+    def cpu_rank(cpu: str) -> tuple[int, str]:
+        return (CPU_ORDER.index(cpu) if cpu in CPU_ORDER else len(CPU_ORDER), cpu)
 
     tables = []
-    # Fastest machine first (results.json is sorted alphabetically by CPU name).
-    for cpu, tokenizers in sorted(results.items(), key=lambda kv: -peak_gigatoken(kv[1])):
+    for cpu, tokenizers in sorted(results.items(), key=lambda kv: cpu_rank(kv[0])):
         datasets = sorted({ds for by_dataset in tokenizers.values() for ds in by_dataset})
         for dataset in datasets:
             table = render_table(cpu, dataset, tokenizers, include_notes=not tables)

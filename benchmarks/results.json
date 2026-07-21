@@ -1,4 +1,724 @@
 {
+  "AMD EPYC 9565 72-Core Processor (288 cores)": {
+    "Qwen/Qwen2-1.5B-Instruct": {
+      "owt_train.txt": {
+        "gigatoken": {
+          "bytes": 11920511059,
+          "docs": 1,
+          "file": "/lfs/local/0/roed/data/owt_train.txt",
+          "max_mb": null,
+          "mb_per_s": 19121.88,
+          "mtokens_per_s": 4189.574,
+          "shared_with": [
+            "Qwen/Qwen2.5-7B-Instruct"
+          ],
+          "time_s": 0.6234,
+          "timestamp": "2026-07-21T09:49:53",
+          "tokenizer": "Qwen/Qwen2-1.5B-Instruct",
+          "tokens": 2611765417
+        },
+        "hf": {
+          "bytes": 100000000,
+          "docs": 20342,
+          "file": "/lfs/local/0/roed/data/owt_train.txt",
+          "max_mb": 100.0,
+          "mb_per_s": 27.68,
+          "mtokens_per_s": 6.052,
+          "shared_with": [
+            "Qwen/Qwen2.5-7B-Instruct"
+          ],
+          "time_s": 3.6124,
+          "timestamp": "2026-07-21T09:50:01",
+          "tokenizer": "Qwen/Qwen2-1.5B-Instruct",
+          "tokens": 21862732
+        }
+      }
+    },
+    "Qwen/Qwen3-8B": {
+      "owt_train.txt": {
+        "gigatoken": {
+          "bytes": 11920511059,
+          "docs": 1,
+          "file": "/lfs/local/0/roed/data/owt_train.txt",
+          "max_mb": null,
+          "mb_per_s": 22164.36,
+          "mtokens_per_s": 4856.176,
+          "time_s": 0.5378,
+          "timestamp": "2026-07-21T09:50:27",
+          "tokenizer": "Qwen/Qwen3-8B",
+          "tokens": 2611765417
+        },
+        "hf": {
+          "bytes": 100000000,
+          "docs": 20342,
+          "file": "/lfs/local/0/roed/data/owt_train.txt",
+          "max_mb": 100.0,
+          "mb_per_s": 34.19,
+          "mtokens_per_s": 7.475,
+          "time_s": 2.9248,
+          "timestamp": "2026-07-21T09:50:34",
+          "tokenizer": "Qwen/Qwen3-8B",
+          "tokens": 21862732
+        }
+      }
+    },
+    "Qwen/Qwen3.5-9B": {
+      "owt_train.txt": {
+        "gigatoken": {
+          "bytes": 11920511059,
+          "docs": 1,
+          "file": "/lfs/local/0/roed/data/owt_train.txt",
+          "max_mb": null,
+          "mb_per_s": 15489.91,
+          "mtokens_per_s": 3431.708,
+          "shared_with": [
+            "Qwen/Qwen3.6-27B"
+          ],
+          "time_s": 0.7696,
+          "timestamp": "2026-07-21T09:51:01",
+          "tokenizer": "Qwen/Qwen3.5-9B",
+          "tokens": 2640927277
+        },
+        "hf": {
+          "bytes": 100000000,
+          "docs": 20342,
+          "file": "/lfs/local/0/roed/data/owt_train.txt",
+          "max_mb": 100.0,
+          "mb_per_s": 27.74,
+          "mtokens_per_s": 6.129,
+          "shared_with": [
+            "Qwen/Qwen3.6-27B"
+          ],
+          "time_s": 3.6044,
+          "timestamp": "2026-07-21T09:51:08",
+          "tokenizer": "Qwen/Qwen3.5-9B",
+          "tokens": 22092233
+        }
+      }
+    },
+    "TinyLlama/TinyLlama-1.1B-Chat-v1.0": {
+      "owt_train.txt": {
+        "gigatoken": {
+          "bytes": 11920511059,
+          "docs": 1,
+          "file": "/lfs/local/0/roed/data/owt_train.txt",
+          "max_mb": null,
+          "mb_per_s": 3477.13,
+          "mtokens_per_s": 898.993,
+          "shared_with": [
+            "microsoft/Phi-3-mini-4k-instruct"
+          ],
+          "time_s": 3.4283,
+          "timestamp": "2026-07-21T09:57:39",
+          "tokenizer": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+          "tokens": 3081985364
+        },
+        "hf": {
+          "bytes": 100000000,
+          "docs": 20342,
+          "file": "/lfs/local/0/roed/data/owt_train.txt",
+          "max_mb": 100.0,
+          "mb_per_s": 323.56,
+          "mtokens_per_s": 83.238,
+          "shared_with": [
+            "microsoft/Phi-3-mini-4k-instruct"
+          ],
+          "time_s": 0.3091,
+          "timestamp": "2026-07-21T09:57:43",
+          "tokenizer": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+          "tokens": 25725923
+        }
+      }
+    },
+    "allenai/Olmo-3-1025-7B": {
+      "owt_train.txt": {
+        "gigatoken": {
+          "bytes": 11920511059,
+          "docs": 1,
+          "file": "/lfs/local/0/roed/data/owt_train.txt",
+          "max_mb": null,
+          "mb_per_s": 23058.81,
+          "mtokens_per_s": 4945.493,
+          "time_s": 0.517,
+          "timestamp": "2026-07-21T09:55:45",
+          "tokenizer": "allenai/Olmo-3-1025-7B",
+          "tokens": 2556628451
+        },
+        "hf": {
+          "bytes": 100000000,
+          "docs": 20342,
+          "file": "/lfs/local/0/roed/data/owt_train.txt",
+          "max_mb": 100.0,
+          "mb_per_s": 27.69,
+          "mtokens_per_s": 5.931,
+          "time_s": 3.6112,
+          "timestamp": "2026-07-21T09:55:52",
+          "tokenizer": "allenai/Olmo-3-1025-7B",
+          "tokens": 21417051
+        }
+      }
+    },
+    "answerdotai/ModernBERT-base": {
+      "owt_train.txt": {
+        "gigatoken": {
+          "bytes": 11920511059,
+          "docs": 1,
+          "file": "/lfs/local/0/roed/data/owt_train.txt",
+          "max_mb": null,
+          "mb_per_s": 4181.14,
+          "mtokens_per_s": 946.903,
+          "time_s": 2.851,
+          "timestamp": "2026-07-21T09:47:47",
+          "tokenizer": "answerdotai/ModernBERT-base",
+          "tokens": 2699642019
+        },
+        "hf": {
+          "bytes": 100000000,
+          "docs": 20342,
+          "file": "/lfs/local/0/roed/data/owt_train.txt",
+          "max_mb": 100.0,
+          "mb_per_s": 26.94,
+          "mtokens_per_s": 6.11,
+          "time_s": 3.7114,
+          "timestamp": "2026-07-21T09:47:55",
+          "tokenizer": "answerdotai/ModernBERT-base",
+          "tokens": 22677527
+        }
+      }
+    },
+    "codellama/CodeLlama-7b-hf": {
+      "owt_train.txt": {
+        "gigatoken": {
+          "bytes": 11920511059,
+          "docs": 1,
+          "file": "/lfs/local/0/roed/data/owt_train.txt",
+          "max_mb": null,
+          "mb_per_s": 3465.27,
+          "mtokens_per_s": 895.927,
+          "time_s": 3.44,
+          "timestamp": "2026-07-21T09:58:13",
+          "tokenizer": "codellama/CodeLlama-7b-hf",
+          "tokens": 3081984489
+        },
+        "hf": {
+          "bytes": 100000000,
+          "docs": 20342,
+          "file": "/lfs/local/0/roed/data/owt_train.txt",
+          "max_mb": 100.0,
+          "mb_per_s": 347.43,
+          "mtokens_per_s": 89.378,
+          "time_s": 0.2878,
+          "timestamp": "2026-07-21T09:58:18",
+          "tokenizer": "codellama/CodeLlama-7b-hf",
+          "tokens": 25725750
+        }
+      }
+    },
+    "deepseek-ai/DeepSeek-V3": {
+      "owt_train.txt": {
+        "gigatoken": {
+          "bytes": 11920511059,
+          "docs": 1,
+          "file": "/lfs/local/0/roed/data/owt_train.txt",
+          "max_mb": null,
+          "mb_per_s": 19687.82,
+          "mtokens_per_s": 4290.159,
+          "shared_with": [
+            "deepseek-ai/DeepSeek-R1",
+            "deepseek-ai/DeepSeek-V4-Flash"
+          ],
+          "time_s": 0.6055,
+          "timestamp": "2026-07-21T09:51:47",
+          "tokenizer": "deepseek-ai/DeepSeek-V3",
+          "tokens": 2597590340
+        },
+        "hf": {
+          "bytes": 100000000,
+          "docs": 20342,
+          "file": "/lfs/local/0/roed/data/owt_train.txt",
+          "max_mb": 100.0,
+          "mb_per_s": 26.25,
+          "mtokens_per_s": 5.684,
+          "shared_with": [
+            "deepseek-ai/DeepSeek-R1",
+            "deepseek-ai/DeepSeek-V4-Flash"
+          ],
+          "time_s": 3.8092,
+          "timestamp": "2026-07-21T09:51:55",
+          "tokenizer": "deepseek-ai/DeepSeek-V3",
+          "tokens": 21650989
+        }
+      }
+    },
+    "google/gemma-3-4b-it": {
+      "owt_train.txt": {
+        "gigatoken": {
+          "bytes": 11920511059,
+          "docs": 1,
+          "file": "/lfs/local/0/roed/data/owt_train.txt",
+          "max_mb": null,
+          "mb_per_s": 3428.09,
+          "mtokens_per_s": 764.484,
+          "time_s": 3.4773,
+          "timestamp": "2026-07-21T10:00:14",
+          "tokenizer": "google/gemma-3-4b-it",
+          "tokens": 2658340885
+        },
+        "hf": {
+          "bytes": 100000000,
+          "docs": 20342,
+          "file": "/lfs/local/0/roed/data/owt_train.txt",
+          "max_mb": 100.0,
+          "mb_per_s": 357.24,
+          "mtokens_per_s": 79.23,
+          "time_s": 0.2799,
+          "timestamp": "2026-07-21T10:00:19",
+          "tokenizer": "google/gemma-3-4b-it",
+          "tokens": 22178584
+        }
+      }
+    },
+    "google/gemma-4-E4B-it": {
+      "owt_train.txt": {
+        "gigatoken": {
+          "bytes": 11920511059,
+          "docs": 1,
+          "file": "/lfs/local/0/roed/data/owt_train.txt",
+          "max_mb": null,
+          "mb_per_s": 4817.58,
+          "mtokens_per_s": 1074.383,
+          "time_s": 2.4744,
+          "timestamp": "2026-07-21T10:00:48",
+          "tokenizer": "google/gemma-4-E4B-it",
+          "tokens": 2658430536
+        },
+        "hf": {
+          "bytes": 100000000,
+          "docs": 20342,
+          "file": "/lfs/local/0/roed/data/owt_train.txt",
+          "max_mb": 100.0,
+          "mb_per_s": 334.13,
+          "mtokens_per_s": 74.039,
+          "time_s": 0.2993,
+          "timestamp": "2026-07-21T10:00:53",
+          "tokenizer": "google/gemma-4-E4B-it",
+          "tokens": 22158714
+        }
+      }
+    },
+    "meta-llama/Llama-3.1-8B": {
+      "owt_train.txt": {
+        "gigatoken": {
+          "bytes": 11920511059,
+          "docs": 1,
+          "file": "/lfs/local/0/roed/data/owt_train.txt",
+          "max_mb": null,
+          "mb_per_s": 22146.88,
+          "mtokens_per_s": 4769.483,
+          "shared_with": [
+            "meta-llama/Llama-3.2-1B"
+          ],
+          "time_s": 0.5382,
+          "timestamp": "2026-07-21T09:48:33",
+          "tokenizer": "meta-llama/Llama-3.1-8B",
+          "tokens": 2567163722
+        },
+        "hf": {
+          "bytes": 100000000,
+          "docs": 20342,
+          "file": "/lfs/local/0/roed/data/owt_train.txt",
+          "max_mb": 100.0,
+          "mb_per_s": 48.5,
+          "mtokens_per_s": 10.383,
+          "shared_with": [
+            "meta-llama/Llama-3.2-1B"
+          ],
+          "time_s": 2.0618,
+          "timestamp": "2026-07-21T09:48:39",
+          "tokenizer": "meta-llama/Llama-3.1-8B",
+          "tokens": 21406611
+        }
+      }
+    },
+    "meta-llama/Llama-3.3-70B-Instruct": {
+      "owt_train.txt": {
+        "gigatoken": {
+          "bytes": 11920511059,
+          "docs": 1,
+          "file": "/lfs/local/0/roed/data/owt_train.txt",
+          "max_mb": null,
+          "mb_per_s": 20823.16,
+          "mtokens_per_s": 4484.41,
+          "time_s": 0.5725,
+          "timestamp": "2026-07-21T09:48:43",
+          "tokenizer": "meta-llama/Llama-3.3-70B-Instruct",
+          "tokens": 2567163722
+        },
+        "hf": {
+          "bytes": 100000000,
+          "docs": 20342,
+          "file": "/lfs/local/0/roed/data/owt_train.txt",
+          "max_mb": 100.0,
+          "mb_per_s": 48.32,
+          "mtokens_per_s": 10.343,
+          "time_s": 2.0696,
+          "timestamp": "2026-07-21T09:48:49",
+          "tokenizer": "meta-llama/Llama-3.3-70B-Instruct",
+          "tokens": 21406611
+        }
+      }
+    },
+    "meta-llama/Llama-4-Scout-17B-16E-Instruct": {
+      "owt_train.txt": {
+        "gigatoken": {
+          "bytes": 11920511059,
+          "docs": 1,
+          "file": "/lfs/local/0/roed/data/owt_train.txt",
+          "max_mb": null,
+          "mb_per_s": 20771.2,
+          "mtokens_per_s": 4475.828,
+          "time_s": 0.5739,
+          "timestamp": "2026-07-21T09:49:23",
+          "tokenizer": "meta-llama/Llama-4-Scout-17B-16E-Instruct",
+          "tokens": 2568660194
+        },
+        "hf": {
+          "bytes": 100000000,
+          "docs": 20342,
+          "file": "/lfs/local/0/roed/data/owt_train.txt",
+          "max_mb": 100.0,
+          "mb_per_s": 72.74,
+          "mtokens_per_s": 15.591,
+          "time_s": 1.3748,
+          "timestamp": "2026-07-21T09:49:28",
+          "tokenizer": "meta-llama/Llama-4-Scout-17B-16E-Instruct",
+          "tokens": 21434680
+        }
+      }
+    },
+    "microsoft/Phi-4-mini-instruct": {
+      "owt_train.txt": {
+        "gigatoken": {
+          "bytes": 11920511059,
+          "docs": 1,
+          "file": "/lfs/local/0/roed/data/owt_train.txt",
+          "max_mb": null,
+          "mb_per_s": 20047.59,
+          "mtokens_per_s": 4266.1,
+          "time_s": 0.5946,
+          "timestamp": "2026-07-21T09:57:02",
+          "tokenizer": "microsoft/Phi-4-mini-instruct",
+          "tokens": 2536668014
+        },
+        "hf": {
+          "bytes": 100000000,
+          "docs": 20342,
+          "file": "/lfs/local/0/roed/data/owt_train.txt",
+          "max_mb": 100.0,
+          "mb_per_s": 27.6,
+          "mtokens_per_s": 5.861,
+          "time_s": 3.6228,
+          "timestamp": "2026-07-21T09:57:09",
+          "tokenizer": "microsoft/Phi-4-mini-instruct",
+          "tokens": 21234009
+        }
+      }
+    },
+    "microsoft/phi-4": {
+      "owt_train.txt": {
+        "gigatoken": {
+          "bytes": 11920511059,
+          "docs": 1,
+          "file": "/lfs/local/0/roed/data/owt_train.txt",
+          "max_mb": null,
+          "mb_per_s": 23995.38,
+          "mtokens_per_s": 5146.363,
+          "time_s": 0.4968,
+          "timestamp": "2026-07-21T09:56:51",
+          "tokenizer": "microsoft/phi-4",
+          "tokens": 2556628451
+        },
+        "hf": {
+          "bytes": 100000000,
+          "docs": 20342,
+          "file": "/lfs/local/0/roed/data/owt_train.txt",
+          "max_mb": 100.0,
+          "mb_per_s": 29.95,
+          "mtokens_per_s": 6.414,
+          "time_s": 3.3392,
+          "timestamp": "2026-07-21T09:56:58",
+          "tokenizer": "microsoft/phi-4",
+          "tokens": 21417051
+        }
+      }
+    },
+    "mistralai/Mistral-7B-Instruct-v0.3": {
+      "owt_train.txt": {
+        "gigatoken": {
+          "bytes": 11920511059,
+          "docs": 1,
+          "file": "/lfs/local/0/roed/data/owt_train.txt",
+          "max_mb": null,
+          "mb_per_s": 3574.9,
+          "mtokens_per_s": 893.383,
+          "time_s": 3.3345,
+          "timestamp": "2026-07-21T09:59:09",
+          "tokenizer": "mistralai/Mistral-7B-Instruct-v0.3",
+          "tokens": 2978987937
+        },
+        "hf": {
+          "bytes": 100000000,
+          "docs": 20342,
+          "file": "/lfs/local/0/roed/data/owt_train.txt",
+          "max_mb": 100.0,
+          "mb_per_s": 354.73,
+          "mtokens_per_s": 88.202,
+          "time_s": 0.2819,
+          "timestamp": "2026-07-21T09:59:14",
+          "tokenizer": "mistralai/Mistral-7B-Instruct-v0.3",
+          "tokens": 24864785
+        }
+      }
+    },
+    "moonshotai/Kimi-K2-Instruct": {
+      "owt_train.txt": {
+        "gigatoken": {
+          "bytes": 11920511059,
+          "docs": 1,
+          "file": "/lfs/local/0/roed/data/owt_train.txt",
+          "max_mb": null,
+          "mb_per_s": 18852.03,
+          "mtokens_per_s": 4084.709,
+          "shared_with": [
+            "moonshotai/Kimi-K2.5"
+          ],
+          "time_s": 0.6323,
+          "timestamp": "2026-07-21T09:56:00",
+          "tokenizer": "moonshotai/Kimi-K2-Instruct",
+          "tokens": 2582841844
+        }
+      }
+    },
+    "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16": {
+      "owt_train.txt": {
+        "gigatoken": {
+          "bytes": 11920511059,
+          "docs": 1,
+          "file": "/lfs/local/0/roed/data/owt_train.txt",
+          "max_mb": null,
+          "mb_per_s": 22789.42,
+          "mtokens_per_s": 5104.3,
+          "time_s": 0.5231,
+          "timestamp": "2026-07-21T09:55:13",
+          "tokenizer": "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+          "tokens": 2669917451
+        },
+        "hf": {
+          "bytes": 100000000,
+          "docs": 20342,
+          "file": "/lfs/local/0/roed/data/owt_train.txt",
+          "max_mb": 100.0,
+          "mb_per_s": 49.35,
+          "mtokens_per_s": 10.969,
+          "time_s": 2.0265,
+          "timestamp": "2026-07-21T09:55:19",
+          "tokenizer": "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+          "tokens": 22229104
+        }
+      }
+    },
+    "openai-community/gpt2": {
+      "owt_train.txt": {
+        "gigatoken": {
+          "bytes": 11920511059,
+          "docs": 1,
+          "file": "/lfs/local/0/roed/data/owt_train.txt",
+          "max_mb": null,
+          "mb_per_s": 24532.45,
+          "mtokens_per_s": 5564.937,
+          "time_s": 0.4859,
+          "timestamp": "2026-07-21T09:46:46",
+          "tokenizer": "openai-community/gpt2",
+          "tokens": 2704046552
+        },
+        "hf": {
+          "bytes": 100000000,
+          "docs": 20342,
+          "file": "/lfs/local/0/roed/data/owt_train.txt",
+          "max_mb": 100.0,
+          "mb_per_s": 24.8,
+          "mtokens_per_s": 5.63,
+          "time_s": 4.0329,
+          "timestamp": "2026-07-21T09:46:54",
+          "tokenizer": "openai-community/gpt2",
+          "tokens": 22703001
+        },
+        "tiktoken": {
+          "bytes": 1000000000,
+          "docs": 200541,
+          "encoding": "gpt2",
+          "file": "/lfs/local/0/roed/data/owt_train.txt",
+          "max_mb": 1000.0,
+          "mb_per_s": 36.05,
+          "mtokens_per_s": 8.177,
+          "time_s": 27.7382,
+          "timestamp": "2026-07-21T09:47:27",
+          "tokenizer": "openai-community/gpt2",
+          "tokens": 226815823
+        }
+      }
+    },
+    "openai/gpt-oss-20b": {
+      "owt_train.txt": {
+        "gigatoken": {
+          "bytes": 11920511059,
+          "docs": 1,
+          "file": "/lfs/local/0/roed/data/owt_train.txt",
+          "max_mb": null,
+          "mb_per_s": 23961.57,
+          "mtokens_per_s": 5098.989,
+          "shared_with": [
+            "openai/gpt-oss-120b"
+          ],
+          "time_s": 0.4975,
+          "timestamp": "2026-07-21T09:54:15",
+          "tokenizer": "openai/gpt-oss-20b",
+          "tokens": 2536668014
+        },
+        "hf": {
+          "bytes": 100000000,
+          "docs": 20342,
+          "file": "/lfs/local/0/roed/data/owt_train.txt",
+          "max_mb": 100.0,
+          "mb_per_s": 49.67,
+          "mtokens_per_s": 10.547,
+          "shared_with": [
+            "openai/gpt-oss-120b"
+          ],
+          "time_s": 2.0132,
+          "timestamp": "2026-07-21T09:54:21",
+          "tokenizer": "openai/gpt-oss-20b",
+          "tokens": 21234009
+        },
+        "tiktoken": {
+          "bytes": 1000000000,
+          "docs": 200541,
+          "encoding": "o200k_harmony",
+          "file": "/lfs/local/0/roed/data/owt_train.txt",
+          "max_mb": 1000.0,
+          "mb_per_s": 42.81,
+          "mtokens_per_s": 9.106,
+          "shared_with": [
+            "openai/gpt-oss-120b"
+          ],
+          "time_s": 23.3615,
+          "timestamp": "2026-07-21T09:54:49",
+          "tokenizer": "openai/gpt-oss-20b",
+          "tokens": 212718509
+        }
+      }
+    },
+    "tencent/Hy3": {
+      "owt_train.txt": {
+        "hf": {
+          "bytes": 100000000,
+          "docs": 20342,
+          "file": "/lfs/local/0/roed/data/owt_train.txt",
+          "max_mb": 100.0,
+          "mb_per_s": 34.99,
+          "mtokens_per_s": 7.658,
+          "time_s": 2.8577,
+          "timestamp": "2026-07-21T09:56:11",
+          "tokenizer": "tencent/Hy3",
+          "tokens": 21882884
+        }
+      }
+    },
+    "unsloth/gemma-2b": {
+      "owt_train.txt": {
+        "gigatoken": {
+          "bytes": 11920511059,
+          "docs": 1,
+          "file": "/lfs/local/0/roed/data/owt_train.txt",
+          "max_mb": null,
+          "mb_per_s": 2506.42,
+          "mtokens_per_s": 557.101,
+          "time_s": 4.756,
+          "timestamp": "2026-07-21T09:59:23",
+          "tokenizer": "unsloth/gemma-2b",
+          "tokens": 2649565869
+        },
+        "hf": {
+          "bytes": 100000000,
+          "docs": 20342,
+          "file": "/lfs/local/0/roed/data/owt_train.txt",
+          "max_mb": 100.0,
+          "mb_per_s": 342.17,
+          "mtokens_per_s": 75.632,
+          "time_s": 0.2923,
+          "timestamp": "2026-07-21T09:59:28",
+          "tokenizer": "unsloth/gemma-2b",
+          "tokens": 22103965
+        }
+      }
+    },
+    "zai-org/GLM-4.7": {
+      "owt_train.txt": {
+        "gigatoken": {
+          "bytes": 11920511059,
+          "docs": 1,
+          "file": "/lfs/local/0/roed/data/owt_train.txt",
+          "max_mb": null,
+          "mb_per_s": 20605.73,
+          "mtokens_per_s": 4421.315,
+          "time_s": 0.5785,
+          "timestamp": "2026-07-21T09:52:17",
+          "tokenizer": "zai-org/GLM-4.7",
+          "tokens": 2557750876
+        },
+        "hf": {
+          "bytes": 100000000,
+          "docs": 20342,
+          "file": "/lfs/local/0/roed/data/owt_train.txt",
+          "max_mb": 100.0,
+          "mb_per_s": 72.27,
+          "mtokens_per_s": 15.472,
+          "time_s": 1.3837,
+          "timestamp": "2026-07-21T09:52:22",
+          "tokenizer": "zai-org/GLM-4.7",
+          "tokens": 21407946
+        }
+      }
+    },
+    "zai-org/GLM-5.2": {
+      "owt_train.txt": {
+        "gigatoken": {
+          "bytes": 11920511059,
+          "docs": 1,
+          "file": "/lfs/local/0/roed/data/owt_train.txt",
+          "max_mb": null,
+          "mb_per_s": 20973.55,
+          "mtokens_per_s": 4499.975,
+          "time_s": 0.5684,
+          "timestamp": "2026-07-21T09:52:35",
+          "tokenizer": "zai-org/GLM-5.2",
+          "tokens": 2557602611
+        },
+        "hf": {
+          "bytes": 100000000,
+          "docs": 20342,
+          "file": "/lfs/local/0/roed/data/owt_train.txt",
+          "max_mb": 100.0,
+          "mb_per_s": 74.78,
+          "mtokens_per_s": 16.009,
+          "time_s": 1.3372,
+          "timestamp": "2026-07-21T09:52:41",
+          "tokenizer": "zai-org/GLM-5.2",
+          "tokens": 21407262
+        }
+      }
+    }
+  },
   "AMD Ryzen 7 9800X3D 8-Core Processor (16 cores)": {
     "Qwen/Qwen2-1.5B-Instruct": {
       "owt_train.txt": {
