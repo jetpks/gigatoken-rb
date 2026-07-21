@@ -227,7 +227,7 @@ def fmt_ratio(giga: float | None, other: float | None) -> str:
     return f"{ratio:,.0f}×" if ratio >= 10 else f"{ratio:.1f}×"
 
 
-def render_table(cpu: str, dataset: str, tokenizers: dict) -> str | None:
+def render_table(cpu: str, dataset: str, tokenizers: dict, include_notes: bool = True) -> str | None:
     rows = []
     corpus_bytes = 0
     for repo, by_dataset in tokenizers.items():
@@ -250,11 +250,11 @@ def render_table(cpu: str, dataset: str, tokenizers: dict) -> str | None:
         "<details>",
         f"<summary><b>Encoding throughput on {dataset}{size} — {cpu}</b></summary>",
         "",
-        "Best of 3 interleaved rounds, one fresh process per measurement, all libraries with",
-        "parallelism enabled. gigatoken encodes the whole file un-split; HuggingFace",
-        "`tokenizers` (`encode_batch_fast`) gets the first 100 MB and tiktoken",
-        "(`encode_ordinary_batch`) the first 1 GB, both presplit on `<|endoftext|>`.",
-        "tiktoken rows exist only for tokenizers with official support.",
+        "Best of 3 interleaved rounds, one fresh process per measurement, all libraries with parallelism enabled.",
+        "Gigatoken encodes the whole file un-split, and is thus doing more work than the other tokenizers to find the split boundaries and automatically parallelize.",
+        "HuggingFace tokenizers (`encode_batch_fast`) gets the first 100 MB and tiktoken (`encode_ordinary_batch`) the first 1 GB, both presplit on `<|endoftext|>`.",
+        "This is fair because neither of the compared tokenizers do caching, meaning the speed is roughly uniform throughout.",
+        "Tiktoken rows are currently only filled in for tokenizers with official support.",
         "",
         "| Tokenizer | gigatoken | HF tokenizers | tiktoken | vs HF | vs tiktoken |",
         "|---|---:|---:|---:|---:|---:|",
@@ -272,7 +272,9 @@ def render_table(cpu: str, dataset: str, tokenizers: dict) -> str | None:
         "internal SP parallelism; ModernBERT is byte-level BPE with a heavier",
         "pretokenizer than the GPT-2 family.",
     ]
-    if coverage_notes:
+    if not include_notes:
+        lines += ["", "Per-row model coverage is listed under the first table."]
+    elif coverage_notes:
         lines += [
             "",
             "Each row is one distinct tokenizer (identical vocab/merges/pretokenizer), measured",
@@ -289,11 +291,20 @@ def cmd_render(args) -> None:
     if not results:
         raise SystemExit(f"{args.results}: no results to render")
 
+    def peak_gigatoken(tokenizers: dict) -> float:
+        speeds = [
+            group.get("gigatoken", {}).get("mb_per_s") or 0
+            for by_dataset in tokenizers.values()
+            for group in by_dataset.values()
+        ]
+        return max(speeds, default=0)
+
     tables = []
-    for cpu, tokenizers in results.items():
+    # Fastest machine first (results.json is sorted alphabetically by CPU name).
+    for cpu, tokenizers in sorted(results.items(), key=lambda kv: -peak_gigatoken(kv[1])):
         datasets = sorted({ds for by_dataset in tokenizers.values() for ds in by_dataset})
         for dataset in datasets:
-            table = render_table(cpu, dataset, tokenizers)
+            table = render_table(cpu, dataset, tokenizers, include_notes=not tables)
             if table is not None:
                 tables.append(table)
     block = "\n".join([START, "## Benchmarks", ""] + tables + [END])
