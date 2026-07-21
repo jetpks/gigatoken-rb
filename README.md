@@ -90,16 +90,16 @@ validation OK: 20401 documents match
 
 ```bash
       cpu: AMD EPYC 9565 72-Core Processor, 144 cores, 2 sockets
-gigatoken:    0.584 s |   11920.51 MB at 20412.35 MB/s |  2701.65 Mtok at 4626.23 Mtok/s
-       hf:    3.738 s |     100.00 MB at    26.75 MB/s |    22.76 Mtok at    6.09 Mtok/s
-gigatoken is 763.08x faster than hf
+gigatoken:    0.486 s |   11920.51 MB at 24532.45 MB/s |  2701.65 Mtok at 5564.94 Mtok/s
+       hf:    4.033 s |     100.00 MB at    24.80 MB/s |    22.76 Mtok at    5.63 Mtok/s
+gigatoken is 989.21x faster than hf
 validation OK: 20401 documents match
 ```
+At the rates we see on the EPYC CPU, you could tokenize the [entirety of Common Crawl](https://arxiv.org/pdf/2211.04325) (often considered to be the entire internet, 130 trillion tokens) in just under 6.5 hours!
+
 This example uses the train sample from [this dataset](https://huggingface.co/datasets/stanford-cs336/owt-sample), and the CLI by default subsets to the first 100MB of the file for validation and comparison with HF.
 You can see help for these flags with `uvx gigatoken bench --help`.
 You might need to run your commands twice on macOS to get a good reading, since the first run will always perform a security scan, which will slow down the Rust code.
-
-At the rates we see on the EPYC CPU, you could tokenize the [entirety of Common Crawl](https://arxiv.org/pdf/2211.04325) (often considered to be the entire internet, 130 trillion tokens) in just under 8 hours!
 
 
 ### Q: I've found a mismatch/slow use-case, is this expected?
