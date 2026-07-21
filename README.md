@@ -127,11 +127,11 @@ Additionally, Gigatoken uses concurrent data structures to use multiprocessing i
 <details>
 <summary><b>Encoding throughput on owt_train.txt (11.9 GB) — Apple M4 Max (16 cores)</b></summary>
 
-Best of 3 interleaved rounds, one fresh process per measurement, all libraries with
-parallelism enabled. gigatoken encodes the whole file un-split; HuggingFace
-`tokenizers` (`encode_batch_fast`) gets the first 100 MB and tiktoken
-(`encode_ordinary_batch`) the first 1 GB, both presplit on `<|endoftext|>`.
-tiktoken rows exist only for tokenizers with official support.
+Best of 3 interleaved rounds, one fresh process per measurement, all libraries with parallelism enabled.
+Gigatoken encodes the whole file un-split, and is thus doing more work than the other tokenizers to find the split boundaries and automatically parallelize.
+HuggingFace tokenizers (`encode_batch_fast`) gets the first 100 MB and tiktoken (`encode_ordinary_batch`) the first 1 GB, both presplit on `<|endoftext|>`.
+This is fair because neither of the compared tokenizers do caching, meaning the speed is roughly uniform throughout.
+Tiktoken rows are currently only filled in for tokenizers with official support.
 
 | Tokenizer | gigatoken | HF tokenizers | tiktoken | vs HF | vs tiktoken |
 |---|---:|---:|---:|---:|---:|
@@ -196,6 +196,13 @@ If you use Gigatoken in your research, please cite it as:
   year = {2026},
 }
 ```
+
+## Known Issues
+* Python iteration is handled in Rust, but uses ABI3, which is slower than using internal version-specific CPython APIs. In the future I intend to specialize for each Python version to cut this overhead. Early experiments show a 2x speed improvement for overhead-bound cases.
+* File sinks are not yet implemented in the Gigatoken API.
+* WordPiece is not yet supported.
+* SentencePiece-based tokenization is not nearly as optimized as the more common BPE tokenizers. This is low priority for now since mostly Google models/BERT style models use SentencePiece.
+* Windows has not been tested much, so for now prefer using WSL.
 
 ---
 
