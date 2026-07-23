@@ -1,0 +1,59 @@
+---
+name: Ruby CI
+
+on:
+  push:
+    branches:
+      - main
+      - "project/**"
+  pull_request:
+
+jobs:
+  ci:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Windows is intentionally not in this matrix: rust-toolchain.toml
+        # pins nightly for src/lib.rs's #![feature(portable_simd)], and
+        # neither oxidize-rb/actions/setup-ruby-and-rust's mswin toolchain
+        # derivation nor magnus's Windows support have been verified against
+        # a nightly cdylib build for this crate.
+        os:
+          - ubuntu-latest
+          - macos-latest
+        ruby-version:
+          - "3.3"
+          - "3.4"
+          - "4.0"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Ruby & Rust
+        uses: oxidize-rb/actions/setup-ruby-and-rust@main
+        with:
+          ruby-version: ${{ matrix.ruby-version }}
+          bundler-cache: true
+          cargo-cache: true
+          cache-version: v1
+          # rust-toolchain.toml pins nightly, but setup-ruby-and-rust's
+          # derive_toolchain.rb always feeds an explicit toolchain string to
+          # dtolnay/rust-toolchain@master (defaulting to "stable"), which
+          # takes precedence over file-based auto-detection. The pin must be
+          # named here explicitly to get a nightly toolchain at all.
+          rustup-toolchain: nightly
+
+      - name: Compile extension
+        run: bundle exec rake compile
+
+      - name: Run ruby tests
+        run: bundle exec rspec
+
+      - name: Run ruby tests (hard-mode with GC.stress)
+        run: bundle exec rspec
+        env:
+          GC_STRESS: "true"
+
+      - name: Lint
+        run: bundle exec standardrb

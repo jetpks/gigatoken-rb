@@ -1,0 +1,66 @@
+---
+name: Ruby Gem
+
+# Dispatch-only: this fork cuts no releases and pushes nothing to RubyGems.
+# This workflow exists to produce downloadable native-gem artifacts on demand.
+on:
+  workflow_dispatch:
+
+jobs:
+  cross-gem:
+    name: Build native gem for ${{ matrix.platform }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - arm64-darwin
+          - x86_64-linux
+          - aarch64-linux
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+          bundler-cache: true
+
+      - name: Cross-compile native gem
+        uses: oxidize-rb/actions/cross-gem@v1
+        with:
+          platform: ${{ matrix.platform }}
+          ruby-versions: "3.3,3.4,4.0"
+          # rb-sys-dock's build images pin RUSTUP_DEFAULT_TOOLCHAIN=stable
+          # (docker/setup/rustup.sh in oxidize-rb/rb-sys), but they install
+          # via rustup-init (not a bare rustc), so rustup itself is present
+          # in the container and honors this repo's rust-toolchain.toml
+          # (channel = nightly) once the toolchain exists locally. Installing
+          # it explicitly here avoids relying on rustup's first-invocation
+          # auto-install inside the build step.
+          pre-script: "rustup toolchain install nightly --profile minimal"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cross-gem-${{ matrix.platform }}
+          path: pkg/*.gem
+
+  source-gem:
+    name: Build source gem
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+          bundler-cache: true
+
+      - name: Build gem
+        run: bundle exec rake build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: source-gem
+          path: pkg/*.gem
