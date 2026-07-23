@@ -37,6 +37,20 @@ RSpec.describe Gigatoken::Tokenizer do
     expect(packed.token_count).to eq(ragged.sum(&:size))
   end
 
+  it "encodes a packed batch identically to the ragged batch across many chunks" do
+    # Large enough (several MB, split across many documents) to force the
+    # parallel chunked gather (MIN_CHUNK_BYTES is 1 MiB) rather than the
+    # single-chunk fast path, exercising the zero-copy packed gather's
+    # overlapped commit end-to-end.
+    texts = Array.new(300) { |i| "Document #{i}: #{"The quick brown fox jumps over the lazy dog. " * 250}" }
+    ragged = tokenizer.encode_batch(texts)
+    packed = tokenizer.encode_batch(texts, packed: true)
+
+    expect(packed).to be_a(Gigatoken::PackedResult)
+    expect(packed.to_a).to eq(ragged)
+    expect(packed.token_count).to eq(ragged.sum(&:size))
+  end
+
   it "treats packed: nil the same as omitting packed: on encode_batch" do
     texts = ["Hello, world!", "café"]
     expect(tokenizer.encode_batch(texts, packed: nil)).to eq(tokenizer.encode_batch(texts))

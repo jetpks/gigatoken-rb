@@ -11,9 +11,9 @@ pub mod pretokenize;
 pub(crate) mod test_hub;
 pub(crate) mod token;
 pub use crate::batch::{
-    WorkerPool, encode_docs_ragged, encode_files_docs, encode_files_docs_serial,
-    sp_encode_docs_ragged, sp_encode_docs_ragged_serial, sp_encode_files_docs,
-    sp_encode_files_docs_serial,
+    GatherBuf, GatherOutcome, WorkerPool, encode_docs_into, encode_docs_ragged,
+    encode_files_docs, encode_files_docs_serial, sp_encode_docs_ragged,
+    sp_encode_docs_ragged_serial, sp_encode_files_docs, sp_encode_files_docs_serial,
 };
 pub use crate::bpe::SentencePieceBPE;
 pub use crate::bpe::Tokenizer;
