@@ -5,8 +5,8 @@ require_relative "support"
 module Gigatoken
   module CLI
     # `gigatoken bench TOKENIZER FILES...` — measure encode throughput in
-    # MB/s and Mtok/s, mirroring the Python CLI's `gigatoken bench` output
-    # shape (gigatoken/_cli.py).
+    # MB/s and Mtok/s, mirroring upstream's Python CLI `gigatoken bench`
+    # output shape.
     class Bench < Dry::CLI::Command
       desc "Measure the time to encode FILES with TOKENIZER"
 
