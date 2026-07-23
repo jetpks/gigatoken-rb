@@ -133,20 +133,24 @@ pub(crate) fn resolve(ruby: &Ruby, source: Value) -> Result<FileSource, Error> {
 /// Parquet rows can't be split out of raw file bytes, so they are
 /// materialized as owned documents here and encoded through the
 /// whole-document path (each buffer one document); other formats are loaded
-/// whole and left for `encode` to split.
+/// whole and left for `encode` to split. `encode` itself returns a
+/// `std::io::Result` (not a `magnus::Error`) since this whole call runs with
+/// the GVL released — the SentencePiece backend's UTF-8 validation surfaces
+/// its failure this way too, converted to `Gigatoken::Error` only after
+/// `without_gvl` returns (see `sentencepiece.rs`).
 pub(crate) fn encode_files_ragged(
     source: &FileSource,
     parallel: bool,
-    encode: impl FnOnce(&[&[u8]], &DocFormat) -> (Vec<u32>, Vec<i64>),
+    encode: impl FnOnce(&[&[u8]], &DocFormat) -> std::io::Result<(Vec<u32>, Vec<i64>)>,
 ) -> std::io::Result<(Vec<u32>, Vec<i64>)> {
     if let DocFormat::Parquet { column } = &source.format {
         let docs = load_parquet_docs(&source.paths, column, parallel)?;
         let bytes: Vec<&[u8]> = docs.iter().map(Vec::as_slice).collect();
-        return Ok(encode(&bytes, &DocFormat::Text { separator: None }));
+        return encode(&bytes, &DocFormat::Text { separator: None });
     }
     let files = load_files(&source.paths, parallel)?;
     let bytes: Vec<&[u8]> = files.iter().map(LoadedFile::as_bytes).collect();
-    Ok(encode(&bytes, &source.format))
+    encode(&bytes, &source.format)
 }
 
 /// Load `column` of every parquet file as one owned document per row, files
