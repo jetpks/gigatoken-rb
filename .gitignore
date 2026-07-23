@@ -250,3 +250,18 @@ __marimo__/
 .DS_Store
 
 *.trace/
+
+# Ruby gem (rb_sys/rake-compiler scratch, bundler lock, packaged gem)
+Gemfile.lock
+*.bundle
+/tmp/
+pkg/
+vendor/
+
+# Un-ignore the gem's lib/ dir: the Python packaging section above ignores
+# a bare "lib/" for venv sitelibs, which also matches this repo's Ruby
+# lib/ at the root — re-include it, then re-ignore the compiled extension
+# that `rake compile` drops there.
+!/lib/
+!/lib/**
+/lib/gigatoken/gigatoken_rb.bundle
