@@ -3,8 +3,9 @@
 require "json"
 
 module Gigatoken
-  # A BPE tokenizer: encode, batch encode, decode, and vocabulary
-  # introspection over the native `Gigatoken::Native::BPETokenizer`.
+  # A tokenizer: encode, batch encode, decode, and vocabulary introspection
+  # over a native `Gigatoken::Native::BPETokenizer` or
+  # `Gigatoken::Native::SentencePieceTokenizer`.
   class Tokenizer
     TIKTOKEN_ENDOFTEXT = "<|endoftext|>"
     private_constant :TIKTOKEN_ENDOFTEXT
@@ -12,9 +13,11 @@ module Gigatoken
     FILE_SOURCE_CLASSES = [Native::TextFileSource, Native::JsonlFileSource, Native::ParquetFileSource].freeze
     private_constant :FILE_SOURCE_CLASSES
 
-    # Load from in-memory tokenizer.json contents (String or bytes).
+    # Load from in-memory tokenizer.json contents (String or bytes). Backed
+    # by a BPETokenizer or a SentencePieceTokenizer, per the model's
+    # byte_fallback flag.
     def self.from_json(data)
-      native = Native::BPETokenizer.from_hf_json(data)
+      native = Native.load_hf_json(data)
       new(native, special_tokens: special_tokens_from_json(data))
     end
 

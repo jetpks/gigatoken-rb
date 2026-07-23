@@ -19,7 +19,7 @@ use crate::error::raise;
 use crate::gvl::without_gvl;
 use crate::sources;
 
-fn binary_string(ruby: &Ruby, bytes: &[u8]) -> RString {
+pub(crate) fn binary_string(ruby: &Ruby, bytes: &[u8]) -> RString {
     ruby.enc_str_new(bytes, ruby.ascii8bit_encoding())
 }
 
@@ -32,7 +32,7 @@ fn u32_vec_as_bytes(values: &[u32]) -> &[u8] {
 
 /// Marshal a ragged `(flat, lens)` encode result into a ragged Ruby Array of
 /// Arrays, one per document — the shape `encode_batch`/`encode_files` return.
-fn ragged_result(ruby: &Ruby, flat: Vec<u32>, lens: Vec<i64>) -> Result<RArray, Error> {
+pub(crate) fn ragged_result(ruby: &Ruby, flat: Vec<u32>, lens: Vec<i64>) -> Result<RArray, Error> {
     let result = ruby.ary_new_capa(lens.len());
     let mut offset = 0usize;
     for len in lens {
@@ -53,7 +53,7 @@ fn ragged_result(ruby: &Ruby, flat: Vec<u32>, lens: Vec<i64>) -> Result<RArray, 
 /// no `IO::Buffer` wrapper (verified against the installed magnus-0.8.2
 /// source), so the buffer is built via `funcall`. `lens` is a plain
 /// per-document Ruby Array — small, ergonomics over purity.
-fn packed_result(ruby: &Ruby, flat: Vec<u32>, lens: Vec<i64>) -> Result<RArray, Error> {
+pub(crate) fn packed_result(ruby: &Ruby, flat: Vec<u32>, lens: Vec<i64>) -> Result<RArray, Error> {
     let string = binary_string(ruby, u32_vec_as_bytes(&flat));
     string.freeze();
     let io_buffer: RClass = ruby
@@ -80,7 +80,7 @@ pub struct BPETokenizer {
 }
 
 impl BPETokenizer {
-    fn from_tokenizer(tokenizer: Tokenizer) -> Self {
+    pub(crate) fn from_tokenizer(tokenizer: Tokenizer) -> Self {
         Self {
             tokenizer: RefCell::new(tokenizer),
             workers: WorkerPool::new(),
@@ -95,7 +95,8 @@ impl BPETokenizer {
             Ok(HfTokenizer::Bpe(tokenizer)) => Ok(Self::from_tokenizer(tokenizer)),
             Ok(HfTokenizer::SentencePiece(_)) => Err(raise(
                 ruby,
-                "SentencePiece not supported in v1, see BRIEF §3.4",
+                "SentencePiece tokenizer.json data loads as a SentencePieceTokenizer, not a \
+                 BPETokenizer — use Gigatoken::Native.load_hf_json instead",
             )),
             Err(e) => Err(raise(ruby, e.to_string())),
         }
@@ -173,11 +174,11 @@ impl BPETokenizer {
         let workers = &rb_self.workers;
         let encoded: std::io::Result<(Vec<u32>, Vec<i64>)> = without_gvl(|| {
             sources::encode_files_ragged(&source, parallel, |files, format| {
-                if parallel {
+                Ok(if parallel {
                     encode_files_docs(workers, tokenizer, files, format)
                 } else {
                     encode_files_docs_serial(workers, tokenizer, files, format)
-                }
+                })
             })
         });
         encoded.map_err(|e| raise(ruby, e.to_string()))

@@ -91,6 +91,11 @@ Gigatoken::Tokenizer.from_tiktoken("vocab.tiktoken")
 Gigatoken::Tokenizer.from_json(File.binread("tokenizer.json"))
 ```
 
+### SentencePiece
+A `tokenizer.json` whose model has `byte_fallback: true` (Llama, Gemma, Mistral, and other SentencePiece-BPE families) loads automatically through the same `.load`/`.from_file`/`.from_json` entry points above — `Gigatoken::Native.load_hf_json` picks a `Gigatoken::Native::SentencePieceTokenizer` or a `Gigatoken::Native::BPETokenizer` based on that flag, and `Gigatoken::Tokenizer` wraps either one transparently. No separate API to learn.
+
+One contract is stricter for the SentencePiece backend than for BPE: BPE is byte-level and trusts raw bytes as-is, but SentencePiece's encode cores operate on `&str`, so every document passed to `encode`/`encode_batch`, every file's contents read by `encode_files`, and a `TextFileSource`'s `separator:` are validated as UTF-8 and raise `Gigatoken::Error` on invalid input (a Ruby `String` carries no UTF-8 guarantee, even when tagged as one).
+
 ### Core API
 ```ruby
 tokenizer = Gigatoken::Tokenizer.load("openai-community/gpt2")
