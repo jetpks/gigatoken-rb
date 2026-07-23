@@ -50,8 +50,9 @@ impl TextFileSource {
     fn new(args: &[Value]) -> Result<Self, Error> {
         let args = scan_args::<(Vec<PathBuf>,), (), (), (), RHash, ()>(args)?;
         let (paths,) = args.required;
-        let kw = get_kwargs::<_, (), (Option<RString>,), ()>(args.keywords, &[], &["separator"])?;
+        let kw = get_kwargs::<_, (), (Option<Option<RString>>,), ()>(args.keywords, &[], &["separator"])?;
         let (separator,) = kw.optional;
+        let separator = separator.flatten();
         Ok(Self(FileSource {
             paths,
             format: DocFormat::Text {
@@ -70,8 +71,9 @@ impl JsonlFileSource {
     fn new(args: &[Value]) -> Result<Self, Error> {
         let args = scan_args::<(Vec<PathBuf>,), (), (), (), RHash, ()>(args)?;
         let (paths,) = args.required;
-        let kw = get_kwargs::<_, (), (Option<String>,), ()>(args.keywords, &[], &["field"])?;
+        let kw = get_kwargs::<_, (), (Option<Option<String>>,), ()>(args.keywords, &[], &["field"])?;
         let (field,) = kw.optional;
+        let field = field.flatten();
         Ok(Self(FileSource {
             paths,
             format: DocFormat::Jsonl {
@@ -90,8 +92,9 @@ impl ParquetFileSource {
     fn new(args: &[Value]) -> Result<Self, Error> {
         let args = scan_args::<(Vec<PathBuf>,), (), (), (), RHash, ()>(args)?;
         let (paths,) = args.required;
-        let kw = get_kwargs::<_, (), (Option<String>,), ()>(args.keywords, &[], &["column"])?;
+        let kw = get_kwargs::<_, (), (Option<Option<String>>,), ()>(args.keywords, &[], &["column"])?;
         let (column,) = kw.optional;
+        let column = column.flatten();
         Ok(Self(FileSource {
             paths,
             format: DocFormat::Parquet {
