@@ -37,8 +37,11 @@ jobs:
           # in the container and honors this repo's rust-toolchain.toml
           # (channel = nightly) once the toolchain exists locally. Installing
           # it explicitly here avoids relying on rustup's first-invocation
-          # auto-install inside the build step.
-          pre-script: "rustup toolchain install nightly --profile minimal"
+          # auto-install inside the build step. --target is required: the
+          # minimal profile ships std for the host triple only, and every
+          # rb-sys-dock image exports RUST_TARGET as its cross triple —
+          # without it the cross builds fail with E0463 (no std).
+          pre-script: 'rustup toolchain install nightly --profile minimal --target "$RUST_TARGET"'
 
       - uses: actions/upload-artifact@v4
         with:
