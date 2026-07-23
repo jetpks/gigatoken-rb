@@ -1,6 +1,9 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
+# The packed path uses IO::Buffer, which warns as experimental.
+Warning[:experimental] = false
+
 require "gigatoken/cli"
 
 Dry::CLI.new(Gigatoken::CLI::Commands).call

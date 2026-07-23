@@ -1,2 +1,8 @@
 [toolchain]
 channel = "nightly"
+# Cross triples for the precompiled-gem builds (ruby-gem.yml). rustup's
+# toolchain-file auto-install is the only thing that provisions nightly
+# inside the rb-sys-dock containers, so the targets must be declared here —
+# the cross-gem action's `pre-script` input is dead plumbing (undeclared at
+# v1.4.4, and no released rb-sys-dock reads INPUT_PRE_SCRIPT).
+targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu"]
