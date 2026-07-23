@@ -1,257 +1,137 @@
 # Gigatoken
 
-<div align="center">
+*Tokenize your text data at GB/s — from Ruby.*
 
-~1000x faster than HuggingFace's tokenizers, drop-in replacement.
+A Ruby gem binding [marcelroed/gigatoken](https://github.com/marcelroed/gigatoken)'s SIMD tokenizer core: the fastest BPE tokenizer for language modeling, exposed through an idiomatic modern-Ruby API. Token counting at these speeds is effectively free — no more estimating.
 
-*Tokenize your text data at GB/s!*
-
-![GPT-2 Speedup](https://raw.githubusercontent.com/marcelroed/gigatoken/main/assets/throughput_owt_train_gpt-2.svg)
-
-Note that both HF tokenizers and tiktoken are already running multithreaded Rust!
-</div>
-
-## What is Gigatoken?
-Gigatoken is the fastest tokenizer for language modeling.
-It supports a wide range of CPU hardware, and nearly all commonly used tokenizers.
-See the [Benchmarks](#benchmarks) section for detailed throughput numbers across tokenizers and CPUs.
+This fork carries the same Rust engine in-tree and ships it as a native gem (`magnus` + `rb_sys`). The upstream Python shell is still present but is not this fork's target — see [Fork status](#fork-status).
 
 ## Installation
-```bash
-pip install gigatoken
-```
-
-## Usage
-Gigatoken can be used with its own API, or in compatibility mode with HuggingFace Tokenizers or Tiktoken.
-
-### Compatibility Mode (Easiest)
-```python
-import gigatoken as gt
-
-# Minimum change from existing HuggingFace tokenizers usage (compatibility mode)
-hf_tokenizer = ...
-tokenizer = gt.Tokenizer(hf_tokenizer).as_hf()
-
-# tokenizer can be used in the same contexts as hf_tokenizer
-tokens = tokenizer.encode_batch(["This is a test string", "And here is another"])
-
-# OR with tiktoken
-tiktokenizer = ...
-tokenizer = gt.Tokenizer(tiktokenizer).as_tiktoken()
-
-# Now works like existing tiktoken tokenizers
-tokens = tokenizer.encode_batch(["This is a test string", "And here is another"])
-```
-
-A substantial amount of effort has been put into making sure the outputs match exactly with what you would get with HuggingFace Tokenizers in this setting, but this is at a non-negligible cost to performance.
-You can still expect way faster performance across the board, but not quite the 1000x you will get with the Gigatoken API.
-
-### Gigatoken API (Fastest)
-```python
-import gigatoken as gt
-
-tokenizer = gt.Tokenizer("Qwen/Qwen3-8B")  # Accepts HF model names
-file_source = gt.TextFileSource(["owt_train.txt"], separator=b"<|endoftext|>")
-tokens = tokenizer.encode_files(file_source)
-```
-
-Using the Gigatoken API lets the Rust implementation read data directly, and skips as much overhead as possible while allowing for maximum parallelism.
-Keep in mind that passing Python data structures through this API still incurs the overhead of reading from Python.
-
-<!-- benchmarks:start -->
-## Benchmarks
-
-<details>
-<summary><b>Encoding throughput on owt_train.txt (11.9 GB) — AMD EPYC 9565 72-Core Processor x 2 sockets (144 cores)</b></summary>
-
-| Tokenizer | gigatoken | HF tokenizers | tiktoken | vs HF | vs tiktoken |
-|---|---:|---:|---:|---:|---:|
-| GPT-2 | 24.53 GB/s | 24.8 MB/s | 36.0 MB/s | 989× | 681× |
-| Phi-4 | 24.00 GB/s | 29.9 MB/s | — | 801× | — |
-| GPT-OSS | 23.96 GB/s | 49.7 MB/s | 42.8 MB/s | 482× | 560× |
-| OLMo 2 / 3 | 23.06 GB/s | 27.7 MB/s | — | 833× | — |
-| Nemotron 3 | 22.79 GB/s | 49.4 MB/s | — | 462× | — |
-| Qwen 3 | 22.16 GB/s | 34.2 MB/s | — | 648× | — |
-| Llama 3 / 3.1 / 3.2 | 22.15 GB/s | 48.5 MB/s | — | 457× | — |
-| GLM 5 | 20.97 GB/s | 74.8 MB/s | — | 280× | — |
-| Llama 3.3 | 20.82 GB/s | 48.3 MB/s | — | 431× | — |
-| Llama 4 | 20.77 GB/s | 72.7 MB/s | — | 286× | — |
-| GLM 4 | 20.61 GB/s | 72.3 MB/s | — | 285× | — |
-| Phi-4-mini | 20.05 GB/s | 27.6 MB/s | — | 726× | — |
-| DeepSeek V3 / R1 / V4 | 19.69 GB/s | 26.2 MB/s | — | 750× | — |
-| Qwen 2 / 2.5 | 19.12 GB/s | 27.7 MB/s | — | 691× | — |
-| Kimi K2 | 18.85 GB/s | — | — | — | — |
-| Qwen 3.5 / 3.6 | 15.49 GB/s | 27.7 MB/s | — | 558× | — |
-| Gemma 4 | 4.82 GB/s | 334.1 MB/s | — | 14× | — |
-| ModernBERT | 4.18 GB/s | 26.9 MB/s | — | 155× | — |
-| Mistral 7B v0.3 | 3.57 GB/s | 354.7 MB/s | — | 10× | — |
-| TinyLlama / Phi-3 (Llama 2) | 3.48 GB/s | 323.6 MB/s | — | 11× | — |
-| CodeLlama | 3.47 GB/s | 347.4 MB/s | — | 10.0× | — |
-| Gemma 3 | 3.43 GB/s | 357.2 MB/s | — | 9.6× | — |
-| Gemma 1 | 2.51 GB/s | 342.2 MB/s | — | 7.3× | — |
-
-</details>
-<details>
-<summary><b>Encoding throughput on owt_train.txt (11.9 GB) — Apple M4 Max (16 cores)</b></summary>
-
-| Tokenizer | gigatoken | HF tokenizers | tiktoken | vs HF | vs tiktoken |
-|---|---:|---:|---:|---:|---:|
-| GPT-2 | 8.79 GB/s | 6.9 MB/s | 62.8 MB/s | 1,268× | 140× |
-| Nemotron 3 | 7.82 GB/s | 10.9 MB/s | — | 715× | — |
-| Phi-4 | 7.76 GB/s | 7.7 MB/s | — | 1,012× | — |
-| Llama 3 / 3.1 / 3.2 | 7.60 GB/s | 11.2 MB/s | — | 676× | — |
-| OLMo 2 / 3 | 7.56 GB/s | 5.8 MB/s | — | 1,299× | — |
-| Llama 3.3 | 7.50 GB/s | 15.7 MB/s | — | 479× | — |
-| Phi-4-mini | 6.97 GB/s | 7.2 MB/s | — | 964× | — |
-| Kimi K2 | 6.88 GB/s | — | — | — | — |
-| Llama 4 | 6.81 GB/s | 11.6 MB/s | — | 590× | — |
-| Qwen 2 / 2.5 | 6.37 GB/s | 5.8 MB/s | — | 1,105× | — |
-| Qwen 3 | 6.36 GB/s | 6.9 MB/s | — | 918× | — |
-| Qwen 3.5 / 3.6 | 6.31 GB/s | 6.3 MB/s | — | 994× | — |
-| GPT-OSS | 6.20 GB/s | 20.2 MB/s | 87.2 MB/s | 306× | 71× |
-| GLM 4 | 6.17 GB/s | 15.8 MB/s | — | 392× | — |
-| DeepSeek V3 / R1 / V4 | 5.68 GB/s | 7.2 MB/s | — | 788× | — |
-| GLM 5 | 5.55 GB/s | 12.2 MB/s | — | 456× | — |
-| ModernBERT | 2.64 GB/s | 5.8 MB/s | — | 452× | — |
-| Mistral 7B v0.3 | 1.99 GB/s | 95.1 MB/s | — | 21× | — |
-| Gemma 4 | 1.82 GB/s | 85.2 MB/s | — | 21× | — |
-| CodeLlama | 1.73 GB/s | 80.2 MB/s | — | 22× | — |
-| TinyLlama / Phi-3 (Llama 2) | 1.69 GB/s | 80.1 MB/s | — | 21× | — |
-| Gemma 1 | 1.42 GB/s | 85.7 MB/s | — | 17× | — |
-| Gemma 3 | 1.38 GB/s | 82.2 MB/s | — | 17× | — |
-
-</details>
-<details>
-<summary><b>Encoding throughput on owt_train.txt (11.9 GB) — AMD Ryzen 7 9800X3D 8-Core Processor (16 cores)</b></summary>
-
-| Tokenizer | gigatoken | HF tokenizers | tiktoken | vs HF | vs tiktoken |
-|---|---:|---:|---:|---:|---:|
-| GPT-2 | 6.27 GB/s | 59.0 MB/s | 92.1 MB/s | 106× | 68× |
-| Phi-4 | 6.09 GB/s | 55.4 MB/s | — | 110× | — |
-| OLMo 2 / 3 | 6.06 GB/s | 55.4 MB/s | — | 109× | — |
-| Phi-4-mini | 5.80 GB/s | 54.6 MB/s | — | 106× | — |
-| GPT-OSS | 5.68 GB/s | 79.6 MB/s | 112.7 MB/s | 71× | 50× |
-| Qwen 3 | 5.34 GB/s | 54.4 MB/s | — | 98× | — |
-| Qwen 2 / 2.5 | 5.30 GB/s | 51.7 MB/s | — | 103× | — |
-| Llama 3.3 | 5.26 GB/s | 79.9 MB/s | — | 66× | — |
-| Llama 3 / 3.1 / 3.2 | 5.24 GB/s | 79.5 MB/s | — | 66× | — |
-| Kimi K2 | 5.23 GB/s | — | — | — | — |
-| Qwen 3.5 / 3.6 | 5.22 GB/s | 51.6 MB/s | — | 101× | — |
-| Nemotron 3 | 5.20 GB/s | 79.0 MB/s | — | 66× | — |
-| GLM 5 | 5.05 GB/s | 79.5 MB/s | — | 63× | — |
-| GLM 4 | 5.04 GB/s | 79.5 MB/s | — | 63× | — |
-| Llama 4 | 5.03 GB/s | 78.2 MB/s | — | 64× | — |
-| DeepSeek V3 / R1 / V4 | 4.21 GB/s | 51.6 MB/s | — | 82× | — |
-| ModernBERT | 2.84 GB/s | 52.1 MB/s | — | 54× | — |
-| Mistral 7B v0.3 | 1.47 GB/s | 91.6 MB/s | — | 16× | — |
-| Gemma 4 | 1.45 GB/s | 78.8 MB/s | — | 18× | — |
-| CodeLlama | 1.38 GB/s | 85.2 MB/s | — | 16× | — |
-| TinyLlama / Phi-3 (Llama 2) | 1.37 GB/s | 84.9 MB/s | — | 16× | — |
-| Gemma 1 | 1.14 GB/s | 84.9 MB/s | — | 13× | — |
-| Gemma 3 | 1.12 GB/s | 83.0 MB/s | — | 13× | — |
-
-</details>
-<details>
-<summary><b>Benchmark details</b></summary>
-
-OWT (openwebtext) was chosen because it's roughly representative of the text you get after extraction from CommonCrawl documents.
-Gigatoken encodes the whole file un-split, and is thus doing more work than the other tokenizers to find the split boundaries and automatically parallelize.
-HuggingFace tokenizers (`encode_batch_fast`) gets the first 100 MB and tiktoken (`encode_ordinary_batch`) the first 1 GB, both presplit on `<|endoftext|>`.
-This is fair because neither of the compared tokenizers do caching, meaning the speed is roughly uniform throughout processing.
-Tiktoken rows are currently only filled in for tokenizers with official support.
-
-The slowest rows are the SentencePiece-based tokenizers, which are not well optimized in Gigatoken.
-
-Each row is one distinct tokenizer (identical vocab/merges/pretokenizer), measured on a representative repo.
-If you don't see your tokenizer here, it's likely based on some existing one.
-For instance:
-
-- **Llama 3 / 3.1 / 3.2** — Llama 3 / 3.1 / 3.2, DeepSeek-R1-Distill-Llama, Hermes 3, Saiga, and other Llama-3 finetunes
-- **Llama 3.3** — Llama 3.3, Llama-3.1-Nemotron-Nano-VL, SmolLM3, Kanana 1.5, jina-embeddings-v5, Ultravox
-- **Qwen 2 / 2.5** — Qwen 2 and 2.5 (incl. Coder and VL), Qwen3-Coder, Qwen3-VL, DeepSeek-R1 Qwen distills, MiMo V2.5, MiniCPM-o 2.6, InternVL3
-- **Qwen 3** — Qwen 3 (incl. Embedding and Reranker), Qwen2.5-Omni, Qwen3-VL-Embedding, MiMo V2.5 Pro, jina-reranker-m0, pplx-embed, MOSS-TTS, Zeta
-- **DeepSeek V3 / R1 / V4** — DeepSeek V3 / V3.1 / V3.2, R1, V4 Flash and Pro, DeepSeek-VL2
-- **GLM 4** — GLM 4.1V, 4.5, and 4.7
-- **GLM 5** — GLM 5 / 5.2 and GLM-4.7-Flash
-- **Nemotron 3** — Nemotron 3 Nano, Super, and Ultra
-- **Kimi K2** — Kimi K2 / K2.5 / K2.6 / K2.7, Kimi-Linear, Kimi-VL, Moonlight
-- **Phi-4-mini** — Phi-4-mini and Phi-4-multimodal
-- **TinyLlama / Phi-3 (Llama 2)** — TinyLlama, Phi-3-mini, Phi-3.5-mini and Phi-3.5-vision (the Llama 2 vocab)
-- **Gemma 3** — Gemma 3 (270M–27B) and EmbeddingGemma
-- **Gemma 4** — Gemma 4 (dense, MoE, and E-series) and DiffusionGemma
-
-</details>
-<!-- benchmarks:end -->
-
-
-## FAQ
-### Q: Did you just way over-optimize for a specific CPU and tokenizer? How is it so fast?
-No, I way over-optimized for every combination of these!
-The results are very consistent across CPUs (modern x86 and ARM), and across specific tokenizers.
-
-The major improvements are in optimizing heavily an implementation that usually is outsourced to a Regex engine (pretokenization) using SIMD, minimizing branching and other tricks, as well as heavily optimizing caching of pretoken mappings (if a word has been seen before, look it up its encoded tokens efficiently).
-Caching is a very hard problem in this domain since the cache grows very quickly, and pretoken distributions are very long-tailed.
-
-Some gains are also achieved from minimizing interactions with Python, and avoiding communication between threads.
-
-
-### Q: How can I quickly check if my tokenizer is supported?
-You can try it out without installing anything! The following command will validate and time tokenization for a given HuggingFace model repo: 
 
 ```bash
-# Download your data
-wget https://huggingface.co/datasets/stanford-cs336/owt-sample/resolve/main/owt_train.txt.gz  # Just an example!
-gunzip owt_train.txt.gz
+gem install gigatoken
 ```
+or in your Gemfile:
+```ruby
+gem "gigatoken"
+```
+No precompiled native gem is published yet, so this builds the extension from source. That needs a Rust toolchain — `rust-toolchain.toml` pins the nightly it's built against, and `rustup` installs that toolchain automatically the first time you build.
+
+## Loading
+
+`Gigatoken::Tokenizer.load` accepts any of four source shapes — a `tokenizer.json` path, a directory containing one, a HuggingFace Hub repo id, or a `.tiktoken` mergeable-ranks file — and dispatches to the right constructor:
+```ruby
+require "gigatoken"
+
+Gigatoken::Tokenizer.load("tokenizer.json")
+Gigatoken::Tokenizer.load("path/to/model/dir")
+Gigatoken::Tokenizer.load("openai-community/gpt2")
+Gigatoken::Tokenizer.load("vocab.tiktoken")
+
+Gigatoken::Tokenizer.load("openai-community/gpt2", revision: "main")
+```
+Hub fetches go through socketry `async-http` — no Python, no `huggingface_hub`. Each shape also has an explicit constructor, if you already know which one you have:
+```ruby
+Gigatoken::Tokenizer.from_file("tokenizer.json")        # path, or a directory containing one
+Gigatoken::Tokenizer.from_hub("openai-community/gpt2", revision: "main")
+Gigatoken::Tokenizer.from_tiktoken("vocab.tiktoken")
+Gigatoken::Tokenizer.from_json(File.binread("tokenizer.json"))
+```
+
+### SentencePiece
+
+A `tokenizer.json` whose model has `byte_fallback: true` (Llama, Gemma, Mistral, and other SentencePiece-BPE families) loads automatically through the same `.load`/`.from_file`/`.from_json` entry points above — `Gigatoken::Native.load_hf_json` picks a `Gigatoken::Native::SentencePieceTokenizer` or a `Gigatoken::Native::BPETokenizer` based on that flag, and `Gigatoken::Tokenizer` wraps either one transparently. No separate API to learn.
+
+One contract is stricter for the SentencePiece backend than for BPE: BPE is byte-level and trusts raw bytes as-is, but SentencePiece's encode cores operate on `&str`, so every document passed to `encode`/`encode_batch`, every file's contents read by `encode_files`, and a `TextFileSource`'s `separator:` are validated as UTF-8 and raise `Gigatoken::Error` on invalid input (a Ruby `String` carries no UTF-8 guarantee, even when tagged as one).
+
+## Core API
+
+```ruby
+tokenizer = Gigatoken::Tokenizer.load("openai-community/gpt2")
+
+tokenizer.encode("Hello, world!")                    # => [15496, 11, 995, 0]
+tokenizer.encode_batch(["Hello, world!", "Another one"])
+tokenizer.decode([15496, 11, 995, 0])                 # => "Hello, world!"
+
+tokenizer.vocab_size                                  # => 50257
+tokenizer.vocab                                       # => {0 => "!", 1 => "\"", ...}
+tokenizer.merges                                      # => [[" ", "t"], [" ", "a"], ...]
+tokenizer.special_tokens                              # => {"<|endoftext|>" => 50256}
+```
+
+### Encoding files
+
+`encode_files` tokenizes whole files in Rust, without the documents ever becoming Ruby objects. Bare paths are wrapped in a `TextFileSource` automatically; JSONL and Parquet need one of the other Native source classes:
+```ruby
+# Bare path(s), optionally split into documents on a separator
+tokenizer.encode_files("owt_train.txt", separator: "<|endoftext|>")
+
+# Or an explicit Native source
+text = Gigatoken::Native::TextFileSource.new(["owt_train.txt"], separator: "<|endoftext|>")
+jsonl = Gigatoken::Native::JsonlFileSource.new(["docs.jsonl"], field: "text")
+parquet = Gigatoken::Native::ParquetFileSource.new(["docs.parquet"], column: "text")
+
+tokenizer.encode_files(text)
+tokenizer.encode_files(text, parallel: false) # encode on the calling thread instead of the worker pool
+```
+`.gz` and `.zst` files decompress transparently.
+
+### Packed results
+
+`encode_batch`/`encode_files` accept `packed: true` to return a `Gigatoken::PackedResult` instead of a ragged Array of Arrays: one `IO::Buffer` of every document's token ids (u32, native byte order) plus `lens`, each document's token count. This skips the per-token Ruby array materialization the ragged shape costs, and is the fastest way to consume results when you don't need plain Arrays:
+```ruby
+packed = tokenizer.encode_files(text, packed: true)
+
+packed.buffer                                         # => an IO::Buffer
+packed.lens                                            # => [12, 8, 41, ...] (tokens per document)
+packed.size                                             # => number of documents
+packed.token_count                                      # => total tokens across every document
+packed[3]                                                # => Array of token ids for document 3, materialized on demand
+packed.each { |ids| ... }                                # each document's token ids, in order
+packed.to_a                                              # => the same ragged shape packed: false returns
+```
+
+### Async
+
+`encode_batch`/`encode_files` release the GVL, so wrapping them in `Async` lets other fibers keep running while an encode is in flight:
+```ruby
+Async do
+  tokenizer.encode_files(source)
+end
+```
+The calling fiber itself only yields to the reactor when the active `Fiber.scheduler` was built with a worker pool (`ASYNC_SCHEDULER_WORKER_POOL=true`, one worker by default) — without one, this blocks exactly as it would outside `Async`. See [docs/rb/async.md](docs/rb/async.md) for the full design note.
+
+## CLI
 
 ```bash
-uvx --with tokenizers gigatoken bench 'openai-community/gpt2' owt_train.txt \
-    --validate --doc-separator "<|endoftext|>"
+gigatoken bench openai-community/gpt2 owt_train.txt --doc-separator "<|endoftext|>"
+gigatoken validate openai-community/gpt2 owt_train.txt --doc-separator "<|endoftext|>"
 ```
+`bench` reports MB/s and Mtok/s (`--no-parallel` for the serial core path, `--packed` to bench the packed fused path); `validate` cross-checks `encode_files` against a Ruby-side split plus `encode_batch`.
+
+## Performance
+
+The engine is unchanged from upstream — [its benchmarks](https://github.com/marcelroed/gigatoken#benchmarks) (measured through the Python package: up to tens of GB/s, roughly 10–1000× HuggingFace tokenizers depending on tokenizer family and CPU) characterize the core this gem binds. Ruby-side throughput depends on the seam: the packed `encode_files` path stays within ~10% of the Python CLI on the corpora we've measured, with token counts matching exactly. No Ruby-side multipliers are claimed here — run `gigatoken bench` against your own tokenizer and files to measure it on your hardware.
+
+## Development
+
 ```bash
-      cpu: Apple M4 Max, 16 cores
-gigatoken:    1.432 s |   11920.51 MB at  8327.05 MB/s |  2701.65 Mtok at 1887.23 Mtok/s
-       hf:   16.250 s |     100.00 MB at     6.15 MB/s |    22.76 Mtok at    1.40 Mtok/s
-gigatoken is 1353.13x faster than hf
-validation OK: 20401 documents match
+bundle install
+bundle exec rake compile    # builds the native extension (Rust nightly, via rust-toolchain.toml)
+bundle exec rspec
+bundle exec standardrb
 ```
+The Ruby layer is fiber-first: no `Thread`, `Mutex`, or `Monitor` — parallelism lives in the core's rayon pool. CI runs the suite on ubuntu + macos × Ruby 3.3/3.4/4.0 (`ruby-ci.yml`); `ruby-gem.yml` cross-builds precompiled native gems (arm64-darwin, x86_64-linux, aarch64-linux) on demand.
 
-```bash
-      cpu: AMD EPYC 9565 72-Core Processor, 144 cores, 2 sockets
-gigatoken:    0.486 s |   11920.51 MB at 24532.45 MB/s |  2701.65 Mtok at 5564.94 Mtok/s
-       hf:    4.033 s |     100.00 MB at    24.80 MB/s |    22.76 Mtok at    5.63 Mtok/s
-gigatoken is 989.21x faster than hf
-validation OK: 20401 documents match
-```
-At the rates we see on the EPYC CPU, you could tokenize the [entirety of Common Crawl](https://arxiv.org/pdf/2211.04325) (often considered to be the entire internet, 130 trillion tokens) in just under 6.5 hours!
+## Fork status
 
-This example uses the train sample from [this dataset](https://huggingface.co/datasets/stanford-cs336/owt-sample), and the CLI by default subsets to the first 100MB of the file for validation and comparison with HF.
-You can see help for these flags with `uvx gigatoken bench --help`.
-You might need to run your commands twice on macOS to get a good reading, since the first run will always perform a security scan, which will slow down the Rust code.
+This fork exists to ship the Ruby gem. The Rust core is upstream's, kept minimally patched (a cargo feature gate and crate-root re-exports); the Python shell (`gigatoken/`, `pyproject.toml`) is currently retained byte-identical but unmaintained here, and will be removed eventually — use [upstream](https://github.com/marcelroed/gigatoken) for the Python package.
 
-
-### Q: I've found a mismatch/slow use-case, is this expected?
-Most likely not! Despite reasonably wide testing I don't have every use-case on hand, so please report anything you find in a [GitHub Issue](https://github.com/marcelroed/gigatoken/issues) so I can address it as soon as possible.
-
-
-<!--
-## How does Gigatoken work?
-
-Gigatoken came from a few observations:
-* A majority of the time in current tokenizers is spent on pretokenization -> 
-
-Gigatoken implements pretokenizers that run at >2GB/s/thread
-
-Gigatoken is faster than other libraries due to algorithmic and systems changes.
-One key benefit of using Gigatoken is that it replaces the regex expression used by almost all tokenizers to do pre-tokenization with a custom implementation of the exact same method.
-This is a serious bottleneck for other implementations, and is a big part in this library's breakneck speeds.
-Additionally, Gigatoken uses concurrent data structures to use multiprocessing in more places.
-\* All reference speeds in this section are measured on an M4 Pro CPU
--->
-
+Not ported: HF/tiktoken Python compat shims, padded-batch matrices, BPE training, WordPiece (upstream lacks it too). SentencePiece tokenization works but is less optimized than BPE, matching upstream.
 
 ## Citation
-If you use Gigatoken in your research, please cite it as:
+
+The tokenizer engine is Marcel Rød's gigatoken. If you use it in your research, please cite:
 
 ```bibtex
 @software{roed2026gigatoken,
@@ -262,23 +142,10 @@ If you use Gigatoken in your research, please cite it as:
 }
 ```
 
-## Known Issues
-* Python iteration is handled in Rust, but uses ABI3, which is slower than using internal version-specific CPython APIs. In the future I intend to specialize for each Python version to cut this overhead. Early experiments show a 2x speed improvement for overhead-bound cases.
-* File sinks are not yet implemented in the Gigatoken API.
-* WordPiece is not yet supported.
-* SentencePiece-based tokenization is not nearly as optimized as the more common BPE tokenizers. This is low priority for now since mostly Google models/BERT style models use SentencePiece.
-* Windows has not been tested much, so for now prefer using WSL.
-
 ---
 
 <details>
 <summary>AI Use Disclosure</summary>
-A majority of this code base was crafted by hand without any use of AI (which can be seen from the project's Git history).
-In the final stages of the project, AI was used to assist:
 
-* Implementing the user-facing API
-* Widening of compatibility, for instance generalizing and porting the pretokenizer implementations to support more tokenizers, less interesting features like padding/truncation/unicode normalization
-* Porting SIMD strategies between AVX512/AVX2/NEON
-* Final profiling stages and the last ~4x worth of performance from eliminating branching and improving the pretoken cache hierarchy
-* Refactoring and code reuse
+The Rust engine is upstream's; see <a href="https://github.com/marcelroed/gigatoken#readme">upstream's AI-use disclosure</a> for how it was built (majority hand-crafted, AI-assisted in the final stages). The Ruby port in this fork was built AI-first: headless builder agents working iteration-by-iteration against human-and-AI-authored specifications with frozen acceptance criteria, every gate re-run cold at judging, under human direction throughout.
 </details>

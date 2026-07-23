@@ -1,48 +1,66 @@
 #![feature(portable_simd)]
 
 pub(crate) mod batch;
+#[cfg(feature = "python")]
 pub(crate) mod bindings;
 pub(crate) mod bpe;
 pub(crate) mod bpe_train;
-pub(crate) mod input;
+pub mod input;
 pub mod pretokenize;
 #[cfg(test)]
 pub(crate) mod test_hub;
 pub(crate) mod token;
-pub use crate::batch::{WorkerPool, encode_docs_ragged, sp_encode_docs_ragged};
+pub use crate::batch::{
+    WorkerPool, encode_docs_ragged, encode_files_docs, encode_files_docs_serial,
+    sp_encode_docs_ragged, sp_encode_docs_ragged_serial, sp_encode_files_docs,
+    sp_encode_files_docs_serial,
+};
+pub use crate::bpe::SentencePieceBPE;
 pub use crate::bpe::Tokenizer;
 pub use crate::bpe::sentencepiece::EncodeState;
 pub mod load_tokenizer;
 
-use crate::batch::{
-    encode_files_docs, encode_files_docs_serial, encode_into, sp_encode_docs_ragged_serial,
-    sp_encode_files_docs, sp_encode_files_docs_serial,
-};
+#[cfg(feature = "python")]
+use crate::batch::encode_into;
+#[cfg(feature = "python")]
 use crate::bindings::bridge::{
     EncodeInput, encode_batch_pylist, encode_batch_ragged, extract_doc, extract_token_ids,
     merges_to_pylist, vocab_to_pydict,
 };
+#[cfg(feature = "python")]
 use crate::bindings::matcher::{SpecialTokenFound, SubstringMatcher};
+#[cfg(feature = "python")]
 use crate::bindings::padding;
+#[cfg(feature = "python")]
 use crate::bindings::pretokenize::{PretokenizerIter, pretokenized_counts, pretokenizer};
+#[cfg(feature = "python")]
 use crate::bindings::sources::{
     BytesSource, FileSource, JsonlFileSource, ParquetFileSource, TextFileSource,
     encode_files_ragged,
 };
+#[cfg(feature = "python")]
 use crate::bindings::train::train_bpe;
+#[cfg(feature = "python")]
 use crate::input::file_source::DocFormat;
+#[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
+#[cfg(feature = "python")]
 use pyo3::prelude::*;
+#[cfg(feature = "python")]
 use pyo3::pybacked::{PyBackedBytes, PyBackedStr};
+#[cfg(feature = "python")]
 use pyo3::types::{PyBytes, PyDict, PyList};
+#[cfg(feature = "python")]
 use std::path::PathBuf;
 
+#[cfg(feature = "python")]
 #[pyclass]
 struct BPETokenizer {
     tokenizer: Tokenizer,
     workers: WorkerPool,
 }
 
+#[cfg(feature = "python")]
 impl BPETokenizer {
     /// See `batch::encode_files_docs` / `batch::encode_files_docs_serial`:
     /// each region splits into documents per `format` during the encode —
@@ -62,6 +80,7 @@ impl BPETokenizer {
     }
 }
 
+#[cfg(feature = "python")]
 #[pymethods]
 impl BPETokenizer {
     #[staticmethod]
@@ -262,6 +281,7 @@ impl BPETokenizer {
     }
 }
 
+#[cfg(feature = "python")]
 #[pyclass]
 struct SentencePieceTokenizer {
     tokenizer: bpe::SentencePieceBPE,
@@ -270,6 +290,7 @@ struct SentencePieceTokenizer {
     state: bpe::sentencepiece::EncodeState,
 }
 
+#[cfg(feature = "python")]
 impl SentencePieceTokenizer {
     /// See `batch::sp_encode_docs_ragged` (`_serial` when `parallel` is
     /// false); a separator format (a BytesSource input) goes through
@@ -325,6 +346,7 @@ impl SentencePieceTokenizer {
     }
 }
 
+#[cfg(feature = "python")]
 #[pymethods]
 impl SentencePieceTokenizer {
     #[staticmethod]
@@ -489,6 +511,7 @@ impl SentencePieceTokenizer {
 /// (str or bytes). Returns a SentencePieceTokenizer when the model uses
 /// byte_fallback, a BPETokenizer otherwise — the same split as the two
 /// classes' from_hf constructors.
+#[cfg(feature = "python")]
 #[pyfunction]
 fn load_hf_json(py: Python<'_>, data: Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
     let backed_str;
@@ -529,6 +552,7 @@ fn load_hf_json(py: Python<'_>, data: Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
 // Module registration
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "python")]
 #[pymodule]
 fn gigatoken_rs<'py>(py: Python, m: &Bound<'py, PyModule>) -> PyResult<()> {
     m.add("SpecialTokenFound", py.get_type::<SpecialTokenFound>())?;

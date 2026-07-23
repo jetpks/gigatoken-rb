@@ -1,0 +1,117 @@
+# frozen_string_literal: true
+
+require "json"
+
+module Gigatoken
+  # A tokenizer: encode, batch encode, decode, and vocabulary introspection
+  # over a native `Gigatoken::Native::BPETokenizer` or
+  # `Gigatoken::Native::SentencePieceTokenizer`.
+  class Tokenizer
+    TIKTOKEN_ENDOFTEXT = "<|endoftext|>"
+    private_constant :TIKTOKEN_ENDOFTEXT
+
+    FILE_SOURCE_CLASSES = [Native::TextFileSource, Native::JsonlFileSource, Native::ParquetFileSource].freeze
+    private_constant :FILE_SOURCE_CLASSES
+
+    # Load from in-memory tokenizer.json contents (String or bytes). Backed
+    # by a BPETokenizer or a SentencePieceTokenizer, per the model's
+    # byte_fallback flag.
+    def self.from_json(data)
+      native = Native.load_hf_json(data)
+      new(native, special_tokens: special_tokens_from_json(data))
+    end
+
+    # Load from a tokenizer.json path, or a directory containing one.
+    def self.from_file(path)
+      path = File.join(path, "tokenizer.json") if File.directory?(path)
+      from_json(File.binread(path))
+    end
+
+    # Load from a .tiktoken mergeable-ranks file.
+    def self.from_tiktoken(path)
+      native = Native::BPETokenizer.from_tiktoken(path.to_s)
+      new(native, special_tokens: {TIKTOKEN_ENDOFTEXT => native.vocab_size - 1})
+    end
+
+    # Load tokenizer.json from HuggingFace Hub repo `repo_id` at `revision`
+    # (downloaded directly; huggingface_hub is not required).
+    def self.from_hub(repo_id, revision: "main", hub: Hub.new)
+      from_file(hub.hub_file(repo_id, "tokenizer.json", revision: revision))
+    end
+
+    # Load from any of the supported source shapes: an existing file or
+    # directory path (a tokenizer.json, or a directory containing one), a
+    # .tiktoken vocabulary file, or a HuggingFace Hub repo id like
+    # "openai-community/gpt2".
+    def self.load(source, revision: "main", hub: Hub.new)
+      source = source.to_s
+      return from_tiktoken(source) if source.end_with?(".tiktoken")
+      return from_file(source) if File.exist?(source)
+      return from_hub(source, revision: revision, hub: hub) if Hub.looks_like_repo_id?(source)
+
+      raise Error, "#{source.inspect}: no such file or directory, not a .tiktoken path, and doesn't look like a HuggingFace Hub repo id"
+    end
+
+    def self.special_tokens_from_json(data)
+      added = JSON.parse(data.dup.force_encoding(Encoding::UTF_8))["added_tokens"] || []
+      added.each_with_object({}) { |t, h| h[t["content"]] = t["id"] if t["special"] }
+    end
+    private_class_method :special_tokens_from_json
+
+    def initialize(native, special_tokens: {})
+      @native = native
+      @special_tokens = special_tokens
+    end
+
+    def encode(text)
+      @native.encode(text)
+    end
+
+    # Returns a ragged Array of Arrays of token ids, one row per document —
+    # or, with `packed: true`, a Gigatoken::PackedResult (one IO::Buffer of
+    # token ids plus per-document lengths), avoiding the per-token Ruby
+    # array materialization the ragged shape costs.
+    def encode_batch(texts, packed: false)
+      if packed
+        PackedResult.new(*@native.encode_batch_packed(texts))
+      else
+        @native.encode_batch(texts)
+      end
+    end
+
+    # Tokenize whole files in Rust: reads and encodes them in one fused pass
+    # without the documents ever becoming Ruby objects. `source` is a
+    # Native::{Text,Jsonl,Parquet}FileSource, a single path, or an array of
+    # paths; bare path(s) are wrapped in a TextFileSource (with `separator`,
+    # if given). Returns a ragged Array of Arrays of token ids, one row per
+    # document — or, with `packed: true`, a Gigatoken::PackedResult. `parallel:
+    # false` loads and encodes everything on the calling thread instead, with
+    # identical output, never touching the core worker pool.
+    def encode_files(source, separator: nil, parallel: true, packed: false)
+      source = Native::TextFileSource.new(Array(source).map(&:to_s), separator: separator) unless FILE_SOURCE_CLASSES.any? { |klass| source.is_a?(klass) }
+      if packed
+        PackedResult.new(*@native.encode_files_packed(source, parallel: parallel))
+      else
+        @native.encode_files(source, parallel: parallel)
+      end
+    end
+
+    def decode(ids)
+      @native.decode(ids)
+    end
+
+    def vocab_size
+      @native.vocab_size
+    end
+
+    def vocab
+      @native.vocab
+    end
+
+    def merges
+      @native.merges
+    end
+
+    attr_reader :special_tokens
+  end
+end
