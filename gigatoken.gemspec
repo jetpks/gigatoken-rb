@@ -10,12 +10,12 @@ Gem::Specification.new do |spec|
 
   spec.summary = "Tokenize your documents at GB/s"
   spec.description = "Ruby bindings to the gigatoken core crate: BPE and SentencePiece tokenization at GB/s."
-  spec.homepage = "https://github.com/jetpks/gigatoken"
+  spec.homepage = "https://github.com/jetpks/gigatoken-rb"
   spec.license = "MIT"
   spec.metadata = {
-    "bug_tracker_uri" => "https://github.com/jetpks/gigatoken/issues",
-    "homepage_uri" => "https://github.com/jetpks/gigatoken",
-    "source_code_uri" => "https://github.com/jetpks/gigatoken"
+    "bug_tracker_uri" => "https://github.com/jetpks/gigatoken-rb/issues",
+    "homepage_uri" => "https://github.com/jetpks/gigatoken-rb",
+    "source_code_uri" => "https://github.com/jetpks/gigatoken-rb"
   }
 
   spec.files = Dir[
