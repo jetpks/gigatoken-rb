@@ -33,4 +33,7 @@ Gem::Specification.new do |spec|
   spec.extensions = ["ext/gigatoken/extconf.rb"]
 
   spec.required_ruby_version = ">= 3.3.0"
+
+  spec.add_dependency "async", "~> 2.43"
+  spec.add_dependency "async-http", "~> 0.96"
 end

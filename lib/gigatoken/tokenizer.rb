@@ -27,6 +27,25 @@ module Gigatoken
       new(native, special_tokens: {TIKTOKEN_ENDOFTEXT => native.vocab_size - 1})
     end
 
+    # Load tokenizer.json from HuggingFace Hub repo `repo_id` at `revision`
+    # (downloaded directly; huggingface_hub is not required).
+    def self.from_hub(repo_id, revision: "main", hub: Hub.new)
+      from_file(hub.hub_file(repo_id, "tokenizer.json", revision: revision))
+    end
+
+    # Load from any of the supported source shapes: an existing file or
+    # directory path (a tokenizer.json, or a directory containing one), a
+    # .tiktoken vocabulary file, or a HuggingFace Hub repo id like
+    # "openai-community/gpt2".
+    def self.load(source, revision: "main", hub: Hub.new)
+      source = source.to_s
+      return from_tiktoken(source) if source.end_with?(".tiktoken")
+      return from_file(source) if File.exist?(source)
+      return from_hub(source, revision: revision, hub: hub) if Hub.looks_like_repo_id?(source)
+
+      raise Error, "#{source.inspect}: no such file or directory, not a .tiktoken path, and doesn't look like a HuggingFace Hub repo id"
+    end
+
     def self.special_tokens_from_json(data)
       added = JSON.parse(data.dup.force_encoding(Encoding::UTF_8))["added_tokens"] || []
       added.each_with_object({}) { |t, h| h[t["content"]] = t["id"] if t["special"] }
