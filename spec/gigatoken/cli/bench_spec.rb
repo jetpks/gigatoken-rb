@@ -41,6 +41,12 @@ RSpec.describe Gigatoken::CLI::Bench do
     expect(stdout.string).to match(/ +0\.00 MB at/)
   end
 
+  it "defaults limit_bytes to 'none' (uncapped)" do
+    limit_bytes_option = described_class.options.find { |option| option.name == :limit_bytes }
+
+    expect(limit_bytes_option.default).to eq("none")
+  end
+
   it "surfaces tokenizer load failures as a friendly error, exiting 1" do
     expect { command.call(tokenizer: "/no/such/tokenizer.json", files: [docs_txt]) }
       .to raise_error(SystemExit) { |e| expect(e.status).to eq(1) }
