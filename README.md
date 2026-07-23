@@ -100,7 +100,7 @@ tokenizer.encode_batch(["Hello, world!", "Another one"])
 tokenizer.decode([15496, 11, 995, 0])                 # => "Hello, world!"
 
 tokenizer.vocab_size                                  # => 50257
-tokenizer.vocab                                       # => {"!" => 0, "\"" => 1, ...}
+tokenizer.vocab                                       # => {0 => "!", 1 => "\"", ...}
 tokenizer.merges                                      # => [[" ", "t"], [" ", "a"], ...]
 tokenizer.special_tokens                              # => {"<|endoftext|>" => 50256}
 ```
