@@ -34,7 +34,7 @@ pub(crate) fn chunk_target_bytes(total_bytes: usize) -> usize {
 }
 
 /// Append one document's token ids to `ids` and its row length to `lens`.
-pub(crate) fn encode_into(tokenizer: &mut Tokenizer, doc: &[u8], ids: &mut Vec<u32>, lens: &mut Vec<i64>) {
+pub fn encode_into(tokenizer: &mut Tokenizer, doc: &[u8], ids: &mut Vec<u32>, lens: &mut Vec<i64>) {
     let before = ids.len();
     tokenizer.encode_with_added_tokens_flat(doc, ids);
     lens.push((ids.len() - before) as i64);
@@ -918,7 +918,7 @@ pub fn sp_encode_docs_ragged(
 /// over all documents, on the calling thread, never touching rayon. Token-
 /// and order-identical to the parallel path, which encodes the same
 /// documents in the same order with per-chunk Encoders.
-pub(crate) fn sp_encode_docs_ragged_serial(
+pub fn sp_encode_docs_ragged_serial(
     tokenizer: &bpe::SentencePieceBPE,
     texts: &[&str],
 ) -> (Vec<u32>, Vec<i64>) {
@@ -935,7 +935,7 @@ pub(crate) fn sp_encode_docs_ragged_serial(
 /// document (small files are grouped, huge ones split at pretoken-safe
 /// boundaries); otherwise each file is cut into byte regions at document
 /// boundaries and documents are extracted while encoding.
-pub(crate) fn encode_files_docs(
+pub fn encode_files_docs(
     workers: &WorkerPool,
     proto: &Tokenizer,
     files: &[&[u8]],
@@ -964,7 +964,7 @@ pub(crate) fn encode_files_docs(
 /// file order on the calling thread, never touching rayon. Document
 /// iteration matches the parallel path's chunk regions (`for_each_doc`
 /// over the same format), so the output is token- and order-identical.
-pub(crate) fn encode_files_docs_serial(
+pub fn encode_files_docs_serial(
     workers: &WorkerPool,
     proto: &Tokenizer,
     files: &[&[u8]],
@@ -989,7 +989,7 @@ pub(crate) fn encode_files_docs_serial(
 /// scanner-safe boundaries); otherwise each file is cut into byte regions at
 /// document boundaries and each region's documents are encoded with a
 /// per-chunk Encoder. Documents are assumed to be valid UTF-8.
-pub(crate) fn sp_encode_files_docs(
+pub fn sp_encode_files_docs(
     tokenizer: &bpe::SentencePieceBPE,
     files: &[&[u8]],
     format: &DocFormat,
@@ -1036,7 +1036,7 @@ pub(crate) fn sp_encode_files_docs(
 
 /// Sequential `sp_encode_files_docs`: one Encoder over every file's
 /// documents in order, on the calling thread, never touching rayon.
-pub(crate) fn sp_encode_files_docs_serial(
+pub fn sp_encode_files_docs_serial(
     tokenizer: &bpe::SentencePieceBPE,
     files: &[&[u8]],
     format: &DocFormat,
