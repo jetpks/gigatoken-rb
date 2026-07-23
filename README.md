@@ -58,6 +58,85 @@ tokens = tokenizer.encode_files(file_source)
 Using the Gigatoken API lets the Rust implementation read data directly, and skips as much overhead as possible while allowing for maximum parallelism.
 Keep in mind that passing Python data structures through this API still incurs the overhead of reading from Python.
 
+## Ruby
+Gigatoken also ships as a Ruby gem, wrapping the same Rust core.
+
+### Installation
+```bash
+gem install gigatoken
+```
+or in your Gemfile:
+```ruby
+gem "gigatoken"
+```
+No precompiled native gem is published yet, so this builds the extension from source. That needs a Rust toolchain — `rust-toolchain.toml` pins the nightly it's built against, and `rustup` installs that toolchain automatically the first time you build.
+
+### Loading
+`Gigatoken::Tokenizer.load` accepts any of four source shapes — a `tokenizer.json` path, a directory containing one, a HuggingFace Hub repo id, or a `.tiktoken` mergeable-ranks file — and dispatches to the right constructor:
+```ruby
+require "gigatoken"
+
+Gigatoken::Tokenizer.load("tokenizer.json")
+Gigatoken::Tokenizer.load("path/to/model/dir")
+Gigatoken::Tokenizer.load("openai-community/gpt2")
+Gigatoken::Tokenizer.load("vocab.tiktoken")
+
+Gigatoken::Tokenizer.load("openai-community/gpt2", revision: "main")
+```
+Each shape also has an explicit constructor, if you already know which one you have:
+```ruby
+Gigatoken::Tokenizer.from_file("tokenizer.json")        # path, or a directory containing one
+Gigatoken::Tokenizer.from_hub("openai-community/gpt2", revision: "main")
+Gigatoken::Tokenizer.from_tiktoken("vocab.tiktoken")
+Gigatoken::Tokenizer.from_json(File.binread("tokenizer.json"))
+```
+
+### Core API
+```ruby
+tokenizer = Gigatoken::Tokenizer.load("openai-community/gpt2")
+
+tokenizer.encode("Hello, world!")                    # => [15496, 11, 995, 0]
+tokenizer.encode_batch(["Hello, world!", "Another one"])
+tokenizer.decode([15496, 11, 995, 0])                 # => "Hello, world!"
+
+tokenizer.vocab_size                                  # => 50257
+tokenizer.vocab                                       # => {"!" => 0, "\"" => 1, ...}
+tokenizer.merges                                      # => [[" ", "t"], [" ", "a"], ...]
+tokenizer.special_tokens                              # => {"<|endoftext|>" => 50256}
+```
+
+`encode_files` tokenizes whole files in Rust, without the documents ever becoming Ruby objects. Bare paths are wrapped in a `TextFileSource` automatically; JSONL and Parquet need one of the other Native source classes:
+```ruby
+# Bare path(s), optionally split into documents on a separator
+tokenizer.encode_files("owt_train.txt", separator: "<|endoftext|>")
+
+# Or an explicit Native source
+text = Gigatoken::Native::TextFileSource.new(["owt_train.txt"], separator: "<|endoftext|>")
+jsonl = Gigatoken::Native::JsonlFileSource.new(["docs.jsonl"], field: "text")
+parquet = Gigatoken::Native::ParquetFileSource.new(["docs.parquet"], column: "text")
+
+tokenizer.encode_files(text)
+tokenizer.encode_files(text, parallel: false) # encode on the calling thread instead of the worker pool
+```
+
+### CLI
+```bash
+gigatoken bench openai-community/gpt2 owt_train.txt --doc-separator "<|endoftext|>"
+gigatoken validate openai-community/gpt2 owt_train.txt --doc-separator "<|endoftext|>"
+```
+
+### Async
+`encode_batch`/`encode_files` release the GVL, so wrapping them in `Async` lets other fibers keep running while an encode is in flight:
+```ruby
+Async do
+  tokenizer.encode_files(source)
+end
+```
+The calling fiber itself only yields to the reactor when the active `Fiber.scheduler` was built with a worker pool (`ASYNC_SCHEDULER_WORKER_POOL=true`, one worker by default) — without one, this blocks exactly as it would outside `Async`. See [docs/rb/async.md](docs/rb/async.md) for the full design note.
+
+### Performance
+Ruby-side throughput isn't published here yet — run `gigatoken bench` against your own tokenizer and files to measure it on your hardware.
+
 <!-- benchmarks:start -->
 ## Benchmarks
 
