@@ -27,6 +27,21 @@ RSpec.describe Gigatoken::Tokenizer do
     expect(tokenizer.encode_batch(texts)).to eq(texts.map { |t| tokenizer.encode(t) })
   end
 
+  it "encodes a packed batch identically to the ragged batch" do
+    texts = ["Hello, world!", "", "café", "日本語のテキスト", "a longer sentence for batching."]
+    ragged = tokenizer.encode_batch(texts)
+    packed = tokenizer.encode_batch(texts, packed: true)
+
+    expect(packed).to be_a(Gigatoken::PackedResult)
+    expect(packed.to_a).to eq(ragged)
+    expect(packed.token_count).to eq(ragged.sum(&:size))
+  end
+
+  it "treats packed: nil the same as omitting packed: on encode_batch" do
+    texts = ["Hello, world!", "café"]
+    expect(tokenizer.encode_batch(texts, packed: nil)).to eq(tokenizer.encode_batch(texts))
+  end
+
   it "reports the vocab size and decodes to a BINARY-encoded String" do
     expect(tokenizer.vocab_size).to eq(50257)
     expect(tokenizer.decode([15496]).encoding).to eq(Encoding::ASCII_8BIT)

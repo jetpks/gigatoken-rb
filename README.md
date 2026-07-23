@@ -119,6 +119,20 @@ tokenizer.encode_files(text)
 tokenizer.encode_files(text, parallel: false) # encode on the calling thread instead of the worker pool
 ```
 
+### Packed results
+`encode_batch`/`encode_files` accept `packed: true` to return a `Gigatoken::PackedResult` instead of a ragged Array of Arrays: one `IO::Buffer` of every document's token ids (u32, native byte order) plus `lens`, each document's token count. This skips the per-token Ruby array materialization the ragged shape costs — the Ruby analog of the numpy/awkward-array result `hf tokenizers`/`tiktoken` don't offer either.
+```ruby
+packed = tokenizer.encode_files(text, packed: true)
+
+packed.buffer                                         # => an IO::Buffer
+packed.lens                                            # => [12, 8, 41, ...] (tokens per document)
+packed.size                                             # => number of documents
+packed.token_count                                      # => total tokens across every document
+packed[3]                                                # => Array of token ids for document 3, materialized on demand
+packed.each { |ids| ... }                                # each document's token ids, in order
+packed.to_a                                              # => the same ragged shape packed: false returns
+```
+
 ### CLI
 ```bash
 gigatoken bench openai-community/gpt2 owt_train.txt --doc-separator "<|endoftext|>"

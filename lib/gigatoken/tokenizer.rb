@@ -64,8 +64,16 @@ module Gigatoken
       @native.encode(text)
     end
 
-    def encode_batch(texts)
-      @native.encode_batch(texts)
+    # Returns a ragged Array of Arrays of token ids, one row per document —
+    # or, with `packed: true`, a Gigatoken::PackedResult (one IO::Buffer of
+    # token ids plus per-document lengths), avoiding the per-token Ruby
+    # array materialization the ragged shape costs.
+    def encode_batch(texts, packed: false)
+      if packed
+        PackedResult.new(*@native.encode_batch_packed(texts))
+      else
+        @native.encode_batch(texts)
+      end
     end
 
     # Tokenize whole files in Rust: reads and encodes them in one fused pass
@@ -73,12 +81,16 @@ module Gigatoken
     # Native::{Text,Jsonl,Parquet}FileSource, a single path, or an array of
     # paths; bare path(s) are wrapped in a TextFileSource (with `separator`,
     # if given). Returns a ragged Array of Arrays of token ids, one row per
-    # document. `parallel: false` loads and encodes everything on the
-    # calling thread instead, with identical output, never touching the
-    # core worker pool.
-    def encode_files(source, separator: nil, parallel: true)
+    # document — or, with `packed: true`, a Gigatoken::PackedResult. `parallel:
+    # false` loads and encodes everything on the calling thread instead, with
+    # identical output, never touching the core worker pool.
+    def encode_files(source, separator: nil, parallel: true, packed: false)
       source = Native::TextFileSource.new(Array(source).map(&:to_s), separator: separator) unless FILE_SOURCE_CLASSES.any? { |klass| source.is_a?(klass) }
-      @native.encode_files(source, parallel: parallel)
+      if packed
+        PackedResult.new(*@native.encode_files_packed(source, parallel: parallel))
+      else
+        @native.encode_files(source, parallel: parallel)
+      end
     end
 
     def decode(ids)
