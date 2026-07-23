@@ -61,7 +61,7 @@ Keep in mind that passing Python data structures through this API still incurs t
 <!-- benchmarks:start -->
 ## Benchmarks
 
-<details>
+<details open>
 <summary><b>Encoding throughput on owt_train.txt (11.9 GB) — AMD EPYC 9565 72-Core Processor x 2 sockets (144 cores)</b></summary>
 
 | Tokenizer | gigatoken | HF tokenizers | tiktoken | vs HF | vs tiktoken |
@@ -189,7 +189,7 @@ For instance:
 No, I way over-optimized for every combination of these!
 The results are very consistent across CPUs (modern x86 and ARM), and across specific tokenizers.
 
-The major improvements are in optimizing heavily an implementation that usually is outsourced to a Regex engine (pretokenization) using SIMD, minimizing branching and other tricks, as well as heavily optimizing caching of pretoken mappings (if a word has been seen before, look it up its encoded tokens efficiently).
+The major improvements are in optimizing heavily an implementation that usually is outsourced to a Regex engine (pretokenization) using SIMD, minimizing branching and other tricks, as well as heavily optimizing caching of pretoken mappings (if a word has been seen before, look up its encoded tokens efficiently).
 Caching is a very hard problem in this domain since the cache grows very quickly, and pretoken distributions are very long-tailed.
 
 Some gains are also achieved from minimizing interactions with Python, and avoiding communication between threads.
