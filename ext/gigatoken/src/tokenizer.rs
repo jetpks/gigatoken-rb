@@ -7,9 +7,12 @@ use std::cell::RefCell;
 
 use gigatoken_rs::load_tokenizer::hf::HfTokenizer;
 use gigatoken_rs::load_tokenizer::{hf, tiktoken};
-use gigatoken_rs::{Tokenizer, WorkerPool, encode_docs_ragged};
+use gigatoken_rs::{
+    Tokenizer, WorkerPool, encode_docs_ragged, encode_files_docs, encode_files_docs_serial,
+};
 use magnus::{
     Error, RArray, RClass, RHash, RModule, RString, Ruby, Value, function, method, prelude::*,
+    scan_args::{get_kwargs, scan_args},
 };
 
 use crate::error::raise;
@@ -92,18 +95,30 @@ impl BPETokenizer {
     }
 
     /// Encode every document named by `source` (a TextFileSource,
-    /// JsonlFileSource, or ParquetFileSource) on the core worker pool, with
-    /// the GVL released for the whole run — loading/splitting the files and
-    /// the parallel encode itself. See `sources::load_docs` for why document
-    /// splitting happens up front here rather than fused into the parallel
-    /// encode, as the pyo3 bindings' `encode_files` does.
-    fn encode_files(ruby: &Ruby, rb_self: &Self, source: Value) -> Result<RArray, Error> {
+    /// JsonlFileSource, or ParquetFileSource) with the GVL released for the
+    /// whole run — loading the files and the encode itself. Files are cut
+    /// into chunks at document boundaries and encoded by the core worker
+    /// pool in one fused pass (`batch::encode_files_docs`, the same core the
+    /// pyo3 bindings' `encode_files` uses — see `sources::encode_files_ragged`).
+    /// `parallel: false` loads and encodes everything on the calling thread
+    /// instead, with identical output, never touching the worker pool.
+    fn encode_files(ruby: &Ruby, rb_self: &Self, args: &[Value]) -> Result<RArray, Error> {
+        let args = scan_args::<(Value,), (), (), (), RHash, ()>(args)?;
+        let (source,) = args.required;
+        let kw = get_kwargs::<_, (), (Option<bool>,), ()>(args.keywords, &[], &["parallel"])?;
+        let (parallel,) = kw.optional;
+        let parallel = parallel.unwrap_or(true);
+
         let source = sources::resolve(ruby, source)?;
         let tokenizer = rb_self.tokenizer.borrow();
         let encoded: std::io::Result<(Vec<u32>, Vec<i64>)> = without_gvl(|| {
-            let docs = sources::load_docs(&source)?;
-            let doc_slices: Vec<&[u8]> = docs.iter().map(Vec::as_slice).collect();
-            Ok(encode_docs_ragged(&rb_self.workers, &tokenizer, &doc_slices))
+            sources::encode_files_ragged(&source, parallel, |files, format| {
+                if parallel {
+                    encode_files_docs(&rb_self.workers, &tokenizer, files, format)
+                } else {
+                    encode_files_docs_serial(&rb_self.workers, &tokenizer, files, format)
+                }
+            })
         });
         let (flat, lens) = encoded.map_err(|e| raise(ruby, e.to_string()))?;
 
@@ -154,7 +169,7 @@ pub fn init(ruby: &Ruby, native: RModule) -> Result<(), Error> {
     class.define_singleton_method("from_tiktoken", function!(BPETokenizer::from_tiktoken, 1))?;
     class.define_method("encode", method!(BPETokenizer::encode, 1))?;
     class.define_method("encode_batch", method!(BPETokenizer::encode_batch, 1))?;
-    class.define_method("encode_files", method!(BPETokenizer::encode_files, 1))?;
+    class.define_method("encode_files", method!(BPETokenizer::encode_files, -1))?;
     class.define_method("decode", method!(BPETokenizer::decode, 1))?;
     class.define_method("vocab_size", method!(BPETokenizer::vocab_size, 0))?;
     class.define_method("vocab", method!(BPETokenizer::vocab, 0))?;

@@ -68,15 +68,17 @@ module Gigatoken
       @native.encode_batch(texts)
     end
 
-    # Tokenize whole files in Rust: reads, splits into documents, and
-    # encodes them without the documents ever becoming Ruby objects.
-    # `source` is a Native::{Text,Jsonl,Parquet}FileSource, a single path,
-    # or an array of paths; bare path(s) are wrapped in a TextFileSource
-    # (with `separator`, if given). Returns a ragged Array of Arrays of
-    # token ids, one row per document.
-    def encode_files(source, separator: nil)
+    # Tokenize whole files in Rust: reads and encodes them in one fused pass
+    # without the documents ever becoming Ruby objects. `source` is a
+    # Native::{Text,Jsonl,Parquet}FileSource, a single path, or an array of
+    # paths; bare path(s) are wrapped in a TextFileSource (with `separator`,
+    # if given). Returns a ragged Array of Arrays of token ids, one row per
+    # document. `parallel: false` loads and encodes everything on the
+    # calling thread instead, with identical output, never touching the
+    # core worker pool.
+    def encode_files(source, separator: nil, parallel: true)
       source = Native::TextFileSource.new(Array(source).map(&:to_s), separator: separator) unless FILE_SOURCE_CLASSES.any? { |klass| source.is_a?(klass) }
-      @native.encode_files(source)
+      @native.encode_files(source, parallel: parallel)
     end
 
     def decode(ids)
