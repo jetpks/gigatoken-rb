@@ -4,7 +4,7 @@
 
 A Ruby gem binding [marcelroed/gigatoken](https://github.com/marcelroed/gigatoken)'s SIMD tokenizer core: the fastest BPE tokenizer for language modeling, exposed through an idiomatic modern-Ruby API. Token counting at these speeds is effectively free — no more estimating.
 
-This fork carries the same Rust engine in-tree and ships it as a native gem (`magnus` + `rb_sys`). The upstream Python shell is still present but is not this fork's target — see [Fork status](#fork-status).
+This fork carries the same Rust engine in-tree and ships it as a native gem (`magnus` + `rb_sys`). The upstream Python shell has been removed — see [Fork status](#fork-status).
 
 ## Installation
 
@@ -125,7 +125,7 @@ The Ruby layer is fiber-first: no `Thread`, `Mutex`, or `Monitor` — parallelis
 
 ## Fork status
 
-This fork exists to ship the Ruby gem. The Rust core is upstream's, kept minimally patched (a cargo feature gate and crate-root re-exports); the Python shell (`gigatoken/`, `pyproject.toml`) is currently retained byte-identical but unmaintained here, and will be removed eventually — use [upstream](https://github.com/marcelroed/gigatoken) for the Python package.
+This fork exists to ship the Ruby gem. The Rust core is upstream's, kept minimally patched (a cargo feature gate and crate-root re-exports — the `python` feature and pyo3 bindings remain in the core for clean upstream syncs, just nothing packages them here); the Python shell, its tests, and packaging have been removed — use [upstream](https://github.com/marcelroed/gigatoken) for the Python package.
 
 Not ported: HF/tiktoken Python compat shims, padded-batch matrices, BPE training, WordPiece (upstream lacks it too). SentencePiece tokenization works but is less optimized than BPE, matching upstream.
 
