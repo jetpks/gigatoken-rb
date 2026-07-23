@@ -24,4 +24,5 @@ native = Gigatoken.locate_native(File.expand_path("gigatoken", __dir__))
 raise LoadError, "could not locate gigatoken native extension" unless native
 require native
 
+require_relative "gigatoken/hub"
 require_relative "gigatoken/tokenizer"
