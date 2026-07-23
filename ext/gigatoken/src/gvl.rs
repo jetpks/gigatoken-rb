@@ -22,13 +22,17 @@
 //!
 //! `func`/`data1` may now run on a different OS thread than the caller (the
 //! scheduler's worker pool), where `rb_thread_call_without_gvl` always ran
-//! them on the calling thread itself. Every current `without_gvl` call site
-//! (`tokenizer.rs`'s `encode_batch`/`encode_files`) already shares its
-//! `&Tokenizer`/`&WorkerPool` across `rayon` worker threads inside
+//! them on the calling thread itself. `without_gvl` therefore requires
+//! `F: Send` (the closure crosses onto the worker thread) and `R: Send` (its
+//! result crosses back) — the compiler enforces the cross-thread contract
+//! instead of leaving it to call-site audit. Every current `without_gvl`
+//! call site (`tokenizer.rs`'s `encode_batch`/`encode_files`) already shares
+//! its `&Tokenizer`/`&WorkerPool` across `rayon` worker threads inside
 //! `encode_docs_ragged`, and copies every input `RString` into an owned
 //! `Vec<u8>` before calling `without_gvl` at all — nothing captured touches a
 //! Ruby `VALUE` or thread-local state, so running one OS thread over instead
-//! of another changes nothing about its safety.
+//! of another changes nothing about its safety, and the types involved
+//! satisfy `Send`/`Sync` on their own merits.
 
 use std::any::Any;
 use std::ffi::c_void;
@@ -67,7 +71,8 @@ enum Outcome<R> {
 
 unsafe extern "C" fn call_without_gvl<F, R>(arg: *mut c_void) -> *mut c_void
 where
-    F: FnOnce() -> R,
+    F: FnOnce() -> R + Send,
+    R: Send,
 {
     // SAFETY: `arg` is the `*mut Option<F>` handed to `rb_nogvl` below, valid
     // for the duration of that (synchronous) call, and this is the only
@@ -89,7 +94,8 @@ where
 /// re-raised here rather than left to unwind across the C trampoline.
 pub fn without_gvl<F, R>(f: F) -> R
 where
-    F: FnOnce() -> R,
+    F: FnOnce() -> R + Send,
+    R: Send,
 {
     let mut slot = Some(f);
     let arg = &mut slot as *mut Option<F> as *mut c_void;
