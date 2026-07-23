@@ -99,6 +99,30 @@ RSpec.describe Gigatoken::Tokenizer do
       source = Gigatoken::Native::ParquetFileSource.new([File.join(fixtures, "docs.parquet")])
       expect(tokenizer.encode_files(source, parallel: false)).to eq(tokenizer.encode_files(source, parallel: true))
     end
+
+    it "matches encode_batch for a packed result" do
+      source = Gigatoken::Native::TextFileSource.new([File.join(fixtures, "docs.txt")], separator: "<|endoftext|>")
+      ragged = tokenizer.encode_batch(text_docs)
+      packed = tokenizer.encode_files(source, packed: true)
+
+      expect(packed).to be_a(Gigatoken::PackedResult)
+      expect(packed.to_a).to eq(ragged)
+      expect(packed.token_count).to eq(ragged.sum(&:size))
+    end
+
+    it "gives identical packed rows for parallel: false and parallel: true" do
+      source = Gigatoken::Native::TextFileSource.new([File.join(fixtures, "docs.txt")], separator: "<|endoftext|>")
+      serial = tokenizer.encode_files(source, packed: true, parallel: false)
+      parallel = tokenizer.encode_files(source, packed: true, parallel: true)
+      expect(serial.to_a).to eq(parallel.to_a)
+    end
+
+    it "treats packed: nil the same as omitting packed:" do
+      source = Gigatoken::Native::TextFileSource.new([File.join(fixtures, "docs.txt")], separator: "<|endoftext|>")
+      omitted = tokenizer.encode_files(source)
+      explicit_nil = tokenizer.encode_files(source, packed: nil)
+      expect(explicit_nil).to eq(omitted)
+    end
   end
 
   describe "Native::JsonlFileSource" do

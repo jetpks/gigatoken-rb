@@ -25,4 +25,5 @@ raise LoadError, "could not locate gigatoken native extension" unless native
 require native
 
 require_relative "gigatoken/hub"
+require_relative "gigatoken/packed_result"
 require_relative "gigatoken/tokenizer"

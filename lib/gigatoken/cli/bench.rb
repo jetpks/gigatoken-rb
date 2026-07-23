@@ -16,25 +16,32 @@ module Gigatoken
       option :doc_separator, desc: 'document separator to split the files on, e.g. "<|endoftext|>"; whole files are single documents otherwise'
       option :limit_bytes, default: "none", desc: "cap the bytes benchmarked, e.g. 100MB; 'none' for everything (parallel mode only — ignored with --no-parallel)"
       option :parallel, type: :boolean, default: true, desc: "encode on the worker pool instead of the fused serial core path"
+      option :packed, type: :boolean, default: false, desc: "time the fused native file path with a packed IO::Buffer result instead of per-document Ruby arrays (ignores --limit-bytes)"
 
-      def call(tokenizer:, files:, doc_separator: nil, limit_bytes: "none", parallel: true, **)
+      def call(tokenizer:, files:, doc_separator: nil, limit_bytes: "none", parallel: true, packed: false, **)
         limit = Support.parse_size(limit_bytes)
         out.puts "#{label("cpu")}: #{Support.cpu_info}"
 
         gt_tokenizer = Support.load_tokenizer(tokenizer)
 
         start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-        if parallel
+        if packed
+          encoded = gt_tokenizer.encode_files(Support.text_file_source(files, doc_separator), parallel: parallel, packed: true)
+          n_bytes = files.sum { |file| File.size(file) }
+          n_tokens = encoded.token_count
+        elsif parallel
           docs = Support.subset_docs(Support.split_docs(files, doc_separator), limit)
           encoded = gt_tokenizer.encode_batch(docs)
           n_bytes = docs.sum(&:bytesize)
+          n_tokens = encoded.sum(&:length)
         else
           encoded = gt_tokenizer.encode_files(Support.text_file_source(files, doc_separator), parallel: false)
           n_bytes = files.sum { |file| File.size(file) }
+          n_tokens = encoded.sum(&:length)
         end
         seconds = Process.clock_gettime(Process::CLOCK_MONOTONIC) - start
 
-        out.puts report("gigatoken", seconds, n_bytes, encoded.sum(&:length))
+        out.puts report("gigatoken", seconds, n_bytes, n_tokens)
       rescue Gigatoken::Error => e
         err.puts "error: #{e.message}"
         exit(1)

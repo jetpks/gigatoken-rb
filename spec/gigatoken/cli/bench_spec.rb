@@ -47,6 +47,40 @@ RSpec.describe Gigatoken::CLI::Bench do
     expect(limit_bytes_option.default).to eq("none")
   end
 
+  it "defaults packed to false" do
+    packed_option = described_class.options.find { |option| option.name == :packed }
+
+    expect(packed_option.default).to eq(false)
+  end
+
+  it "prints the gigatoken throughput line with --packed" do
+    command.call(tokenizer: fixture_path, files: [docs_txt], doc_separator: "<|endoftext|>", packed: true)
+
+    expect(stdout.string).to match(/gigatoken: +[\d.]+ s \| +[\d.]+ MB at +[\d.]+ MB\/s \| +[\d.]+ Mtok at +[\d.]+ Mtok\/s\n\z/)
+  end
+
+  it "reports the same token count packed as unpacked" do
+    command.call(tokenizer: fixture_path, files: [docs_txt], doc_separator: "<|endoftext|>", parallel: false)
+    unpacked_tokens = stdout.string[/([\d.]+) Mtok at/, 1]
+
+    stdout.truncate(0)
+    command.call(tokenizer: fixture_path, files: [docs_txt], doc_separator: "<|endoftext|>", packed: true)
+    packed_tokens = stdout.string[/([\d.]+) Mtok at/, 1]
+
+    expect(packed_tokens).to eq(unpacked_tokens)
+  end
+
+  it "encodes the same token counts whether packed runs serially or on the worker pool" do
+    command.call(tokenizer: fixture_path, files: [docs_txt], doc_separator: "<|endoftext|>", packed: true, parallel: false)
+    serial_tokens = stdout.string[/([\d.]+) Mtok at/, 1]
+
+    stdout.truncate(0)
+    command.call(tokenizer: fixture_path, files: [docs_txt], doc_separator: "<|endoftext|>", packed: true, parallel: true)
+    parallel_tokens = stdout.string[/([\d.]+) Mtok at/, 1]
+
+    expect(serial_tokens).to eq(parallel_tokens)
+  end
+
   it "surfaces tokenizer load failures as a friendly error, exiting 1" do
     expect { command.call(tokenizer: "/no/such/tokenizer.json", files: [docs_txt]) }
       .to raise_error(SystemExit) { |e| expect(e.status).to eq(1) }
