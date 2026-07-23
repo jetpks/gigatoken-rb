@@ -10,6 +10,7 @@ crate-type = ["cdylib"]
 magnus = "0.8"
 gigatoken = { path = "../..", default-features = false }
 rayon = "1.11"
+mimalloc = { version = "0.1", default-features = false }
 # Same version requirement and feature set magnus-0.8.2 already puts on its
 # own rb-sys dependency (see magnus-0.8.2/Cargo.toml), so Cargo resolves both
 # to the one rb-sys already in Cargo.lock rather than a second copy.

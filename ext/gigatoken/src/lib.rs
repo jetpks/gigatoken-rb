@@ -1,6 +1,12 @@
 use gigatoken_rs::load_tokenizer::hf::{self, HfTokenizer};
 use magnus::{Error, Module, RString, Ruby, Value, function};
 
+// XZM-WORKAROUND: macOS 26's xzm malloc zone SIGTRAPs on multi-GB Rust chunk
+// frees (`_xzm_reclaim_mark_used_locked` assertion); routing Rust allocations
+// through mimalloc avoids the xzm zone entirely.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 mod error;
 mod gvl;
 mod sentencepiece;
