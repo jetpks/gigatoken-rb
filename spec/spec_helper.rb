@@ -1,5 +1,8 @@
 # frozen_string_literal: true
 
+# The packed path uses IO::Buffer, which warns as experimental.
+Warning[:experimental] = false
+
 require "gigatoken"
 
 Dir[File.join(__dir__, "support", "**", "*.rb")].sort.each { |f| require f }

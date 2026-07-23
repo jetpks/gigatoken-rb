@@ -1,5 +1,8 @@
 #!/usr/bin/env ruby
 
+# The packed path uses IO::Buffer, which warns as experimental.
+Warning[:experimental] = false
+
 require_relative "../lib/gigatoken"
 require "irb"
 
