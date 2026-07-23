@@ -2,6 +2,7 @@ use magnus::{Error, Module, Ruby, function};
 
 mod error;
 mod gvl;
+mod sources;
 mod tokenizer;
 
 // The gigatoken core crate exposes no version constant of its own, so this
@@ -15,6 +16,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     let gigatoken = ruby.define_module("Gigatoken")?;
     let native = gigatoken.define_module("Native")?;
     native.define_module_function("crate_version", function!(crate_version, 0))?;
+    sources::init(ruby, native)?;
     tokenizer::init(ruby, native)?;
     Ok(())
 }

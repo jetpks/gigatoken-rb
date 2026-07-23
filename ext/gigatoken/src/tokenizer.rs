@@ -8,10 +8,13 @@ use std::cell::RefCell;
 use gigatoken_rs::load_tokenizer::hf::HfTokenizer;
 use gigatoken_rs::load_tokenizer::{hf, tiktoken};
 use gigatoken_rs::{Tokenizer, WorkerPool, encode_docs_ragged};
-use magnus::{Error, RArray, RClass, RHash, RModule, RString, Ruby, function, method, prelude::*};
+use magnus::{
+    Error, RArray, RClass, RHash, RModule, RString, Ruby, Value, function, method, prelude::*,
+};
 
 use crate::error::raise;
 use crate::gvl::without_gvl;
+use crate::sources;
 
 fn binary_string(ruby: &Ruby, bytes: &[u8]) -> RString {
     ruby.enc_str_new(bytes, ruby.ascii8bit_encoding())
@@ -88,6 +91,32 @@ impl BPETokenizer {
         Ok(result)
     }
 
+    /// Encode every document named by `source` (a TextFileSource,
+    /// JsonlFileSource, or ParquetFileSource) on the core worker pool, with
+    /// the GVL released for the whole run — loading/splitting the files and
+    /// the parallel encode itself. See `sources::load_docs` for why document
+    /// splitting happens up front here rather than fused into the parallel
+    /// encode, as the pyo3 bindings' `encode_files` does.
+    fn encode_files(ruby: &Ruby, rb_self: &Self, source: Value) -> Result<RArray, Error> {
+        let source = sources::resolve(ruby, source)?;
+        let tokenizer = rb_self.tokenizer.borrow();
+        let encoded: std::io::Result<(Vec<u32>, Vec<i64>)> = without_gvl(|| {
+            let docs = sources::load_docs(&source)?;
+            let doc_slices: Vec<&[u8]> = docs.iter().map(Vec::as_slice).collect();
+            Ok(encode_docs_ragged(&rb_self.workers, &tokenizer, &doc_slices))
+        });
+        let (flat, lens) = encoded.map_err(|e| raise(ruby, e.to_string()))?;
+
+        let result = ruby.ary_new_capa(lens.len());
+        let mut offset = 0usize;
+        for len in lens {
+            let len = len as usize;
+            result.push(flat[offset..offset + len].to_vec())?;
+            offset += len;
+        }
+        Ok(result)
+    }
+
     fn decode(ruby: &Ruby, rb_self: &Self, tokens: RArray) -> Result<RString, Error> {
         let ids: Vec<u32> = tokens.to_vec()?;
         let ids: Vec<_> = ids.into_iter().map(Into::into).collect();
@@ -125,6 +154,7 @@ pub fn init(ruby: &Ruby, native: RModule) -> Result<(), Error> {
     class.define_singleton_method("from_tiktoken", function!(BPETokenizer::from_tiktoken, 1))?;
     class.define_method("encode", method!(BPETokenizer::encode, 1))?;
     class.define_method("encode_batch", method!(BPETokenizer::encode_batch, 1))?;
+    class.define_method("encode_files", method!(BPETokenizer::encode_files, 1))?;
     class.define_method("decode", method!(BPETokenizer::decode, 1))?;
     class.define_method("vocab_size", method!(BPETokenizer::vocab_size, 0))?;
     class.define_method("vocab", method!(BPETokenizer::vocab, 0))?;

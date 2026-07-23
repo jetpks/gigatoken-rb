@@ -9,6 +9,9 @@ module Gigatoken
     TIKTOKEN_ENDOFTEXT = "<|endoftext|>"
     private_constant :TIKTOKEN_ENDOFTEXT
 
+    FILE_SOURCE_CLASSES = [Native::TextFileSource, Native::JsonlFileSource, Native::ParquetFileSource].freeze
+    private_constant :FILE_SOURCE_CLASSES
+
     # Load from in-memory tokenizer.json contents (String or bytes).
     def self.from_json(data)
       native = Native::BPETokenizer.from_hf_json(data)
@@ -63,6 +66,17 @@ module Gigatoken
 
     def encode_batch(texts)
       @native.encode_batch(texts)
+    end
+
+    # Tokenize whole files in Rust: reads, splits into documents, and
+    # encodes them without the documents ever becoming Ruby objects.
+    # `source` is a Native::{Text,Jsonl,Parquet}FileSource, a single path,
+    # or an array of paths; bare path(s) are wrapped in a TextFileSource
+    # (with `separator`, if given). Returns a ragged Array of Arrays of
+    # token ids, one row per document.
+    def encode_files(source, separator: nil)
+      source = Native::TextFileSource.new(Array(source).map(&:to_s), separator: separator) unless FILE_SOURCE_CLASSES.any? { |klass| source.is_a?(klass) }
+      @native.encode_files(source)
     end
 
     def decode(ids)
