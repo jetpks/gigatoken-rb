@@ -20,6 +20,7 @@ Gem::Specification.new do |spec|
 
   spec.files = Dir[
     "lib/**/*.rb",
+    "exe/*",
     "ext/gigatoken/src/**/*.rs",
     "ext/gigatoken/*.{toml,rb}",
     "Cargo.toml",
@@ -31,9 +32,12 @@ Gem::Specification.new do |spec|
   ]
   spec.require_paths = ["lib"]
   spec.extensions = ["ext/gigatoken/extconf.rb"]
+  spec.bindir = "exe"
+  spec.executables = Dir["exe/*"].map { |f| File.basename(f) }
 
   spec.required_ruby_version = ">= 3.3.0"
 
   spec.add_dependency "async", "~> 2.43"
   spec.add_dependency "async-http", "~> 0.96"
+  spec.add_dependency "dry-cli", "~> 1.0"
 end
