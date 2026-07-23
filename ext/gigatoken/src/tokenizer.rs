@@ -81,8 +81,9 @@ impl BPETokenizer {
             .collect::<Result<_, _>>()?;
         let doc_slices: Vec<&[u8]> = docs.iter().map(Vec::as_slice).collect();
         let tokenizer = rb_self.tokenizer.borrow();
-        let (flat, lens) =
-            without_gvl(|| encode_docs_ragged(&rb_self.workers, &tokenizer, &doc_slices));
+        let tokenizer: &Tokenizer = &tokenizer;
+        let workers = &rb_self.workers;
+        let (flat, lens) = without_gvl(|| encode_docs_ragged(workers, tokenizer, &doc_slices));
 
         let result = ruby.ary_new_capa(lens.len());
         let mut offset = 0usize;
@@ -105,18 +106,23 @@ impl BPETokenizer {
     fn encode_files(ruby: &Ruby, rb_self: &Self, args: &[Value]) -> Result<RArray, Error> {
         let args = scan_args::<(Value,), (), (), (), RHash, ()>(args)?;
         let (source,) = args.required;
-        let kw = get_kwargs::<_, (), (Option<bool>,), ()>(args.keywords, &[], &["parallel"])?;
+        let kw = get_kwargs::<_, (), (Option<Value>,), ()>(args.keywords, &[], &["parallel"])?;
         let (parallel,) = kw.optional;
-        let parallel = parallel.unwrap_or(true);
+        let parallel = match parallel {
+            Some(v) if !v.is_nil() => bool::try_convert(v)?,
+            _ => true,
+        };
 
         let source = sources::resolve(ruby, source)?;
         let tokenizer = rb_self.tokenizer.borrow();
+        let tokenizer: &Tokenizer = &tokenizer;
+        let workers = &rb_self.workers;
         let encoded: std::io::Result<(Vec<u32>, Vec<i64>)> = without_gvl(|| {
             sources::encode_files_ragged(&source, parallel, |files, format| {
                 if parallel {
-                    encode_files_docs(&rb_self.workers, &tokenizer, files, format)
+                    encode_files_docs(workers, tokenizer, files, format)
                 } else {
-                    encode_files_docs_serial(&rb_self.workers, &tokenizer, files, format)
+                    encode_files_docs_serial(workers, tokenizer, files, format)
                 }
             })
         });

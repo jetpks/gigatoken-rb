@@ -79,6 +79,12 @@ RSpec.describe Gigatoken::Tokenizer do
       expect(rows).to eq(tokenizer.encode_files(source))
     end
 
+    it "treats parallel: nil the same as omitting parallel:" do
+      omitted = tokenizer.encode_files(File.join(fixtures, "docs.txt"))
+      explicit_nil = tokenizer.encode_files(File.join(fixtures, "docs.txt"), parallel: nil)
+      expect(explicit_nil).to eq(omitted)
+    end
+
     it "gives identical rows for parallel: false and parallel: true with a text file" do
       source = Gigatoken::Native::TextFileSource.new([File.join(fixtures, "docs.txt")], separator: "<|endoftext|>")
       expect(tokenizer.encode_files(source, parallel: false)).to eq(tokenizer.encode_files(source, parallel: true))
