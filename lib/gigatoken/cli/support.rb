@@ -16,10 +16,8 @@ module Gigatoken
       class << self
         # Load TOKENIZER: a tokenizer.json path/directory, a HuggingFace
         # repo id, or a .tiktoken file — see Gigatoken::Tokenizer.load.
-        # .tiktoken is handled explicitly first since Tokenizer.load only
-        # reaches it via a path that already exists on disk.
         def load_tokenizer(spec)
-          spec.end_with?(".tiktoken") ? Gigatoken::Tokenizer.from_tiktoken(spec) : Gigatoken::Tokenizer.load(spec)
+          Gigatoken::Tokenizer.load(spec)
         end
 
         # Parse a decimal byte size like "100MB", "2.5GB", or "1000000";
@@ -34,14 +32,9 @@ module Gigatoken
         end
 
         # A Native::TextFileSource for FILES, split on `separator` when
-        # given. Built by hand (rather than letting Tokenizer#encode_files
-        # auto-wrap bare paths) because that wrapper always forwards
-        # `separator:` explicitly, including when nil — which
-        # Native::TextFileSource.new rejects; omitting the keyword entirely
-        # is the only form it accepts for "no separator".
+        # given.
         def text_file_source(files, separator)
-          paths = files.map(&:to_s)
-          separator ? Gigatoken::Native::TextFileSource.new(paths, separator: separator) : Gigatoken::Native::TextFileSource.new(paths)
+          Gigatoken::Native::TextFileSource.new(files.map(&:to_s), separator: separator)
         end
 
         # Whole files as raw bytes, one document per file, or (with a
