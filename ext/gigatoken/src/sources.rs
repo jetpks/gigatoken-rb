@@ -5,21 +5,20 @@
 //! gets its own Ruby class instead of a `FileSource` base class, since
 //! magnus ties one wrapped Rust type to exactly one Ruby class.
 //!
-//! `src/batch.rs::encode_files_docs` — the pyo3 path's ragged core, which
-//! fuses byte-region chunking with document-boundary extraction during the
-//! parallel encode itself — lives in a `pub(crate) mod batch` and so is not
-//! reachable from this crate (see the builder report's DISAGREEMENTS).
-//! `load_docs` below builds the same documents from the public `input`
-//! surface instead: it splits each loaded file into documents up front
-//! (single-threaded), then hands them to the public `encode_docs_ragged`,
-//! the same parallel ragged core `BPETokenizer#encode_batch` already uses.
+//! `encode_files_ragged` below mirrors the pyo3 path's loading scaffold
+//! (`src/bindings/sources.rs::encode_files_ragged`), now that the crate root
+//! re-exports `batch::encode_files_docs`/`_serial` (`src/lib.rs`): parquet
+//! rows can't be split out of raw file bytes, so they're read directly as
+//! owned documents via `input::parquet::read_docs` and encoded through the
+//! whole-document path; text/JSONL files are loaded whole (mmapped, or
+//! decompressed into memory for .gz/.zst — `load_file` handles both) and
+//! handed straight to the fused chunk+extract+encode core as byte regions,
+//! with no separate single-threaded document-splitting pass.
 
 use std::path::PathBuf;
 
-use gigatoken_rs::input::file_source::{DocFormat, load_file};
-use gigatoken_rs::input::jsonl::JsonLinesSlice;
+use gigatoken_rs::input::file_source::{DocFormat, LoadedFile, load_file};
 use gigatoken_rs::input::parquet;
-use gigatoken_rs::input::DocumentIter;
 use magnus::{
     prelude::*,
     scan_args::{get_kwargs, scan_args},
@@ -128,38 +127,66 @@ pub(crate) fn resolve(ruby: &Ruby, source: Value) -> Result<FileSource, Error> {
     ))
 }
 
-/// Load every document named by `source`, in file/row order. Parquet rows
-/// are read directly as owned documents (parallel across row groups); text
-/// and JSONL files are loaded whole (mmapped when uncompressed, decompressed
-/// into memory otherwise — `input::file_source::load_file` handles .gz/.zst
-/// transparently) and then split into documents on the calling thread.
-pub(crate) fn load_docs(source: &FileSource) -> std::io::Result<Vec<Vec<u8>>> {
+/// Load every document named by `source`, in file/row order, and hand its
+/// contents and document format to `encode` — the fused chunk+extract+encode
+/// core (`batch::encode_files_docs`/`_serial`, called by `tokenizer.rs`).
+/// Parquet rows can't be split out of raw file bytes, so they are
+/// materialized as owned documents here and encoded through the
+/// whole-document path (each buffer one document); other formats are loaded
+/// whole and left for `encode` to split.
+pub(crate) fn encode_files_ragged(
+    source: &FileSource,
+    parallel: bool,
+    encode: impl FnOnce(&[&[u8]], &DocFormat) -> (Vec<u32>, Vec<i64>),
+) -> std::io::Result<(Vec<u32>, Vec<i64>)> {
     if let DocFormat::Parquet { column } = &source.format {
-        let mut docs = Vec::new();
-        for path in &source.paths {
-            docs.extend(parquet::read_docs(path, column, true)?);
-        }
-        return Ok(docs);
+        let docs = load_parquet_docs(&source.paths, column, parallel)?;
+        let bytes: Vec<&[u8]> = docs.iter().map(Vec::as_slice).collect();
+        return Ok(encode(&bytes, &DocFormat::Text { separator: None }));
     }
-    let mut docs: Vec<Vec<u8>> = Vec::new();
-    for path in &source.paths {
-        let loaded = load_file(path)
-            .map_err(|e| std::io::Error::new(e.kind(), format!("{}: {e}", path.display())))?;
-        let bytes = loaded.as_bytes();
-        match &source.format {
-            DocFormat::Jsonl { field } => {
-                docs.extend(JsonLinesSlice::new(bytes, field).map(|d| d.as_ref().to_vec()));
-            }
-            DocFormat::Text {
-                separator: Some(sep),
-            } if !sep.is_empty() => {
-                docs.extend(DocumentIter::new(bytes, sep).map(<[u8]>::to_vec));
-            }
-            DocFormat::Text { .. } => docs.push(bytes.to_vec()),
-            DocFormat::Parquet { .. } => unreachable!("handled above"),
-        }
+    let files = load_files(&source.paths, parallel)?;
+    let bytes: Vec<&[u8]> = files.iter().map(LoadedFile::as_bytes).collect();
+    Ok(encode(&bytes, &source.format))
+}
+
+/// Load `column` of every parquet file as one owned document per row, files
+/// in argument order, rows in row order. Parallel across files and row
+/// groups with rayon, or fully on the calling thread when `parallel` is
+/// false (the sequential encode paths must never touch the rayon pool).
+fn load_parquet_docs(
+    paths: &[PathBuf],
+    column: &str,
+    parallel: bool,
+) -> std::io::Result<Vec<Vec<u8>>> {
+    use rayon::prelude::*;
+    let per_file: Vec<Vec<Vec<u8>>> = if parallel {
+        paths
+            .par_iter()
+            .map(|p| parquet::read_docs(p, column, true))
+            .collect::<std::io::Result<_>>()?
+    } else {
+        paths
+            .iter()
+            .map(|p| parquet::read_docs(p, column, false))
+            .collect::<std::io::Result<_>>()?
+    };
+    Ok(per_file.into_iter().flatten().collect())
+}
+
+/// Load all files: mmap when stored uncompressed, decompress .gz/.zst into
+/// memory otherwise (parallel chunking needs random access). In parallel
+/// with rayon, or serially on the calling thread when `parallel` is false
+/// (the sequential encode paths must never touch the rayon pool).
+fn load_files(paths: &[PathBuf], parallel: bool) -> std::io::Result<Vec<LoadedFile>> {
+    use rayon::prelude::*;
+    let load = |p: &PathBuf| {
+        load_file(p).map_err(|e| std::io::Error::new(e.kind(), format!("{}: {e}", p.display())))
+    };
+    if parallel {
+        paths.par_iter().map(load).collect()
+    } else {
+        paths.iter().map(load).collect()
     }
-    Ok(docs)
 }
 
 pub fn init(ruby: &Ruby, native: RModule) -> Result<(), Error> {

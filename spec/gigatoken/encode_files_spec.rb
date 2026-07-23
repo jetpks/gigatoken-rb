@@ -78,6 +78,21 @@ RSpec.describe Gigatoken::Tokenizer do
       rows = tokenizer.encode_files([File.join(fixtures, "docs.txt")], separator: "<|endoftext|>")
       expect(rows).to eq(tokenizer.encode_files(source))
     end
+
+    it "gives identical rows for parallel: false and parallel: true with a text file" do
+      source = Gigatoken::Native::TextFileSource.new([File.join(fixtures, "docs.txt")], separator: "<|endoftext|>")
+      expect(tokenizer.encode_files(source, parallel: false)).to eq(tokenizer.encode_files(source, parallel: true))
+    end
+
+    it "gives identical rows for parallel: false and parallel: true with a jsonl file" do
+      source = Gigatoken::Native::JsonlFileSource.new([File.join(fixtures, "docs.jsonl")])
+      expect(tokenizer.encode_files(source, parallel: false)).to eq(tokenizer.encode_files(source, parallel: true))
+    end
+
+    it "gives identical rows for parallel: false and parallel: true with a parquet file" do
+      source = Gigatoken::Native::ParquetFileSource.new([File.join(fixtures, "docs.parquet")])
+      expect(tokenizer.encode_files(source, parallel: false)).to eq(tokenizer.encode_files(source, parallel: true))
+    end
   end
 
   describe "Native::JsonlFileSource" do

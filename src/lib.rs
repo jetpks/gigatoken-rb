@@ -10,15 +10,17 @@ pub mod pretokenize;
 #[cfg(test)]
 pub(crate) mod test_hub;
 pub(crate) mod token;
-pub use crate::batch::{WorkerPool, encode_docs_ragged, sp_encode_docs_ragged};
+pub use crate::batch::{
+    WorkerPool, encode_docs_ragged, encode_files_docs, encode_files_docs_serial,
+    sp_encode_docs_ragged,
+};
 pub use crate::bpe::Tokenizer;
 pub use crate::bpe::sentencepiece::EncodeState;
 pub mod load_tokenizer;
 
 #[cfg(feature = "python")]
 use crate::batch::{
-    encode_files_docs, encode_files_docs_serial, encode_into, sp_encode_docs_ragged_serial,
-    sp_encode_files_docs, sp_encode_files_docs_serial,
+    encode_into, sp_encode_docs_ragged_serial, sp_encode_files_docs, sp_encode_files_docs_serial,
 };
 #[cfg(feature = "python")]
 use crate::bindings::bridge::{
