@@ -9,7 +9,7 @@ Gem::Specification.new do |spec|
   spec.email = ["eric@ebj.dev"]
 
   spec.summary = "Tokenize your documents at GB/s"
-  spec.description = "Ruby bindings to the gigatoken core crate: fast BPE/SentencePiece tokenization."
+  spec.description = "Ruby bindings to the gigatoken core crate: BPE tokenization at GB/s."
   spec.homepage = "https://github.com/jetpks/gigatoken"
   spec.license = "MIT"
   spec.metadata = {
