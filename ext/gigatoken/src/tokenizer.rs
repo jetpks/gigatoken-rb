@@ -4,6 +4,7 @@
 //! numpy/awkward-array machinery that has no Ruby analog.
 
 use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::os::raw::c_long;
 
 use gigatoken_rs::load_tokenizer::hf::HfTokenizer;
@@ -14,9 +15,10 @@ use gigatoken_rs::{
 };
 use magnus::{
     Error, RArray, RClass, RHash, RModule, RString, Ruby, Value, function, method, prelude::*,
+    rb_sys::AsRawValue,
     scan_args::{get_kwargs, scan_args},
 };
-use rb_sys::{RSTRING_PTR, rb_str_set_len};
+use rb_sys::{RSTRING_PTR, rb_str_locktmp, rb_str_set_len, rb_str_unlocktmp};
 
 use crate::error::raise;
 use crate::gvl::without_gvl;
@@ -24,21 +26,6 @@ use crate::sources;
 
 pub(crate) fn binary_string(ruby: &Ruby, bytes: &[u8]) -> RString {
     ruby.enc_str_new(bytes, ruby.ascii8bit_encoding())
-}
-
-/// Reinterpret a magnus `RString` as the raw `rb_sys::VALUE` it wraps, for
-/// direct rb-sys calls magnus doesn't expose (`RSTRING_PTR`/`rb_str_set_len`
-/// below). Sound because every magnus value type — `RString` included — is
-/// `#[repr(transparent)]` down to the same `VALUE` rb-sys itself uses
-/// (verified against the installed magnus-0.8.2 source: `RString(NonZeroValue)`,
-/// `NonZeroValue(NonZeroUsize, ..)`, both `#[repr(transparent)]`); the
-/// compiler enforces the size match this transmute depends on. Magnus does
-/// expose this conversion directly (`magnus::rb_sys::AsRawValue`), but only
-/// behind its own `rb-sys` Cargo feature, which isn't enabled — turning it
-/// on would mean editing `ext/gigatoken/Cargo.toml`'s magnus dependency,
-/// which belongs to the other lane.
-fn raw_value(s: RString) -> rb_sys::VALUE {
-    unsafe { std::mem::transmute(s) }
 }
 
 /// Reinterpret a `Vec<u32>` as raw bytes in the host's native byte order.
@@ -103,6 +90,191 @@ pub(crate) fn packed_result(ruby: &Ruby, flat: Vec<u32>, lens: Vec<i64>) -> Resu
     finish_packed(ruby, string, lens)
 }
 
+/// One document's bytes as marshaled by `marshal_inputs`: either an owned
+/// copy, or a zero-copy borrow of a heap `RString`'s own buffer.
+enum DocSource {
+    Owned(Vec<u8>),
+    Borrowed { ptr: *const u8, len: usize },
+}
+
+/// Whether `value` (already confirmed to be a `T_STRING`) stores its bytes
+/// in a separate heap allocation (`RSTRING_NOEMBED` set) rather than inside
+/// the RVALUE itself. Heap buffers don't move under GC compaction (only the
+/// RVALUE header can); embedded ones live inside the header and do — so only
+/// a heap string's buffer is safe to borrow across a GVL release. Neither
+/// magnus nor rb-sys expose a public query for this; this reads `RBasic`'s
+/// `flags` field directly, the same technique rb-sys's own (private)
+/// stable-API string accessors use internally (`rstring_ptr` in
+/// rb-sys-0.9.128's `src/stable_api/ruby_4_0.rs`). Verified live against
+/// Ruby 4.0.6: Variable Width Allocation raises the embed threshold well
+/// past the classic ~23 bytes (bisected empirically: 512 B still embeds,
+/// 1024 B doesn't), so this flag — not a size heuristic — is the only
+/// reliable test.
+fn is_heap_rstring(value: rb_sys::VALUE) -> bool {
+    // SAFETY: every Ruby object's memory begins with an `RBasic` (flags,
+    // klass) header regardless of its concrete type's trailing fields, and
+    // `value` is a live `T_STRING` VALUE for the duration of this
+    // synchronous, GVL-held call.
+    let flags = unsafe { (*(value as *const rb_sys::RBasic)).flags };
+    flags & (rb_sys::ruby_rstring_flags::RSTRING_NOEMBED as rb_sys::VALUE) != 0
+}
+
+/// Lift `rstr`'s current buffer out as a `DocSource::Borrowed`. Caller must
+/// have already confirmed `rstr` is a heap `RString` that is either frozen
+/// (permanently immutable) or successfully locked via `rb_str_locktmp` (any
+/// mutation attempt for as long as the lock holds raises rather than
+/// touching the buffer) — either guard keeps the buffer stable and
+/// unmutated for as long as the borrow lives, decoupled from any Rust
+/// borrow of `rstr` itself, across the `without_gvl` release that follows.
+fn borrowed_doc(rstr: RString) -> DocSource {
+    // SAFETY: see above — the buffer neither moves nor mutates while the
+    // caller's guard (frozen, or this call's lock) holds.
+    let bytes = unsafe { rstr.as_slice() };
+    DocSource::Borrowed {
+        ptr: bytes.as_ptr(),
+        len: bytes.len(),
+    }
+}
+
+/// Marshaled batch inputs, ready for `as_slices` to hand to the core encode.
+/// Dropping this unlocks every string `marshal_inputs` locked, by re-reading
+/// the *current* value out of `inputs` at each locked index rather than
+/// reusing any `VALUE` captured before a possible GVL release: GC compaction
+/// can move a locked heap string's RVALUE header while the GVL is released
+/// (only its separate, malloc'd byte buffer is guaranteed to stay put), and
+/// `inputs` — a precisely-marked Ruby Array — is the only reference that
+/// stays correct across that.
+struct InputDocs {
+    inputs: RArray,
+    should_unlock: Vec<bool>,
+    docs: Vec<DocSource>,
+}
+
+impl InputDocs {
+    fn as_slices(&self) -> Vec<&[u8]> {
+        self.docs
+            .iter()
+            .map(|doc| match *doc {
+                DocSource::Owned(ref bytes) => bytes.as_slice(),
+                // SAFETY: see `borrowed_doc` and this struct's own doc
+                // comment — the buffer is stable and unmutated for as long
+                // as `self` (and thus its lock, if any) is alive, which
+                // outlives every use of the slices this returns.
+                DocSource::Borrowed { ptr, len } => unsafe { std::slice::from_raw_parts(ptr, len) },
+            })
+            .collect()
+    }
+}
+
+impl Drop for InputDocs {
+    fn drop(&mut self) {
+        if !self.should_unlock.iter().any(|&locked| locked) {
+            return;
+        }
+        // SAFETY: `inputs.as_slice()` is read fresh here (see this struct's
+        // doc comment for why a value captured earlier isn't safe to reuse
+        // for this), and only for the duration of this synchronous,
+        // GVL-held call.
+        let current = unsafe { self.inputs.as_slice() };
+        let mut unlocked = HashSet::new();
+        for (i, &locked) in self.should_unlock.iter().enumerate() {
+            if !locked || i >= current.len() {
+                continue;
+            }
+            let Some(rstr) = RString::from_value(current[i]) else {
+                continue;
+            };
+            let raw = rstr.as_raw();
+            if unlocked.insert(raw) {
+                // A failure here would mean the string was already
+                // unlocked out from under us — not something we can
+                // recover from in `drop`, and not expected to happen since
+                // we're the ones who locked it and dedup by `raw` above.
+                let _ = magnus::rb_sys::protect(|| unsafe { rb_str_unlocktmp(raw) });
+            }
+        }
+    }
+}
+
+/// Marshal `inputs` (an Array of Strings, or objects converting to one via
+/// `to_str`) into `InputDocs`, borrowing zero-copy wherever it's sound
+/// instead of copying:
+///
+/// - a heap (non-embedded) `RString` that's frozen is borrowed unlocked —
+///   its immutability is itself the guard, and `rb_str_locktmp` isn't legal
+///   on a frozen string in the first place (verified live: it raises
+///   `FrozenError`);
+/// - a heap `RString` that isn't frozen (including a "chilled" literal —
+///   verified live on Ruby 4.0.6: it reports `frozen? == false` and
+///   `rb_str_locktmp` succeeds on it exactly like any other mutable string)
+///   is borrowed under a dedup'd, `protect`-wrapped `rb_str_locktmp`; if the
+///   lock is refused (already locked by other code), it's copied instead —
+///   never borrow a string whose lock isn't held;
+/// - an embedded `RString`, or a `to_str` conversion result (a new object
+///   reachable only from this call, never borrowable), is always copied.
+///
+/// All `to_str` conversions — the only step that can run arbitrary Ruby
+/// code and allocate — happen before any locking starts; the lock-and-
+/// pointer pass that follows performs no Ruby allocation, so no GC
+/// compaction can happen between a string's first lock and this returning.
+fn marshal_inputs(inputs: RArray) -> Result<InputDocs, Error> {
+    let len = inputs.len();
+
+    enum Classified {
+        Done(DocSource),
+        NeedsLock(RString),
+    }
+
+    let mut classified = Vec::with_capacity(len);
+    // SAFETY: values are read (checked-converted to `RString`, or converted
+    // via `to_str` into an owned copy) before anything else runs — no
+    // locking has happened yet at this point.
+    for &value in unsafe { inputs.as_slice() }.iter() {
+        let item = match RString::from_value(value) {
+            Some(rstr) if !is_heap_rstring(rstr.as_raw()) => {
+                Classified::Done(DocSource::Owned(unsafe { rstr.as_slice() }.to_vec()))
+            }
+            Some(rstr) if rstr.is_frozen() => Classified::Done(borrowed_doc(rstr)),
+            Some(rstr) => Classified::NeedsLock(rstr),
+            None => {
+                let converted = RString::try_convert(value)?;
+                Classified::Done(DocSource::Owned(unsafe { converted.as_slice() }.to_vec()))
+            }
+        };
+        classified.push(item);
+    }
+
+    let mut should_unlock = vec![false; len];
+    let mut docs = Vec::with_capacity(len);
+    let mut lock_cache: HashMap<rb_sys::VALUE, bool> = HashMap::new();
+    for (i, item) in classified.into_iter().enumerate() {
+        let source = match item {
+            Classified::Done(source) => source,
+            Classified::NeedsLock(rstr) => {
+                let raw = rstr.as_raw();
+                let locked = *lock_cache
+                    .entry(raw)
+                    .or_insert_with(|| magnus::rb_sys::protect(|| unsafe { rb_str_locktmp(raw) }).is_ok());
+                if locked {
+                    should_unlock[i] = true;
+                    borrowed_doc(rstr)
+                } else {
+                    // SAFETY: read-only; the lock attempt failing doesn't
+                    // change anything about the buffer's validity here.
+                    DocSource::Owned(unsafe { rstr.as_slice() }.to_vec())
+                }
+            }
+        };
+        docs.push(source);
+    }
+
+    Ok(InputDocs {
+        inputs,
+        should_unlock,
+        docs,
+    })
+}
+
 #[magnus::wrap(class = "Gigatoken::Native::BPETokenizer", free_immediately, size)]
 pub struct BPETokenizer {
     tokenizer: RefCell<Tokenizer>,
@@ -150,17 +322,13 @@ impl BPETokenizer {
     }
 
     /// Encode a batch on the core worker pool, with the GVL released for the
-    /// parallel encode itself (see `gvl::without_gvl`). Every input string is
-    /// copied into an owned buffer before release: nothing Ruby-managed may
-    /// be touched once the GVL is gone.
+    /// parallel encode itself (see `gvl::without_gvl`). Each input string is
+    /// borrowed zero-copy where `marshal_inputs` finds it sound to, and
+    /// copied into an owned buffer otherwise; either way, only raw byte
+    /// slices — never a Ruby `VALUE` — are captured once the GVL is gone.
     fn encode_batch_ragged(rb_self: &Self, inputs: RArray) -> Result<(Vec<u32>, Vec<i64>), Error> {
-        // SAFETY: values are read (checked-converted to `RString`, then
-        // copied into owned buffers below) before anything else runs.
-        let docs: Vec<Vec<u8>> = unsafe { inputs.as_slice() }
-            .iter()
-            .map(|&v| RString::try_convert(v).map(|s| unsafe { s.as_slice() }.to_vec()))
-            .collect::<Result<_, _>>()?;
-        let doc_slices: Vec<&[u8]> = docs.iter().map(Vec::as_slice).collect();
+        let marshaled = marshal_inputs(inputs)?;
+        let doc_slices = marshaled.as_slices();
         let tokenizer = rb_self.tokenizer.borrow();
         let tokenizer: &Tokenizer = &tokenizer;
         let workers = &rb_self.workers;
@@ -191,13 +359,8 @@ impl BPETokenizer {
     /// string's buffer). Falls back to `packed_result`'s copy path on the
     /// same NFC-expansion overflow escape `encode_docs_into` documents.
     fn encode_batch_packed(ruby: &Ruby, rb_self: &Self, inputs: RArray) -> Result<RArray, Error> {
-        // SAFETY: values are read (checked-converted to `RString`, then
-        // copied into owned buffers below) before anything else runs.
-        let docs: Vec<Vec<u8>> = unsafe { inputs.as_slice() }
-            .iter()
-            .map(|&v| RString::try_convert(v).map(|s| unsafe { s.as_slice() }.to_vec()))
-            .collect::<Result<_, _>>()?;
-        let doc_slices: Vec<&[u8]> = docs.iter().map(Vec::as_slice).collect();
+        let marshaled = marshal_inputs(inputs)?;
+        let doc_slices = marshaled.as_slices();
         let total_bytes: usize = doc_slices.iter().map(|d| d.len()).sum();
 
         // A token consumes >= 1 input byte, so total_bytes tokens (4 bytes
@@ -210,7 +373,7 @@ impl BPETokenizer {
         // of capacity and is not yet exposed to Ruby (not returned, not
         // frozen, not wrapped), so nothing else can read or write through it
         // concurrently.
-        let ptr = unsafe { RSTRING_PTR(raw_value(string)) as *mut u32 };
+        let ptr = unsafe { RSTRING_PTR(string.as_raw()) as *mut u32 };
         // SAFETY: `ptr` is valid for `total_bytes` disjoint u32 writes for
         // the duration of the gather below (see the allocation above).
         let dest = unsafe { GatherBuf::new(ptr, total_bytes) };
@@ -225,7 +388,7 @@ impl BPETokenizer {
                 // written.
                 unsafe {
                     rb_str_set_len(
-                        raw_value(string),
+                        string.as_raw(),
                         (total_tokens * std::mem::size_of::<u32>()) as c_long,
                     );
                 }

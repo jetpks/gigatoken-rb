@@ -28,11 +28,14 @@
 //! instead of leaving it to call-site audit. Every current `without_gvl`
 //! call site (`tokenizer.rs`'s `encode_batch`/`encode_files`) already shares
 //! its `&Tokenizer`/`&WorkerPool` across `rayon` worker threads inside
-//! `encode_docs_ragged`, and copies every input `RString` into an owned
-//! `Vec<u8>` before calling `without_gvl` at all — nothing captured touches a
-//! Ruby `VALUE` or thread-local state, so running one OS thread over instead
-//! of another changes nothing about its safety, and the types involved
-//! satisfy `Send`/`Sync` on their own merits.
+//! `encode_docs_ragged`. The BPE batch paths' input marshal (`tokenizer.rs`'s
+//! `marshal_inputs`) borrows heap `RString` buffers zero-copy where it can
+//! (locked via `rb_str_locktmp`, or unlocked when the string is frozen) and
+//! falls back to an owned `Vec<u8>` copy otherwise — either way, only raw
+//! byte slices are ever captured by the closure passed here, never a Ruby
+//! `VALUE` or thread-local state, so running one OS thread over instead of
+//! another changes nothing about its safety, and the types involved satisfy
+//! `Send`/`Sync` on their own merits.
 
 use std::any::Any;
 use std::ffi::c_void;

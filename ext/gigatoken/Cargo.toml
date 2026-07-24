@@ -7,7 +7,10 @@ edition = "2021"
 crate-type = ["cdylib"]
 
 [dependencies]
-magnus = "0.8"
+# `rb-sys`: lets us reach `magnus::rb_sys::{AsRawValue, protect}` for the raw
+# rb-sys VALUE conversions and locktmp calls this crate needs directly (see
+# tokenizer.rs) that magnus's safe API doesn't expose.
+magnus = { version = "0.8", features = ["rb-sys"] }
 gigatoken = { path = "../..", default-features = false }
 rayon = "1.11"
 mimalloc = { version = "0.1", default-features = false }
