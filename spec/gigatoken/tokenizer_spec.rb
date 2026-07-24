@@ -110,4 +110,62 @@ RSpec.describe Gigatoken::Tokenizer do
       expect { described_class.load("../not a real path/nor a repo id") }.to raise_error(Gigatoken::Error)
     end
   end
+
+  describe "zero-copy input marshal" do
+    # Ruby 4.0.6's Variable Width Allocation embeds strings up to several
+    # hundred bytes (verified live: 512 B embeds, 1024 B doesn't) — well past
+    # strings this short, forcing the embedded (always-copy) path.
+    let(:embedded) { "hi" }
+    # Comfortably over the embed threshold, so it's heap-allocated and
+    # eligible for the zero-copy borrow path. `* n` always returns a fresh,
+    # unfrozen string regardless of this file's frozen_string_literal magic
+    # comment.
+    let(:heap) { "gigatoken zero copy borrow input " * 200 }
+    let(:frozen) { ("gigatoken zero copy borrow frozen input " * 100).freeze }
+
+    it "encodes a batch matrix of embedded, heap, frozen, duplicate, shared-substring, and to_str inputs identically to per-doc encode" do
+      to_str_doc = Class.new do
+        def to_str
+          "convert me please"
+        end
+      end.new
+      substring = heap[100, 1200]
+      texts = [embedded, heap, frozen, heap, substring, to_str_doc]
+      expected = texts.map { |t| tokenizer.encode(t) }
+
+      expect(tokenizer.encode_batch(texts)).to eq(expected)
+
+      packed = tokenizer.encode_batch(texts, packed: true)
+      expect(packed.to_a).to eq(expected)
+    end
+
+    it "leaves a heap input byte-identical, unfrozen, and immediately mutable after a ragged batch" do
+      doc = heap
+      original = doc.dup
+
+      tokenizer.encode_batch([doc])
+
+      expect(doc).to eq(original)
+      expect(doc).not_to be_frozen
+      expect { doc << "!" }.not_to raise_error
+    end
+
+    it "leaves a heap input byte-identical, unfrozen, and immediately mutable after a packed batch" do
+      doc = heap
+      original = doc.dup
+
+      tokenizer.encode_batch([doc], packed: true)
+
+      expect(doc).to eq(original)
+      expect(doc).not_to be_frozen
+      expect { doc << "!" }.not_to raise_error
+    end
+
+    it "raises TypeError for a non-string element and leaves an earlier heap string mutable" do
+      doc = heap
+
+      expect { tokenizer.encode_batch([doc, 42]) }.to raise_error(TypeError)
+      expect { doc << "!" }.not_to raise_error
+    end
+  end
 end
