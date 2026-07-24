@@ -120,22 +120,20 @@ gigatoken validate openai-community/gpt2 owt_train.txt --doc-separator "<|endoft
 
 ## Benchmarks
 
-> **Every number below is a prediction, not a measurement.** They're projected from recorded intermediate benchmark runs on the reference box described below — three of the six subjects were measured at a smaller corpus size and scaled up (flagged per row). This table gets re-measured end to end and replaced with final values at release.
+Measured 2026-07-23 on a Mac Studio M4 Max (16 cores, 128 GB RAM, macOS 26) against an OpenWebText reconstruction (`owt_train.txt`: 11,920,511,061 bytes, 2,393,319 docs, `<|endoftext|>`-separated — within 0.015% of upstream's own recorded corpus), GPT-2 tokenizer (`r50k_base`, confirmed empirically equivalent to `gpt2`). Two payload sizes, because the comparison libraries run 100–2,000x slower than gigatoken and a full-corpus pass would take them hours per run: the two gigatokens are measured on the full 11.9 GB (one warm process — a discarded warmup, then the median of three timed runs), the other four on a 1.35 GB slice of the same corpus (three fresh processes each, median). Both gigatoken builds run with the mimalloc global allocator (this gem ships it; the Python wheel was rebuilt with it) and `MIMALLOC_PURGE_DELAY=-1` — the workaround for a macOS 26 allocator (xzm) crash on multi-GB frees that otherwise kills either implementation above ~1.4 GB of input.
 
-**Protocol being predicted:** the OpenWebText reconstruction corpus at full size, 11.9 GB (`owt_train.txt`: 11,920,511,061 bytes, 2,393,319 docs, `<|endoftext|>`-separated — within 0.015% of upstream's own recorded corpus size), tokenized with GPT-2's tokenizer (`r50k_base`, confirmed empirically equivalent to `gpt2`). One warm process per subject: a discarded warmup run followed by a median over at least three timed runs. Reference box: `studio.slush.systems`, a Mac Studio M4 Max, 16 cores, 128 GB RAM, macOS 26. Both gigatoken builds (Ruby and Python) run with the mimalloc global allocator and `MIMALLOC_PURGE_DELAY=-1` set — that env var works around a mimalloc purge stall seen on macOS 26 that's believed related to `xzm`; no link is given here, since writing this required no network access and nothing was available to verify a citation against.
+| Subject | Corpus | MB/s (median) | Notes |
+|---|---|---|---|
+| **gigatoken** (this gem, Ruby) | 11.9 GB | **12,278** | best 12,662; GVL released during the encode, the work runs on the engine's rayon pool. Batch API: `encode_batch`/`encode_files`, plus the packed `IO::Buffer` path. On the 1.35 GB slice: 10,519. |
+| **gigatoken** (Python wheel — upstream anchor) | 11.9 GB | 7,400 | best 7,510; same rayon core underneath. Batch API: `encode_batch`. |
+| tokenizers gem (ankane) | 1.35 GB | 10.0 | `encode_batch_fast`, parallel across documents. |
+| tiktoken_ruby | 1.35 GB | 30.7 | single-threaded — the gem has no batch API, only a per-string `encode`. |
+| tokenizers (Python, Hugging Face) | 1.35 GB | 5.6 | `encode_batch_fast`, parallel across documents; repeats ranged 4.9–6.4 (upstream's own M4 Max table records 6.9). |
+| tiktoken (Python) | 1.35 GB | 69.7 | multi-threaded batch encode across documents. |
 
-| Subject | MB/s | Notes |
-|---|---|---|
-| **gigatoken** (this gem, Ruby) | ~12,300 *(predicted)* | GVL released during the encode; the actual work runs on the engine's rayon pool. Batch API: `encode_batch`/`encode_files`, plus the packed `IO::Buffer` path. Measured directly at this protocol: 12,280 MB/s median, 12,559 best. |
-| **gigatoken** (Python wheel — upstream anchor) | ~7,500 *(predicted)* | Same rayon core underneath. Batch API: `encode_batch`. Measured directly at this protocol: 7,495 MB/s best. |
-| tokenizers gem (ankane) | ~9–10 *(predicted)* | Single fresh process in the recorded run. Not yet measured at the 11.9 GB protocol — this is a scale-up from 9.6 MB/s recorded at 1.35 GB. |
-| tiktoken_ruby | ~31 *(predicted)* | Single-threaded — the gem has no batch API, only a per-string `encode`. Measured directly at this protocol: 31.03 MB/s, consistent with 31.2 MB/s recorded at 1.35 GB. |
-| tokenizers (Python, Hugging Face) | ~10 *(predicted)* | Single process in the recorded run, no batch API exercised. Not yet measured at the 11.9 GB protocol — scaled up from 10.1 MB/s recorded at 1.35 GB. |
-| tiktoken (Python) | ~55–60 *(predicted)* | 16 threads, batch encode. Not yet measured at the 11.9 GB protocol — scaled up from 59.6 MB/s recorded at 1.35 GB. |
+**Token counts match.** gigatoken — Ruby or Python, same engine — counts 2,703,638,357 tokens on the full corpus and 306,287,417 on the slice, every run. The other four libraries all count 306,017,245 on the slice: gigatoken's count minus exactly one `<|endoftext|>` token per document boundary (gigatoken encodes the separators; the others receive pre-split documents). Same underlying tokenization, wildly different throughput.
 
-**Token counts match.** gigatoken — Ruby or Python, same engine — counts 2,703,638,357 tokens on the full corpus, every run. The other four libraries agree exactly with each other at 2,701,245,039 tokens: gigatoken's count minus 2,393,318 separator tokens. Same underlying tokenization, wildly different throughput.
-
-**Ruby-vs-Ruby, concretely:** at the 1.35 GB scale this gem runs roughly 564x the tokenizers gem's throughput and roughly 175x tiktoken_ruby's.
+**Ruby-vs-Ruby, concretely:** on the same 1.35 GB slice this gem runs roughly 1,050x the tokenizers gem's throughput and roughly 340x tiktoken_ruby's.
 
 Two things worth knowing before trusting these numbers on your own workload:
 - The zero-copy input path only kicks in for documents whose bytes live in a heap allocation rather than being embedded in the Ruby object header itself. Under Ruby 4.0.6's Variable Width Allocation, that embed threshold falls somewhere between 512 B and 1 KB (512 B still embeds; 1024 B doesn't) — documents under roughly a kilobyte take a copy path instead.
