@@ -507,13 +507,10 @@ impl Committer {
         unsafe {
             flat.set_len(total);
         }
-        // Return the unused reservation. Large allocations trim in place on
-        // the mainstream allocators (macOS libmalloc large entries, glibc
-        // mmap'd chunks via mremap): pointer-stable, no copy, and the
-        // untouched tail pages were never faulted so there is nothing to
-        // tear down. An allocator that copies instead only costs one
-        // memcpy; correctness is unaffected.
-        flat.shrink_to_fit();
+        // Deliberately left over-reserved: not every allocator trims a
+        // large allocation in place, and one that copies instead turns this
+        // into a full-buffer memcpy. The unfaulted tail beyond `total` is
+        // virtual address space only and is freed with the Vec regardless.
         Some(flat)
     }
 }
