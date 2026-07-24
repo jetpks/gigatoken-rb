@@ -14,6 +14,7 @@ Gem::Specification.new do |spec|
   spec.license = "MIT"
   spec.metadata = {
     "bug_tracker_uri" => "https://github.com/jetpks/gigatoken-rb/issues",
+    "changelog_uri" => "https://github.com/jetpks/gigatoken-rb/blob/main/CHANGELOG.md",
     "homepage_uri" => "https://github.com/jetpks/gigatoken-rb",
     "source_code_uri" => "https://github.com/jetpks/gigatoken-rb"
   }
