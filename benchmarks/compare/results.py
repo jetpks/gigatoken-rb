@@ -242,7 +242,7 @@ def fmt_ratio(giga: float | None, other: float | None) -> str:
     return f"{ratio:,.0f}×" if ratio >= 10 else f"{ratio:.1f}×"
 
 
-def render_table(cpu: str, dataset: str, tokenizers: dict) -> str | None:
+def render_table(cpu: str, dataset: str, tokenizers: dict, open_by_default: bool = False) -> str | None:
     rows = []
     corpus_bytes = 0
     for repo, by_dataset in tokenizers.items():
@@ -258,7 +258,7 @@ def render_table(cpu: str, dataset: str, tokenizers: dict) -> str | None:
 
     size = f" ({corpus_bytes / 1e9:.1f} GB)" if corpus_bytes else ""
     lines = [
-        "<details>",
+        "<details open>" if open_by_default else "<details>",
         f"<summary><b>Encoding throughput on {dataset}{size} — {CPU_DISPLAY.get(cpu, cpu)}</b></summary>",
         "",
         "| Tokenizer | gigatoken | HF tokenizers | tiktoken | vs HF | vs tiktoken |",
@@ -313,7 +313,7 @@ def cmd_render(args) -> None:
     for cpu, tokenizers in sorted(results.items(), key=lambda kv: cpu_rank(kv[0])):
         datasets = sorted({ds for by_dataset in tokenizers.values() for ds in by_dataset})
         for dataset in datasets:
-            table = render_table(cpu, dataset, tokenizers)
+            table = render_table(cpu, dataset, tokenizers, open_by_default=not tables)
             if table is not None:
                 tables.append(table)
     tabled_repos = {
