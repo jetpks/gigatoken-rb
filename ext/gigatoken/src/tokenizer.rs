@@ -15,10 +15,10 @@ use gigatoken_rs::{
 };
 use magnus::{
     Error, RArray, RClass, RHash, RModule, RString, Ruby, Value, function, method, prelude::*,
-    rb_sys::AsRawValue,
+    rb_sys::{AsRawValue, FromRawValue},
     scan_args::{get_kwargs, scan_args},
 };
-use rb_sys::{RSTRING_PTR, rb_str_locktmp, rb_str_set_len, rb_str_unlocktmp};
+use rb_sys::{RSTRING_PTR, rb_ary_dup, rb_str_locktmp, rb_str_set_len, rb_str_unlocktmp};
 
 use crate::error::raise;
 use crate::gvl::without_gvl;
@@ -137,15 +137,21 @@ fn borrowed_doc(rstr: RString) -> DocSource {
 }
 
 /// Marshaled batch inputs, ready for `as_slices` to hand to the core encode.
-/// Dropping this unlocks every string `marshal_inputs` locked, by re-reading
-/// the *current* value out of `inputs` at each locked index rather than
-/// reusing any `VALUE` captured before a possible GVL release: GC compaction
-/// can move a locked heap string's RVALUE header while the GVL is released
-/// (only its separate, malloc'd byte buffer is guaranteed to stay put), and
-/// `inputs` — a precisely-marked Ruby Array — is the only reference that
-/// stays correct across that.
+/// `snapshot` is the `rb_ary_dup` copy `marshal_inputs` takes of the
+/// caller's input Array at entry (see its doc comment) — classification,
+/// `to_str` conversion, locking, and this Drop's unlock all read
+/// exclusively from `snapshot`'s slots, never the caller's original array.
+/// Dropping this unlocks every string `marshal_inputs` locked, by
+/// re-reading the *current* value out of `snapshot` at each locked index
+/// rather than reusing any `VALUE` captured before a possible GVL release:
+/// GC compaction can move a locked heap string's RVALUE header while the
+/// GVL is released (only its separate, malloc'd byte buffer is guaranteed
+/// to stay put), and `snapshot` — a precisely-marked Ruby Array, kept alive
+/// and pinned in place by conservative scanning of this struct's stack
+/// frame for the whole call — is the only reference that stays correct
+/// across that.
 struct InputDocs {
-    inputs: RArray,
+    snapshot: RArray,
     should_unlock: Vec<bool>,
     docs: Vec<DocSource>,
 }
@@ -171,17 +177,15 @@ impl Drop for InputDocs {
         if !self.should_unlock.iter().any(|&locked| locked) {
             return;
         }
-        // SAFETY: `inputs.as_slice()` is read fresh here (see this struct's
-        // doc comment for why a value captured earlier isn't safe to reuse
-        // for this), and only for the duration of this synchronous,
-        // GVL-held call.
-        let current = unsafe { self.inputs.as_slice() };
         let mut unlocked = HashSet::new();
         for (i, &locked) in self.should_unlock.iter().enumerate() {
-            if !locked || i >= current.len() {
+            if !locked {
                 continue;
             }
-            let Some(rstr) = RString::from_value(current[i]) else {
+            // Re-read this slot fresh (see this struct's doc comment for
+            // why a value captured earlier isn't safe to reuse here).
+            let value = snapshot_entry(self.snapshot, i);
+            let Some(rstr) = RString::from_value(value) else {
                 continue;
             };
             let raw = rstr.as_raw();
@@ -196,9 +200,51 @@ impl Drop for InputDocs {
     }
 }
 
+/// Read the `Value` currently at `index` in `snapshot`, fresh — via the
+/// bounds-checked `rb_ary_entry` C accessor, never by reusing a `Value` read
+/// before a Ruby-code-running call (`to_str` conversion, or any other call
+/// that can allocate and trigger GC compaction), since compaction rewrites a
+/// moved element's slot in place. `Value`'s own `TryConvert` is an
+/// infallible identity conversion, so this can't fail.
+fn snapshot_entry(snapshot: RArray, index: usize) -> Value {
+    snapshot.entry(index as isize).expect("Value's TryConvert is infallible")
+}
+
 /// Marshal `inputs` (an Array of Strings, or objects converting to one via
 /// `to_str`) into `InputDocs`, borrowing zero-copy wherever it's sound
-/// instead of copying:
+/// instead of copying.
+///
+/// The first thing this does is `rb_ary_dup` `inputs` into a snapshot: a
+/// C-level shallow copy of the array's slots that runs no user code (not
+/// even `initialize_copy`). From that point on, every pass below —
+/// classification, `to_str` conversion, locking, and `InputDocs`'s Drop —
+/// reads exclusively from the snapshot's slots; `inputs` itself is never
+/// read again. This closes three hazards a direct-`inputs` version has (I19
+/// Verdict): (1) a `to_str` conversion for one element can run arbitrary
+/// Ruby code, including code that mutates or replaces later elements of the
+/// caller's array out from under an in-progress classify/lock pass; (2)
+/// while the GVL is released for the encode itself, another Ruby thread can
+/// replace or clear the caller's slots, making a borrowed string
+/// collectible mid-encode; (3) holding one Rust borrow of the caller's
+/// array buffer across a `to_str` call is unsound if that call resizes the
+/// array. None of these can reach the snapshot: no Ruby code holds a
+/// reference to it (so nothing can mutate, resize, or replace its slots
+/// from Ruby), and the snapshot `RArray` local stays alive as a
+/// conservatively-scanned stack root the whole call through — via
+/// `InputDocs::snapshot`, kept in the calling frame including across the
+/// `without_gvl` window — which is also, incidentally, why compaction never
+/// relocates the snapshot array itself. The snapshot's *slots* remain
+/// ordinary, precisely-marked Ruby state, though, and compaction does
+/// rewrite a slot in place when that element's RVALUE moves — so every pass
+/// below re-reads a slot fresh (`snapshot_entry`) rather than reusing a
+/// `Value` obtained before a Ruby-code-running call, and never holds a
+/// `snapshot.as_slice()` borrow across one.
+///
+/// One consequence is now a pinned public contract: `encode_batch`'s result
+/// reflects the input array as it was *at this call's entry*. A
+/// pathological `to_str` that mutates the caller's array mid-marshal can no
+/// longer change which documents get encoded — the caller's own mutations
+/// remain visible to the caller afterwards, just no longer to this encode.
 ///
 /// - a heap (non-embedded) `RString` that's frozen is borrowed unlocked —
 ///   its immutability is itself the guard, and `rb_str_locktmp` isn't legal
@@ -213,29 +259,43 @@ impl Drop for InputDocs {
 /// - an embedded `RString`, or a `to_str` conversion result (a new object
 ///   reachable only from this call, never borrowable), is always copied.
 ///
-/// All `to_str` conversions — the only step that can run arbitrary Ruby
-/// code and allocate — happen before any locking starts; the lock-and-
-/// pointer pass that follows performs no Ruby allocation, so no GC
-/// compaction can happen between a string's first lock and this returning.
+/// A first pass classifies every slot, doing every `to_str` conversion (the
+/// only step that can run arbitrary Ruby code and allocate) along the way;
+/// a slot that's already a heap, non-frozen `RString` is left `NeedsLock`
+/// rather than resolved immediately, since a *later* slot's `to_str` call
+/// can still run before this pass finishes. That first pass's `NeedsLock`
+/// verdict is a hint, not truth, by the time the second (lock) pass gets to
+/// it: a later `to_str` conversion can freeze or mutate the string in the
+/// meantime (e.g. `clear` can re-embed a heap string), so the lock pass
+/// re-reads and re-classifies each `NeedsLock` index's snapshot slot from
+/// scratch instead of trusting the first pass. Only indices are carried
+/// between the two passes — never a bare `RString`/`Value` — since a
+/// `Value` read before a `to_str` call can go stale under compaction before
+/// the lock pass gets to it.
 fn marshal_inputs(inputs: RArray) -> Result<InputDocs, Error> {
-    let len = inputs.len();
+    // SAFETY: `inputs.as_raw()` is a live, array-typed VALUE for the
+    // duration of this synchronous, GVL-held call; `rb_ary_dup` only reads
+    // it and allocates a fresh Array via a C-level shallow slot copy that
+    // runs no user code, so nothing here can run arbitrary Ruby code or
+    // raise. Its result is always an Array, per the Ruby C API.
+    let snapshot = RArray::from_value(unsafe { Value::from_raw(rb_ary_dup(inputs.as_raw())) })
+        .expect("rb_ary_dup's result is always an Array");
+    let len = snapshot.len();
 
     enum Classified {
         Done(DocSource),
-        NeedsLock(RString),
+        NeedsLock,
     }
 
     let mut classified = Vec::with_capacity(len);
-    // SAFETY: values are read (checked-converted to `RString`, or converted
-    // via `to_str` into an owned copy) before anything else runs — no
-    // locking has happened yet at this point.
-    for &value in unsafe { inputs.as_slice() }.iter() {
+    for i in 0..len {
+        let value = snapshot_entry(snapshot, i);
         let item = match RString::from_value(value) {
             Some(rstr) if !is_heap_rstring(rstr.as_raw()) => {
                 Classified::Done(DocSource::Owned(unsafe { rstr.as_slice() }.to_vec()))
             }
             Some(rstr) if rstr.is_frozen() => Classified::Done(borrowed_doc(rstr)),
-            Some(rstr) => Classified::NeedsLock(rstr),
+            Some(_) => Classified::NeedsLock,
             None => {
                 let converted = RString::try_convert(value)?;
                 Classified::Done(DocSource::Owned(unsafe { converted.as_slice() }.to_vec()))
@@ -250,18 +310,33 @@ fn marshal_inputs(inputs: RArray) -> Result<InputDocs, Error> {
     for (i, item) in classified.into_iter().enumerate() {
         let source = match item {
             Classified::Done(source) => source,
-            Classified::NeedsLock(rstr) => {
-                let raw = rstr.as_raw();
-                let locked = *lock_cache
-                    .entry(raw)
-                    .or_insert_with(|| magnus::rb_sys::protect(|| unsafe { rb_str_locktmp(raw) }).is_ok());
-                if locked {
-                    should_unlock[i] = true;
+            Classified::NeedsLock => {
+                // Re-read and re-classify: a `to_str` conversion that ran
+                // after this index was first classified may have frozen or
+                // mutated this exact string (see this fn's doc comment).
+                let value = snapshot_entry(snapshot, i);
+                let rstr = RString::from_value(value).expect(
+                    "this slot classified as a String in the first pass, and nothing but this \
+                     call's Rust frame holds a reference to the snapshot to replace it",
+                );
+                if rstr.is_frozen() {
                     borrowed_doc(rstr)
-                } else {
-                    // SAFETY: read-only; the lock attempt failing doesn't
-                    // change anything about the buffer's validity here.
+                } else if !is_heap_rstring(rstr.as_raw()) {
                     DocSource::Owned(unsafe { rstr.as_slice() }.to_vec())
+                } else {
+                    let raw = rstr.as_raw();
+                    let locked = *lock_cache
+                        .entry(raw)
+                        .or_insert_with(|| magnus::rb_sys::protect(|| unsafe { rb_str_locktmp(raw) }).is_ok());
+                    if locked {
+                        should_unlock[i] = true;
+                        borrowed_doc(rstr)
+                    } else {
+                        // SAFETY: read-only; the lock attempt failing
+                        // doesn't change anything about the buffer's
+                        // validity here.
+                        DocSource::Owned(unsafe { rstr.as_slice() }.to_vec())
+                    }
                 }
             }
         };
@@ -269,7 +344,7 @@ fn marshal_inputs(inputs: RArray) -> Result<InputDocs, Error> {
     }
 
     Ok(InputDocs {
-        inputs,
+        snapshot,
         should_unlock,
         docs,
     })

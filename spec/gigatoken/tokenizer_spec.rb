@@ -167,5 +167,54 @@ RSpec.describe Gigatoken::Tokenizer do
       expect { tokenizer.encode_batch([doc, 42]) }.to raise_error(TypeError)
       expect { doc << "!" }.not_to raise_error
     end
+
+    it "encodes to_str-convertible objects positioned before and after a heap string identically to per-doc encode, ragged and packed" do
+      convert = lambda do |text|
+        obj = Object.new
+        obj.define_singleton_method(:to_str) { text }
+        obj
+      end
+      texts = [convert.call("before the heap string"), heap, convert.call("after the heap string")]
+      expected = texts.map { |t| tokenizer.encode(t) }
+
+      expect(tokenizer.encode_batch(texts)).to eq(expected)
+
+      packed = tokenizer.encode_batch(texts, packed: true)
+      expect(packed.to_a).to eq(expected)
+    end
+
+    it "encodes the array as passed at entry when a to_str mutates the caller's array mid-marshal, leaving the caller's mutations visible and the earlier heap string immediately mutable after" do
+      long1 = heap
+      long2 = "gigatoken zero copy borrow input, second document " * 200
+      docs = nil
+      mutator = Object.new
+      mutator.define_singleton_method(:to_str) do
+        docs.pop
+        docs[0] = "swapped"
+        "mutant doc"
+      end
+      expected = [tokenizer.encode(long1), tokenizer.encode("mutant doc"), tokenizer.encode(long2)]
+      docs = [long1, mutator, long2]
+
+      expect(tokenizer.encode_batch(docs)).to eq(expected)
+
+      expect(docs.length).to eq(2)
+      expect(docs[0]).to eq("swapped")
+      expect { long1 << "!" }.not_to raise_error
+    end
+
+    it "handles a to_str that freezes a later heap string mid-marshal without raising, and encodes it correctly" do
+      target = "gigatoken zero copy borrow input, frozen mid-marshal " * 200
+      freezer = Object.new
+      freezer.define_singleton_method(:to_str) do
+        target.freeze
+        "frozen mid-marshal"
+      end
+      expected = [tokenizer.encode(target), tokenizer.encode("frozen mid-marshal")]
+
+      result = nil
+      expect { result = tokenizer.encode_batch([target, freezer]) }.not_to raise_error
+      expect(result).to eq(expected)
+    end
   end
 end
