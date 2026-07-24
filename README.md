@@ -6,7 +6,7 @@ Ruby bindings for [marcelroed/gigatoken](https://github.com/marcelroed/gigatoken
 
 | | Corpus | MB/s (median) | Gtok/s (median) |
 |---|---|---|---|
-| **gigatoken** (this gem, Ruby) | 11.9 GB | **12,278** | **2.78** |
+| **gigatoken-rb** (this gem, Ruby) | 11.9 GB | **12,278** | **2.78** |
 | gigatoken (Python wheel, upstream) | 11.9 GB | 7,400 | 1.68 |
 | tiktoken (Python) | 1.35 GB | 69.7 | 0.0158 |
 | tiktoken_ruby | 1.35 GB | 30.7 | 0.0070 |
