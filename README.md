@@ -1,105 +1,90 @@
-# Gigatoken
+# gigatoken-rb
 
-*Tokenize your text data at GB/s — from Ruby.*
+**12 GB/s / 2.8 billion tokens per second in Ruby.**
 
-A Ruby gem binding [marcelroed/gigatoken](https://github.com/marcelroed/gigatoken)'s SIMD tokenizer core: the fastest BPE tokenizer for language modeling, exposed through an idiomatic modern-Ruby API. Token counting at these speeds is effectively free — no more estimating.
+Ruby bindings for [marcelroed/gigatoken](https://github.com/marcelroed/gigatoken), the fastest open-source BPE tokenizer around — running **1.6x faster than upstream's own Python package**, on the same Rust engine.
 
-This fork carries the same Rust engine in-tree and ships it as a native gem (`magnus` + `rb_sys`). The upstream Python shell has been removed — see [Fork status](#fork-status).
+| | Corpus | MB/s (median) | Gtok/s (median) |
+|---|---|---|---|
+| **gigatoken** (this gem, Ruby) | 11.9 GB | **12,278** | **2.78** |
+| gigatoken (Python wheel, upstream) | 11.9 GB | 7,400 | 1.68 |
+| tiktoken (Python) | 1.35 GB | 69.7 | 0.0158 |
+| tiktoken_ruby | 1.35 GB | 30.7 | 0.0070 |
+| tokenizers gem (ankane) | 1.35 GB | 10.0 | 0.0023 |
+| tokenizers (Python, Hugging Face) | 1.35 GB | 5.6 | 0.0013 |
 
-## Installation
+Mac Studio M4 Max, OpenWebText, GPT-2 tokenizer; every library produces the same tokenization, gigatoken just does it faster. **340x faster** than the fastest existing Ruby gem (tiktoken_ruby) and **1,050x faster** than the tokenizers gem.  Full methodology, exact counts, and the caveats that matter: [docs/rb/benchmarks.md](docs/rb/benchmarks.md).
+
+## Install
 
 ```bash
 gem install gigatoken
 ```
-or in your Gemfile:
-```ruby
-gem "gigatoken"
+
+Precompiled native gems ship for Apple Silicon macOS (`arm64-darwin`) and x86_64/aarch64 Linux — on those platforms RubyGems grabs the binary automatically, no Rust toolchain, no compile wait. In a Bundler project it's one command:
+
+```bash
+bundle add gigatoken
 ```
-No precompiled native gem is published yet, so this builds the extension from source. That needs a Rust toolchain — `rust-toolchain.toml` pins the nightly it's built against, and `rustup` installs that toolchain automatically the first time you build.
 
-## Loading
+(or drop `gem "gigatoken"` into the Gemfile yourself).
 
-`Gigatoken::Tokenizer.load` accepts any of four source shapes — a `tokenizer.json` path, a directory containing one, a HuggingFace Hub repo id, or a `.tiktoken` mergeable-ranks file — and dispatches to the right constructor:
+Anywhere else (or with `--platform ruby` to opt out of the binary), the extension builds from source. That needs a Rust toolchain: `rust-toolchain.toml` pins the nightly, and `rustup` fetches it automatically on first build.
+
+## Use
+
 ```ruby
 require "gigatoken"
 
-Gigatoken::Tokenizer.load("tokenizer.json")
-Gigatoken::Tokenizer.load("path/to/model/dir")
-Gigatoken::Tokenizer.load("openai-community/gpt2")
-Gigatoken::Tokenizer.load("vocab.tiktoken")
+tok = Gigatoken::Tokenizer.load("openai-community/gpt2")
 
-Gigatoken::Tokenizer.load("openai-community/gpt2", revision: "main")
+tok.encode("Hello, world!")             # => [15496, 11, 995, 0]
+tok.decode([15496, 11, 995, 0])         # => "Hello, world!"
+tok.encode_batch(["Hello!", "Another"]) # => [[15496, 0], [6610]]
+
+tok.vocab_size                          # => 50257
+tok.special_tokens                      # => {"<|endoftext|>" => 50256}
 ```
-Hub fetches go through socketry `async-http` — no Python, no `huggingface_hub`. Each shape also has an explicit constructor, if you already know which one you have:
+
+`load` takes a `tokenizer.json` path, a directory holding one, a HuggingFace Hub repo id, or a `.tiktoken` mergeable-ranks file, and dispatches on shape. Hub downloads run over socketry's `async-http` — no Python anywhere. Know what you have? Skip the dispatch:
+
 ```ruby
-Gigatoken::Tokenizer.from_file("tokenizer.json")        # path, or a directory containing one
+Gigatoken::Tokenizer.from_file("tokenizer.json")
 Gigatoken::Tokenizer.from_hub("openai-community/gpt2", revision: "main")
 Gigatoken::Tokenizer.from_tiktoken("vocab.tiktoken")
 Gigatoken::Tokenizer.from_json(File.binread("tokenizer.json"))
 ```
 
-### SentencePiece
+SentencePiece-BPE models (Llama, Gemma, Mistral — any `tokenizer.json` with `byte_fallback: true`) load through the same entry points and pick the right backend automatically. One difference: the SentencePiece core decodes text, so it validates input and raises `Gigatoken::Error` on invalid UTF-8 instead of guessing.
 
-A `tokenizer.json` whose model has `byte_fallback: true` (Llama, Gemma, Mistral, and other SentencePiece-BPE families) loads automatically through the same `.load`/`.from_file`/`.from_json` entry points above — `Gigatoken::Native.load_hf_json` picks a `Gigatoken::Native::SentencePieceTokenizer` or a `Gigatoken::Native::BPETokenizer` based on that flag, and `Gigatoken::Tokenizer` wraps either one transparently. No separate API to learn.
+### Tokenize files without leaving Rust
 
-One contract is stricter for the SentencePiece backend than for BPE: BPE is byte-level and trusts raw bytes as-is, but SentencePiece's encode cores operate on `&str`, so every document passed to `encode`/`encode_batch`, every file's contents read by `encode_files`, and a `TextFileSource`'s `separator:` are validated as UTF-8 and raise `Gigatoken::Error` on invalid input (a Ruby `String` carries no UTF-8 guarantee, even when tagged as one).
-
-## Core API
+`encode_files` reads and tokenizes files entirely on the native side — document contents never materialize as Ruby objects. `.gz` and `.zst` decompress transparently.
 
 ```ruby
-tokenizer = Gigatoken::Tokenizer.load("openai-community/gpt2")
+tok.encode_files("owt_train.txt", separator: "<|endoftext|>")
 
-tokenizer.encode("Hello, world!")                    # => [15496, 11, 995, 0]
-tokenizer.encode_batch(["Hello, world!", "Another one"])
-tokenizer.decode([15496, 11, 995, 0])                 # => "Hello, world!"
-
-tokenizer.vocab_size                                  # => 50257
-tokenizer.vocab                                       # => {0 => "!", 1 => "\"", ...}
-tokenizer.merges                                      # => [[" ", "t"], [" ", "a"], ...]
-tokenizer.special_tokens                              # => {"<|endoftext|>" => 50256}
-```
-
-### Encoding files
-
-`encode_files` tokenizes whole files in Rust, without the documents ever becoming Ruby objects. Bare paths are wrapped in a `TextFileSource` automatically; JSONL and Parquet need one of the other Native source classes:
-```ruby
-# Bare path(s), optionally split into documents on a separator
-tokenizer.encode_files("owt_train.txt", separator: "<|endoftext|>")
-
-# Or an explicit Native source
-text = Gigatoken::Native::TextFileSource.new(["owt_train.txt"], separator: "<|endoftext|>")
-jsonl = Gigatoken::Native::JsonlFileSource.new(["docs.jsonl"], field: "text")
+jsonl   = Gigatoken::Native::JsonlFileSource.new(["docs.jsonl"], field: "text")
 parquet = Gigatoken::Native::ParquetFileSource.new(["docs.parquet"], column: "text")
-
-tokenizer.encode_files(text)
-tokenizer.encode_files(text, parallel: false) # encode on the calling thread instead of the worker pool
+tok.encode_files(jsonl)
 ```
-`.gz` and `.zst` files decompress transparently.
 
 ### Packed results
 
-`encode_batch`/`encode_files` accept `packed: true` to return a `Gigatoken::PackedResult` instead of a ragged Array of Arrays: one `IO::Buffer` of every document's token ids (u32, native byte order) plus `lens`, each document's token count. This skips the per-token Ruby array materialization the ragged shape costs, and is the fastest way to consume results when you don't need plain Arrays:
-```ruby
-packed = tokenizer.encode_files(text, packed: true)
+Pass `packed: true` to `encode_batch` or `encode_files` and results land in a single `IO::Buffer` of u32 token ids instead of a ragged Array of Arrays — no per-token Ruby allocation, the fastest way out of the engine:
 
-packed.buffer                                         # => an IO::Buffer
-packed.lens                                            # => [12, 8, 41, ...] (tokens per document)
-packed.size                                             # => number of documents
-packed.token_count                                      # => total tokens across every document
-packed[3]                                                # => Array of token ids for document 3, materialized on demand
-packed.each { |ids| ... }                                # each document's token ids, in order
-packed.to_a                                              # => the same ragged shape packed: false returns
+```ruby
+packed = tok.encode_files("owt_train.txt", packed: true, separator: "<|endoftext|>")
+
+packed.buffer       # => one IO::Buffer, every document's ids back to back
+packed.lens         # => [12, 8, 41, ...] tokens per document
+packed.token_count  # => total tokens
+packed[3]           # => document 3's ids as an Array, on demand
 ```
 
 ### Async
 
-`encode_batch`/`encode_files` release the GVL, so wrapping them in `Async` lets other fibers keep running while an encode is in flight:
-```ruby
-Async do
-  tokenizer.encode_files(source)
-end
-```
-The calling fiber itself only yields to the reactor when the active `Fiber.scheduler` was built with a worker pool (`ASYNC_SCHEDULER_WORKER_POOL=true`, one worker by default) — without one, this blocks exactly as it would outside `Async`. See [docs/rb/async.md](docs/rb/async.md) for the full design note.
+`encode_batch` and `encode_files` release the GVL for the whole encode; the parallelism runs on the engine's rayon pool, not Ruby threads. Under `Async`, give the fiber scheduler a worker pool (`ASYNC_SCHEDULER_WORKER_POOL=true`) and the calling fiber yields to the reactor too. Design notes: [docs/rb/async.md](docs/rb/async.md).
 
 ## CLI
 
@@ -107,31 +92,34 @@ The calling fiber itself only yields to the reactor when the active `Fiber.sched
 gigatoken bench openai-community/gpt2 owt_train.txt --doc-separator "<|endoftext|>"
 gigatoken validate openai-community/gpt2 owt_train.txt --doc-separator "<|endoftext|>"
 ```
-`bench` reports MB/s and Mtok/s (`--no-parallel` for the serial core path, `--packed` to bench the packed fused path); `validate` cross-checks `encode_files` against a Ruby-side split plus `encode_batch`.
 
-## Performance
-
-The engine is unchanged from upstream — [its benchmarks](https://github.com/marcelroed/gigatoken#benchmarks) (measured through the Python package: up to tens of GB/s, roughly 10–1000× HuggingFace tokenizers depending on tokenizer family and CPU) characterize the core this gem binds. Ruby-side throughput depends on the seam: the packed `encode_files` path stays within ~10% of the Python CLI on the corpora we've measured, with token counts matching exactly. No Ruby-side multipliers are claimed here — run `gigatoken bench` against your own tokenizer and files to measure it on your hardware.
+`bench` reports MB/s and Mtok/s (`--packed` for the fused packed path, `--no-parallel` for the serial core). `validate` confirms native split-and-encode agrees with a Ruby-side split through `encode_batch`.
 
 ## Development
 
 ```bash
 bundle install
-bundle exec rake compile    # builds the native extension (Rust nightly, via rust-toolchain.toml)
+bundle exec rake compile    # native extension (Rust nightly, via rust-toolchain.toml)
 bundle exec rspec
 bundle exec standardrb
 ```
-The Ruby layer is fiber-first: no `Thread`, `Mutex`, or `Monitor` — parallelism lives in the core's rayon pool. CI runs the suite on ubuntu + macos × Ruby 3.3/3.4/4.0 (`ruby-ci.yml`); `ruby-gem.yml` cross-builds precompiled native gems (arm64-darwin, x86_64-linux, aarch64-linux) on demand.
+
+The Ruby layer is fiber-first throughout — no `Thread`, no `Mutex`; all parallelism lives in the core's rayon pool. CI runs ubuntu + macos × Ruby 3.3/3.4/4.0, and `release.yml` cross-builds the precompiled native gems (arm64-darwin, x86_64-linux, aarch64-linux).
 
 ## Fork status
 
-This fork exists to ship the Ruby gem. The Rust core is upstream's, kept minimally patched (a cargo feature gate and crate-root re-exports — the `python` feature and pyo3 bindings remain in the core for clean upstream syncs, just nothing packages them here); the Python shell, its tests, and packaging have been removed — use [upstream](https://github.com/marcelroed/gigatoken) for the Python package.
+This fork exists because I need fast tokenization in Ruby. The Rust core is changed as little as possible from upstream. Most of the python shell has been removed from this fork, but you can still find it [upstream](https://github.com/marcelroed/gigatoken).
 
-Not ported: HF/tiktoken Python compat shims, padded-batch matrices, BPE training, WordPiece (upstream lacks it too). SentencePiece tokenization works but is less optimized than BPE, matching upstream.
+Not ported/no current plans:
+- the HF/tiktoken Python compat shims
+- padded-batch matrices
+- and BPE training
+
+SentencePiece works but — matching upstream — is less optimized than the BPE path.
 
 ## Citation
 
-The tokenizer engine is Marcel Rød's gigatoken. If you use it in your research, please cite:
+The engine is Marcel Rød's gigatoken. If it shows up in your research, cite that:
 
 ```bibtex
 @software{roed2026gigatoken,
@@ -147,5 +135,7 @@ The tokenizer engine is Marcel Rød's gigatoken. If you use it in your research,
 <details>
 <summary>AI Use Disclosure</summary>
 
-The Rust engine is upstream's; see <a href="https://github.com/marcelroed/gigatoken#readme">upstream's AI-use disclosure</a> for how it was built (majority hand-crafted, AI-assisted in the final stages). The Ruby port in this fork was built AI-first: headless builder agents working iteration-by-iteration against human-and-AI-authored specifications with frozen acceptance criteria, every gate re-run cold at judging, under human direction throughout.
+The Rust engine is upstream's — see <a href="https://github.com/marcelroed/gigatoken#readme">upstream's AI-use disclosure</a> for how that was built (majority hand-crafted, AI-assisted toward the end).
+
+The Ruby port in this fork is 100% AI generated using Fable 5 and Sonnet 5 via [space-architect](https://github.com/jetpks/space-architect) over ~24 hours.
 </details>

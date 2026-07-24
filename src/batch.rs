@@ -332,6 +332,47 @@ fn defer_drop(chunks: Vec<ChunkTokens>) {
     }
 }
 
+/// A destination buffer the caller already owns and will keep owning: `cap`
+/// tokens starting at `ptr`, uninitialized, valid for `cap` disjoint `u32`
+/// writes for as long as this value is used. Never moved, resized, or read
+/// by the gather — only written through, the same way the owned path's
+/// reservation is (see `encode_docs_into`, the zero-copy packed path's core
+/// seam used by `ext/gigatoken/src/tokenizer.rs`).
+pub struct GatherBuf {
+    ptr: *mut u32,
+    cap: usize,
+}
+
+// SAFETY: `GatherBuf::new`'s contract guarantees `ptr` is valid for `cap`
+// disjoint writes for as long as this value is in use, regardless of which
+// thread ends up performing those writes.
+unsafe impl Send for GatherBuf {}
+
+impl GatherBuf {
+    /// # Safety
+    /// `ptr` must be valid for `cap` non-overlapping `u32` writes for the
+    /// entire time this `GatherBuf` is in use, and nothing else may read or
+    /// write through it concurrently.
+    pub unsafe fn new(ptr: *mut u32, cap: usize) -> Self {
+        Self { ptr, cap }
+    }
+}
+
+/// Result of gathering into a caller-supplied `GatherBuf` (see
+/// `encode_docs_into`): either every chunk landed in the destination, or its
+/// bound was overrun (the same NFC-expansion escape `Committer` documents),
+/// leaving the destination an unusable partial commit that the caller must
+/// discard.
+pub enum GatherOutcome {
+    /// The destination's first `.0` tokens are valid; `.1` is the
+    /// per-document row lengths.
+    Committed(usize, Vec<i64>),
+    /// The destination is unusable — here is the classic collect-then-
+    /// gather result instead, computed from the same already-encoded
+    /// chunks (no re-encoding needed).
+    Fallback(Vec<u32>, Vec<i64>),
+}
+
 /// The in-flight state of the overlapped gather: a flat id buffer reserved
 /// at an upper bound BEFORE chunk sizes are known, plus a cursor over the
 /// longest fully-encoded prefix of the chunk sequence.
@@ -350,21 +391,31 @@ fn defer_drop(chunks: Vec<ChunkTokens>) {
 /// `total_bytes` tokens bounds the output; untouched reserved pages cost
 /// address space only. Two escapes fall back to the collect-then-gather
 /// path (`gather_flat`): the reservation itself failing (e.g. Linux
-/// heuristic overcommit refusing a 4x-input VA block for a huge batch),
-/// and the cursor overflowing the bound, which is impossible for plain
-/// byte input and reachable only when NFC normalization expands bytes
+/// heuristic overcommit refusing a 4x-input VA block for a huge batch —
+/// only possible for the owned path, see `Storage::Owned`; a caller-supplied
+/// `GatherBuf` is already allocated, so that escape is not this path's
+/// concern), and the cursor overflowing the bound, which is impossible for
+/// plain byte input and reachable only when NFC normalization expands bytes
 /// (composition-exclusion pathologies) — `advance` stops committing and
-/// `finish` returns None rather than write past the reservation.
+/// `finish`/`finish_external` report the overrun rather than write past the
+/// reservation.
 struct Committer {
-    /// Owns the reservation; the Vec struct itself is read or written only
-    /// in `finish`. `UnsafeCell` so each `advance` derives the destination
-    /// pointer fresh under the cursor lock: no pointer is captured across
-    /// the struct's construction-time moves (a move retags the Vec's
-    /// unique pointer under strict aliasing models).
-    flat: UnsafeCell<Vec<u32>>,
+    storage: Storage,
     /// Reserved capacity in tokens; commits never write at or past it.
     cap: usize,
     cursor: Mutex<CommitCursor>,
+}
+
+/// Where a `Committer` writes: the path's own reservation (owned, returned
+/// to the caller as a `Vec<u32>` by `finish`), or a `GatherBuf` the caller
+/// supplied (external, never moved or freed by `finish_external`).
+enum Storage {
+    /// `UnsafeCell` so each `advance` derives the destination pointer fresh
+    /// under the cursor lock: no pointer is captured across the struct's
+    /// construction-time moves (a move retags the Vec's unique pointer under
+    /// strict aliasing models).
+    Owned(UnsafeCell<Vec<u32>>),
+    External(*mut u32),
 }
 
 struct CommitCursor {
@@ -376,11 +427,12 @@ struct CommitCursor {
     overflowed: bool,
 }
 
-// SAFETY: the heap buffer behind `flat` is never reallocated while shared
-// (nothing pushes to the Vec; it is resized only in `finish`, after all
-// shared use has ended). During the shared phase the cell is used solely
-// to derive the buffer pointer under the `cursor` lock, and every write
-// through it lands in a disjoint, in-bounds range.
+// SAFETY: the heap buffer behind `Storage::Owned` is never reallocated
+// while shared (nothing pushes to the Vec; it is resized only in `finish`,
+// after all shared use has ended), and `Storage::External`'s pointer is
+// valid per `GatherBuf`'s contract. During the shared phase storage is used
+// solely to derive the buffer pointer under the `cursor` lock, and every
+// write through it lands in a disjoint, in-bounds range.
 unsafe impl Send for Committer {}
 unsafe impl Sync for Committer {}
 
@@ -400,7 +452,7 @@ impl Committer {
         // The commits fault this reservation in while the encode runs.
         madvise_hugepage(flat.as_mut_ptr() as *mut u8, cap * std::mem::size_of::<u32>());
         Some(Self {
-            flat: UnsafeCell::new(flat),
+            storage: Storage::Owned(UnsafeCell::new(flat)),
             cap,
             cursor: Mutex::new(CommitCursor {
                 next: 0,
@@ -408,6 +460,36 @@ impl Committer {
                 overflowed: false,
             }),
         })
+    }
+
+    /// Commit directly into a caller-supplied `GatherBuf` instead of an
+    /// owned reservation. Always succeeds: the caller already made the
+    /// allocation, so "reservation refused" isn't this path's concern (only
+    /// the cursor-overflow escape is — see `finish_external`).
+    fn external(buf: GatherBuf) -> Self {
+        madvise_hugepage(buf.ptr as *mut u8, buf.cap * std::mem::size_of::<u32>());
+        Self {
+            storage: Storage::External(buf.ptr),
+            cap: buf.cap,
+            cursor: Mutex::new(CommitCursor {
+                next: 0,
+                offset: 0,
+                overflowed: false,
+            }),
+        }
+    }
+
+    /// The destination's base pointer, derived fresh under the cursor lock
+    /// by every caller (see `Storage::Owned`'s field doc for why the owned
+    /// case can't just capture a pointer once).
+    fn base_ptr(&self) -> *mut u32 {
+        match &self.storage {
+            // SAFETY: the cursor lock is held by every caller of this
+            // method, and the Vec struct is not mutated during the shared
+            // phase (see `Storage::Owned`'s field doc), so this only reads it.
+            Storage::Owned(cell) => unsafe { (*cell.get()).as_mut_ptr() },
+            Storage::External(ptr) => *ptr,
+        }
     }
 
     /// Copy any freshly completed prefix chunks into the flat buffer.
@@ -419,10 +501,7 @@ impl Committer {
         let Ok(mut cur) = self.cursor.try_lock() else {
             return;
         };
-        // SAFETY: the cursor lock is held; the Vec struct is not mutated
-        // during the shared phase (see the `flat` field doc), so deriving
-        // the buffer pointer only reads it.
-        let base = unsafe { (*self.flat.get()).as_mut_ptr() };
+        let base = self.base_ptr();
         for _ in 0..Self::MAX_DRAIN {
             if cur.overflowed {
                 return;
@@ -446,12 +525,11 @@ impl Committer {
         }
     }
 
-    /// After all chunks are encoded (and the scope joined): copy the
-    /// uncommitted suffix in parallel, size the buffer to `total` and trim
-    /// the reservation. None means the bound was overrun (see type docs) —
-    /// caller falls back to the classic gather; the prefix copied so far is
-    /// discarded (chunk buffers are still intact).
-    fn finish(self, chunks: &[ChunkTokens], total: usize) -> Option<Vec<u32>> {
+    /// Copy the uncommitted suffix in parallel straight through `base` —
+    /// shared by `finish` and `finish_external`. `false` means the bound was
+    /// overrun (see `Committer`'s type doc): the caller falls back to the
+    /// classic gather, and nothing written through `base` is trusted.
+    fn copy_suffix(base: *mut u32, cur: &CommitCursor, chunks: &[ChunkTokens], total: usize, cap: usize) -> bool {
         use rayon::prelude::*;
         /// Raw destination pointer, shareable across the copy tasks. (The
         /// accessor keeps closure capture at the wrapper, not the field.)
@@ -466,13 +544,8 @@ impl Committer {
             }
         }
 
-        let Committer { flat, cap, cursor } = self;
-        let mut flat = flat.into_inner();
-        let cur = cursor
-            .into_inner()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if cur.overflowed || total > cap {
-            return None;
+            return false;
         }
         let rest = &chunks[cur.next..];
         let mut offsets = Vec::with_capacity(rest.len());
@@ -482,10 +555,7 @@ impl Committer {
             offset += chunk.ids.len();
         }
         debug_assert_eq!(offset, total);
-        // Derived AFTER the Vec moved out of the cell: a move retags the
-        // Vec's unique pointer under strict aliasing models, so the suffix
-        // writes and the `set_len` below go through a post-move pointer.
-        let base = SyncPtr(flat.as_mut_ptr());
+        let base = SyncPtr(base);
         // `with_max_len(1)` keeps the multi-MB copies stealable one by one.
         rest.par_iter()
             .zip(offsets)
@@ -502,6 +572,29 @@ impl Committer {
                     );
                 }
             });
+        true
+    }
+
+    /// After all chunks are encoded (and the scope joined): copy the
+    /// uncommitted suffix, size the buffer to `total` and trim the
+    /// reservation. None means the bound was overrun (see type docs) —
+    /// caller falls back to the classic gather; the prefix copied so far is
+    /// discarded (chunk buffers are still intact).
+    fn finish(self, chunks: &[ChunkTokens], total: usize) -> Option<Vec<u32>> {
+        let Committer { storage, cap, cursor } = self;
+        let Storage::Owned(cell) = storage else {
+            unreachable!("finish is only called on a Committer built by try_new")
+        };
+        let mut flat = cell.into_inner();
+        let cur = cursor
+            .into_inner()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Derived AFTER the Vec moved out of the cell: a move retags the
+        // Vec's unique pointer under strict aliasing models, so the suffix
+        // writes and the `set_len` below go through a post-move pointer.
+        if !Self::copy_suffix(flat.as_mut_ptr(), &cur, chunks, total, cap) {
+            return None;
+        }
         // SAFETY: capacity >= cap >= total, and [0, total) was fully
         // initialized by the prefix commits plus the suffix copies above.
         unsafe {
@@ -515,6 +608,21 @@ impl Committer {
         // memcpy; correctness is unaffected.
         flat.shrink_to_fit();
         Some(flat)
+    }
+
+    /// `finish` for a `Committer` built by `external`: the same suffix
+    /// copy, but there is no owned `Vec` to size or trim — the caller's
+    /// `GatherBuf` is the destination throughout. `true` means its first
+    /// `total` tokens are now valid.
+    fn finish_external(self, chunks: &[ChunkTokens], total: usize) -> bool {
+        let Committer { storage, cap, cursor } = self;
+        let Storage::External(ptr) = storage else {
+            unreachable!("finish_external is only called on a Committer built by external")
+        };
+        let cur = cursor
+            .into_inner()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Self::copy_suffix(ptr, &cur, chunks, total, cap)
     }
 }
 
@@ -609,6 +717,80 @@ fn encode_chunks_gathered_with_cap(
             (flat, counts)
         }
         None => (gather_flat(outs), counts),
+    }
+}
+
+/// `encode_chunks_gathered_with_cap`, but gathering directly into a
+/// caller-supplied `GatherBuf` (see `GatherBuf`) instead of a freshly
+/// allocated `Vec<u32>` — the zero-copy packed path's core seam (see
+/// `encode_docs_into` and `ext/gigatoken/src/tokenizer.rs`). Every chunk is
+/// encoded either way, so an overrun `GatherOutcome::Fallback` carries the
+/// classic gathered result rather than asking the caller to re-run the
+/// encode.
+pub(crate) fn encode_chunks_into(
+    workers: &WorkerPool,
+    proto: &Tokenizer,
+    chunks: &[EncodeChunk],
+    total_bytes: usize,
+    dest: GatherBuf,
+) -> GatherOutcome {
+    let share = total_bytes / rayon::current_num_threads().max(1);
+    let encode = |c: &EncodeChunk| workers.with_worker(proto, share, |tok| encode_chunk(tok, c));
+    if chunks.len() <= 1 {
+        return match chunks.first() {
+            Some(chunk) => {
+                let out = encode(chunk);
+                let counts = row_counts(std::slice::from_ref(&out));
+                if out.ids.len() <= dest.cap {
+                    // SAFETY: the only chunk, so the only write; in bounds
+                    // per the check above.
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(out.ids.as_ptr(), dest.ptr, out.ids.len());
+                    }
+                    GatherOutcome::Committed(out.ids.len(), counts)
+                } else {
+                    GatherOutcome::Fallback(out.ids, counts)
+                }
+            }
+            None => GatherOutcome::Committed(0, Vec::new()),
+        };
+    }
+    let next = AtomicUsize::new(0);
+    let outs: Vec<OnceLock<ChunkTokens>> = (0..chunks.len()).map(|_| OnceLock::new()).collect();
+    let committer = Committer::external(dest);
+    let tasks = rayon::current_num_threads().min(chunks.len());
+    rayon::scope(|s| {
+        for _ in 0..tasks {
+            s.spawn(|_| {
+                loop {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(chunk) = chunks.get(i) else {
+                        // One last opportunistic drain on the way out: this
+                        // worker's final chunk may have been skipped while
+                        // another held the commit lock.
+                        committer.advance(&outs);
+                        break;
+                    };
+                    // Each index is claimed exactly once, so `set` cannot
+                    // already be filled.
+                    let _ = outs[i].set(encode(chunk));
+                    committer.advance(&outs);
+                }
+            });
+        }
+    });
+    let outs: Vec<ChunkTokens> = outs
+        .into_iter()
+        .map(|slot| slot.into_inner().expect("every claimed chunk was encoded"))
+        .collect();
+    let counts = row_counts(&outs);
+    let total: usize = outs.iter().map(|c| c.ids.len()).sum();
+    if committer.finish_external(&outs, total) {
+        // The copies are done; the spent chunk buffers are dead weight.
+        defer_drop(outs);
+        GatherOutcome::Committed(total, counts)
+    } else {
+        GatherOutcome::Fallback(gather_flat(outs), counts)
     }
 }
 
@@ -778,6 +960,24 @@ pub(crate) fn encode_docs_ragged_with(
     let added = proto.added_token_split_blockers();
     let chunks = build_doc_chunks(docs, total, chunk_target_bytes(total), &added, lpt);
     encode_chunks_gathered(workers, proto, &chunks, total)
+}
+
+/// `encode_docs_ragged`, but gathering directly into a caller-supplied
+/// `GatherBuf` instead of a freshly allocated `Vec<u32>` — the zero-copy
+/// packed path's core seam (see `ext/gigatoken/src/tokenizer.rs`). `dest`
+/// must have capacity for at least as many tokens as `docs`'s total bytes (a
+/// token consumes >= 1 input byte — the same bound `encode_docs_ragged`
+/// reserves internally); see `GatherOutcome` for what happens otherwise.
+pub fn encode_docs_into(
+    workers: &WorkerPool,
+    proto: &Tokenizer,
+    docs: &[&[u8]],
+    dest: GatherBuf,
+) -> GatherOutcome {
+    let total: usize = docs.iter().map(|d| d.len()).sum();
+    let added = proto.added_token_split_blockers();
+    let chunks = build_doc_chunks(docs, total, chunk_target_bytes(total), &added, lpt_from_env());
+    encode_chunks_into(workers, proto, &chunks, total, dest)
 }
 
 /// Sequential `encode_docs_ragged`: encode every document in order on the
@@ -1538,6 +1738,71 @@ mod tests {
                 encode_chunks_gathered_with_cap(&workers, &proto, &chunks, total, cap);
             assert_eq!(lens, lens_ref, "lens mismatch (cap={cap})");
             assert_eq!(flat, flat_ref, "ids mismatch (cap={cap})");
+        }
+    }
+
+    /// The widened `encode_chunks_into` seam must match the owned path
+    /// exactly: a `GatherBuf` big enough to hold the result commits
+    /// directly into it, and one too small hits the same overflow escape as
+    /// `gather_fallbacks_match` — falling back to the classic gathered
+    /// result instead of writing past the buffer.
+    #[test]
+    fn gather_into_matches_owned() {
+        let merges = HashMap::with_hasher(rustc_hash::FxBuildHasher {});
+        let vocab = (0..=u8::MAX).map(|b| vec![b]).collect();
+        let proto = Tokenizer::new(merges, vocab, None);
+
+        let mut state = 0xA5A5_A5A5_A5A5_A5A5u64;
+        let mut text = |len: usize| -> Vec<u8> {
+            (0..len)
+                .map(|_| {
+                    state = state
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
+                    let r = (state >> 33) as usize;
+                    b"abcdefghijklmnopqrstuvwxyz0123456789    "[r % 40]
+                })
+                .collect()
+        };
+        let owned: Vec<Vec<u8>> = (0..20).map(|_| text(1 << 20)).collect();
+        let docs: Vec<&[u8]> = owned.iter().map(|d| d.as_slice()).collect();
+        let total: usize = docs.iter().map(|d| d.len()).sum();
+        let added = proto.added_token_split_blockers();
+        let chunks = build_doc_chunks(&docs, total, chunk_target_bytes(total), &added, true);
+        assert!(chunks.len() > 1, "test must exercise the parallel path");
+
+        let workers = WorkerPool::new();
+        let (flat_ref, lens_ref) = encode_chunks_gathered(&workers, &proto, &chunks, total);
+
+        // A full-size destination: every chunk commits straight into it.
+        let mut dest_buf = vec![0u32; total];
+        let workers = WorkerPool::new();
+        // SAFETY: `dest_buf` is `total` tokens, exclusively owned for the
+        // duration of this call.
+        let dest = unsafe { GatherBuf::new(dest_buf.as_mut_ptr(), total) };
+        match encode_chunks_into(&workers, &proto, &chunks, total, dest) {
+            GatherOutcome::Committed(n, lens) => {
+                assert_eq!(lens, lens_ref, "lens mismatch (committed)");
+                assert_eq!(&dest_buf[..n], &flat_ref[..], "ids mismatch (committed)");
+            }
+            GatherOutcome::Fallback(..) => panic!("expected a full-size dest to commit"),
+        }
+
+        // A too-small destination (byte-level vocab: one token per input
+        // byte, so total / 3 overflows mid-flight with a committed prefix
+        // behind it — same shape as `gather_fallbacks_match`).
+        let cap = total / 3;
+        let mut small_buf = vec![0u32; cap];
+        let workers = WorkerPool::new();
+        // SAFETY: `small_buf` is `cap` tokens, exclusively owned for the
+        // duration of this call.
+        let dest = unsafe { GatherBuf::new(small_buf.as_mut_ptr(), cap) };
+        match encode_chunks_into(&workers, &proto, &chunks, total, dest) {
+            GatherOutcome::Fallback(flat, lens) => {
+                assert_eq!(lens, lens_ref, "lens mismatch (fallback)");
+                assert_eq!(flat, flat_ref, "ids mismatch (fallback)");
+            }
+            GatherOutcome::Committed(..) => panic!("expected a too-small dest to overflow"),
         }
     }
 }

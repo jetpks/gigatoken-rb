@@ -37,6 +37,20 @@ RSpec.describe Gigatoken::Tokenizer do
     expect(packed.token_count).to eq(ragged.sum(&:size))
   end
 
+  it "encodes a packed batch identically to the ragged batch across many chunks" do
+    # Large enough (several MB, split across many documents) to force the
+    # parallel chunked gather (MIN_CHUNK_BYTES is 1 MiB) rather than the
+    # single-chunk fast path, exercising the zero-copy packed gather's
+    # overlapped commit end-to-end.
+    texts = Array.new(300) { |i| "Document #{i}: #{"The quick brown fox jumps over the lazy dog. " * 250}" }
+    ragged = tokenizer.encode_batch(texts)
+    packed = tokenizer.encode_batch(texts, packed: true)
+
+    expect(packed).to be_a(Gigatoken::PackedResult)
+    expect(packed.to_a).to eq(ragged)
+    expect(packed.token_count).to eq(ragged.sum(&:size))
+  end
+
   it "treats packed: nil the same as omitting packed: on encode_batch" do
     texts = ["Hello, world!", "café"]
     expect(tokenizer.encode_batch(texts, packed: nil)).to eq(tokenizer.encode_batch(texts))
@@ -94,6 +108,113 @@ RSpec.describe Gigatoken::Tokenizer do
 
     it "raises Gigatoken::Error for garbage input" do
       expect { described_class.load("../not a real path/nor a repo id") }.to raise_error(Gigatoken::Error)
+    end
+  end
+
+  describe "zero-copy input marshal" do
+    # Ruby 4.0.6's Variable Width Allocation embeds strings up to several
+    # hundred bytes (verified live: 512 B embeds, 1024 B doesn't) — well past
+    # strings this short, forcing the embedded (always-copy) path.
+    let(:embedded) { "hi" }
+    # Comfortably over the embed threshold, so it's heap-allocated and
+    # eligible for the zero-copy borrow path. `* n` always returns a fresh,
+    # unfrozen string regardless of this file's frozen_string_literal magic
+    # comment.
+    let(:heap) { "gigatoken zero copy borrow input " * 200 }
+    let(:frozen) { ("gigatoken zero copy borrow frozen input " * 100).freeze }
+
+    it "encodes a batch matrix of embedded, heap, frozen, duplicate, shared-substring, and to_str inputs identically to per-doc encode" do
+      to_str_doc = Class.new do
+        def to_str
+          "convert me please"
+        end
+      end.new
+      substring = heap[100, 1200]
+      texts = [embedded, heap, frozen, heap, substring, to_str_doc]
+      expected = texts.map { |t| tokenizer.encode(t) }
+
+      expect(tokenizer.encode_batch(texts)).to eq(expected)
+
+      packed = tokenizer.encode_batch(texts, packed: true)
+      expect(packed.to_a).to eq(expected)
+    end
+
+    it "leaves a heap input byte-identical, unfrozen, and immediately mutable after a ragged batch" do
+      doc = heap
+      original = doc.dup
+
+      tokenizer.encode_batch([doc])
+
+      expect(doc).to eq(original)
+      expect(doc).not_to be_frozen
+      expect { doc << "!" }.not_to raise_error
+    end
+
+    it "leaves a heap input byte-identical, unfrozen, and immediately mutable after a packed batch" do
+      doc = heap
+      original = doc.dup
+
+      tokenizer.encode_batch([doc], packed: true)
+
+      expect(doc).to eq(original)
+      expect(doc).not_to be_frozen
+      expect { doc << "!" }.not_to raise_error
+    end
+
+    it "raises TypeError for a non-string element and leaves an earlier heap string mutable" do
+      doc = heap
+
+      expect { tokenizer.encode_batch([doc, 42]) }.to raise_error(TypeError)
+      expect { doc << "!" }.not_to raise_error
+    end
+
+    it "encodes to_str-convertible objects positioned before and after a heap string identically to per-doc encode, ragged and packed" do
+      convert = lambda do |text|
+        obj = Object.new
+        obj.define_singleton_method(:to_str) { text }
+        obj
+      end
+      texts = [convert.call("before the heap string"), heap, convert.call("after the heap string")]
+      expected = texts.map { |t| tokenizer.encode(t) }
+
+      expect(tokenizer.encode_batch(texts)).to eq(expected)
+
+      packed = tokenizer.encode_batch(texts, packed: true)
+      expect(packed.to_a).to eq(expected)
+    end
+
+    it "encodes the array as passed at entry when a to_str mutates the caller's array mid-marshal, leaving the caller's mutations visible and the earlier heap string immediately mutable after" do
+      long1 = heap
+      long2 = "gigatoken zero copy borrow input, second document " * 200
+      docs = nil
+      mutator = Object.new
+      mutator.define_singleton_method(:to_str) do
+        docs.pop
+        docs[0] = "swapped"
+        "mutant doc"
+      end
+      expected = [tokenizer.encode(long1), tokenizer.encode("mutant doc"), tokenizer.encode(long2)]
+      docs = [long1, mutator, long2]
+
+      expect(tokenizer.encode_batch(docs)).to eq(expected)
+
+      expect(docs.length).to eq(2)
+      expect(docs[0]).to eq("swapped")
+      expect { long1 << "!" }.not_to raise_error
+    end
+
+    it "handles a to_str that freezes a later heap string mid-marshal without raising, and encodes it correctly" do
+      target = "gigatoken zero copy borrow input, frozen mid-marshal " * 200
+      freezer = Object.new
+      freezer.define_singleton_method(:to_str) do
+        target.freeze
+        "frozen mid-marshal"
+      end
+      expected = [tokenizer.encode(target), tokenizer.encode("frozen mid-marshal")]
+
+      result = nil
+      expect { result = tokenizer.encode_batch([target, freezer]) }.not_to raise_error
+      expect(result).to eq(expected)
     end
   end
 end
