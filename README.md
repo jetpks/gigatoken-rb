@@ -110,6 +110,10 @@ The Ruby layer is fiber-first throughout — no `Thread`, no `Mutex`; all parall
 
 This fork exists because I need fast tokenization in Ruby. The Rust core is changed as little as possible from upstream. Most of the python shell has been removed from this fork, but you can still find it [upstream](https://github.com/marcelroed/gigatoken).
 
+I suspect, but I'm not completely sure, that the upstream Python version is accidentally one-copy (i.e. is `memcpy`ing the dataset once) and could easily hit 12GB/s if fixed. The pattern I worked through in development was: 4GB/s with two-copy, **8GB/s with one-copy**, and 12GB/s with zero-copy.
+
+All credit for this incredible tokenizer goes to @marcelroed.
+
 Not ported/no current plans:
 - the HF/tiktoken Python compat shims
 - padded-batch matrices
