@@ -132,7 +132,7 @@ The engine is Marcel Rød's gigatoken. If it shows up in your research, cite tha
 
 ---
 
-<details>
+<details open>
 <summary>AI Use Disclosure</summary>
 
 The Rust engine is upstream's — see <a href="https://github.com/marcelroed/gigatoken#readme">upstream's AI-use disclosure</a> for how that was built (majority hand-crafted, AI-assisted toward the end).
