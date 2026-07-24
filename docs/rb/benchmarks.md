@@ -37,6 +37,31 @@ otherwise kills either implementation above ~1.4 GB of input.
 **Ruby-vs-Ruby, concretely:** on the same 1.35 GB slice this gem runs roughly
 1,050x the tokenizers gem's throughput and roughly 340x tiktoken_ruby's.
 
+## Update 2026-07-24: the gap was a hidden memcpy, and it's fixed
+
+The 1.66x lead in the table above wasn't the Ruby seam being fast so much as
+the Python path being robbed. Under mimalloc, the `flat.shrink_to_fit()` in
+the core's `Committer::finish` reallocs — i.e. copies — the gathered token
+buffer: 10.8 GB at full size, roughly half a second per pass. The gem's
+packed path structurally avoids that trim (`finish_external` never had one);
+the Python wheel always paid it. The fix is a one-line deletion, submitted
+upstream as
+[marcelroed/gigatoken#38](https://github.com/marcelroed/gigatoken/issues/38)
+and already applied in this fork's core.
+
+Rerun with the fix on both sides — same box, same corpus, same warm protocol:
+
+| Subject | Total (median) | MB/s (median) | Gtok/s (median) |
+|---|---|---|---|
+| **gigatoken** (this gem, Ruby, packed) | 0.958 s | **12,449** | **2.82** |
+| gigatoken (Python wheel + #38 fix) | 0.975 s | 12,226 | 2.77 |
+
+Python's full-corpus `core_encode` dropped from 1.525 s to 0.962 s (best) —
+the predicted memcpy, gone — and exact token parity (2,703,638,357) held
+every run. These are the two gigatoken rows the README now carries: same
+engine, same speed, within 2%. The unfixed wheel numbers remain in the table
+above for the record.
+
 ## Token counts match
 
 gigatoken — Ruby or Python, same engine — counts 2,703,638,357 tokens on the

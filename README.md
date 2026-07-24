@@ -1,19 +1,21 @@
 # gigatoken-rb
 
-**12 GB/s / 2.8 billion tokens per second in Ruby.**
+**12.4 GB/s / 2.8 billion tokens per second in Ruby.**
 
-Ruby bindings for [marcelroed/gigatoken](https://github.com/marcelroed/gigatoken), the fastest open-source BPE tokenizer around — running **1.6x faster than upstream's own Python package**, on the same Rust engine.
+Zero-copy Ruby bindings for [marcelroed/gigatoken](https://github.com/marcelroed/gigatoken), the fastest open-source BPE tokenizer around.
 
 | | Corpus | MB/s (median) | Gtok/s (median) |
 |---|---|---|---|
-| **gigatoken-rb** (this gem, Ruby) | 11.9 GB | **12,278** | **2.78** |
-| gigatoken (Python wheel, upstream) | 11.9 GB | 7,400 | 1.68 |
+| **gigatoken-rb** (this gem, Ruby) | 11.9 GB | **12,449** | **2.82** |
+| gigatoken (Python wheel + [#38](https://github.com/marcelroed/gigatoken/issues/38)) | 11.9 GB | 12,226 | 2.77 |
 | tiktoken (Python) | 1.35 GB | 69.7 | 0.0158 |
 | tiktoken_ruby | 1.35 GB | 30.7 | 0.0070 |
 | tokenizers gem (ankane) | 1.35 GB | 10.0 | 0.0023 |
 | tokenizers (Python, Hugging Face) | 1.35 GB | 5.6 | 0.0013 |
 
-Mac Studio M4 Max, OpenWebText, GPT-2 tokenizer; every library produces the same tokenization. **340x faster** than the fastest existing Ruby gem (tiktoken_ruby) and **1,050x faster** than the tokenizers gem.  Full methodology, exact counts, and the caveats that matter: [docs/rb/benchmarks.md](docs/rb/benchmarks.md).
+Mac Studio M4 Max, OpenWebText, GPT-2 tokenizer; every library produces the same tokenization, gigatoken just does it faster. The Python row includes a fix for [marcelroed/gigatoken#38](https://github.com/marcelroed/gigatoken/issues/38) — a hidden memcpy in `shrink_to_fit()` we found while chasing the last of the Ruby–Python gap and sent upstream (one-line fix; without it the wheel lands around 7.4 GB/s).
+
+**340x faster** than the fastest existing Ruby gem (tiktoken_ruby) and **1,050x faster** than the tokenizers gem. Full methodology & exact counts: [docs/rb/benchmarks.md](docs/rb/benchmarks.md).
 
 ## Install
 
@@ -110,16 +112,12 @@ The Ruby layer is fiber-first throughout — no `Thread`, no `Mutex`; all parall
 
 This fork exists because I need fast tokenization in Ruby. The Rust core is changed as little as possible from upstream. Most of the python shell has been removed from this fork, but you can still find it [upstream](https://github.com/marcelroed/gigatoken).
 
-I suspect, but I'm not completely sure, that the upstream Python version is accidentally one-copy (i.e. is `memcpy`ing the dataset once) and could easily hit 12GB/s if fixed. The pattern I worked through in development was: 4GB/s with two-copy, **8GB/s with one-copy**, and 12GB/s with zero-copy.
-
-All credit for this incredible tokenizer goes to @marcelroed.
+SentencePiece works but — matching upstream — is less optimized than the BPE path.
 
 Not ported/no current plans:
 - the HF/tiktoken Python compat shims
 - padded-batch matrices
 - and BPE training
-
-SentencePiece works but — matching upstream — is less optimized than the BPE path.
 
 ## Citation
 
@@ -141,5 +139,5 @@ The engine is Marcel Rød's gigatoken. If it shows up in your research, cite tha
 
 The Rust engine is upstream's — see <a href="https://github.com/marcelroed/gigatoken#readme">upstream's AI-use disclosure</a> for how that was built (majority hand-crafted, AI-assisted toward the end).
 
-The Ruby port in this fork is 100% AI generated using Fable 5 and Sonnet 5 via [space-architect](https://github.com/jetpks/space-architect) over ~24 hours.
+The Ruby port in this fork is 100% AI generated using Fable 5 and Sonnet 5 via [space-architect](https://github.com/jetpks/space-architect) in ~24 hours.
 </details>
