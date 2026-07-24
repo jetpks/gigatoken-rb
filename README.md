@@ -13,7 +13,7 @@ Ruby bindings for [marcelroed/gigatoken](https://github.com/marcelroed/gigatoken
 | tokenizers gem (ankane) | 1.35 GB | 10.0 | 0.0023 |
 | tokenizers (Python, Hugging Face) | 1.35 GB | 5.6 | 0.0013 |
 
-Mac Studio M4 Max, OpenWebText, GPT-2 tokenizer; every library produces the same tokenization, gigatoken just does it faster. **340x faster** than the fastest existing Ruby gem (tiktoken_ruby) and **1,050x faster** than the tokenizers gem.  Full methodology, exact counts, and the caveats that matter: [docs/rb/benchmarks.md](docs/rb/benchmarks.md).
+Mac Studio M4 Max, OpenWebText, GPT-2 tokenizer; every library produces the same tokenization. **340x faster** than the fastest existing Ruby gem (tiktoken_ruby) and **1,050x faster** than the tokenizers gem.  Full methodology, exact counts, and the caveats that matter: [docs/rb/benchmarks.md](docs/rb/benchmarks.md).
 
 ## Install
 
