@@ -57,9 +57,9 @@ Gigatoken::Tokenizer.from_tiktoken("cl100k_base.tiktoken", pretokenizer: "gpt4",
 Gigatoken::Tokenizer.from_json(File.binread("tokenizer.json"))
 ```
 
-A `.tiktoken` file holds mergeable ranks only — its pretokenization scheme and special tokens live in the code that defines the encoding, not the file — so `pretokenizer:` is a required keyword (one of `Gigatoken::Native.pretokenizer_names`: `gpt2`/`r50k`, `gpt4`/`cl100k`, `qwen2`, `qwen35`, `olmo3`, `deepseek_v3`, `o200k`, `nemotron`, `kimi`) and `special_tokens:` defaults to none. Nothing is guessed: an unknown scheme raises `Gigatoken::Error` naming the valid ones, and `Tokenizer.load` on a `.tiktoken` path with no `pretokenizer:` raises rather than silently picking one.
+A `.tiktoken` file holds mergeable ranks only — its pretokenization scheme and special tokens live in the code that defines the encoding, not the file — so `pretokenizer:` is a required keyword (one of `Gigatoken::Native.pretokenizer_names`: `gpt2`/`r50k`, `gpt4`/`cl100k`, `qwen2`, `qwen35`, `olmo3`, `deepseek_v3`, `o200k`, `nemotron`, `kimi`) and `special_tokens:` defaults to none. Nothing is guessed: an unknown scheme raises `Gigatoken::ModelError` naming the valid ones, and `Tokenizer.load` on a `.tiktoken` path with no `pretokenizer:` raises rather than silently picking one.
 
-SentencePiece-BPE models (Llama, Gemma, Mistral — any `tokenizer.json` with `byte_fallback: true`) load through the same entry points and pick the right backend automatically. One difference: the SentencePiece core decodes text, so it validates input and raises `Gigatoken::Error` on invalid UTF-8 instead of guessing.
+SentencePiece-BPE models (Llama, Gemma, Mistral — any `tokenizer.json` with `byte_fallback: true`) load through the same entry points and pick the right backend automatically. One difference: the SentencePiece core decodes text, so it validates input and raises `Gigatoken::InputError` on invalid UTF-8 instead of guessing.
 
 ### Packaged tiktoken encodings
 
@@ -71,7 +71,7 @@ Gigatoken::Tokenizer.load("cl100k_base")          # same result — packaged nam
                                                   # checked before the Hub-repo-id shape
 ```
 
-`p50k_base` and `p50k_edit` are deliberately not packaged: both load the same non-dense ranks (id 50256 is left free for `<|endoftext|>`), and the rank loader rejects non-dense ranks. Both entry points raise `Gigatoken::Error` explaining that, rather than `load` falling through to the Hub for a name that happens to look like a legacy repo id.
+`p50k_base` and `p50k_edit` are deliberately not packaged: both load the same non-dense ranks (id 50256 is left free for `<|endoftext|>`), and the rank loader rejects non-dense ranks. Both entry points raise `Gigatoken::ModelError` explaining that, rather than `load` falling through to the Hub for a name that happens to look like a legacy repo id.
 
 `encode` on a packaged tokenizer honours its special-token table: text containing `<|endoftext|>` (or any other literal special-token string) is tokenized as that special token, not as ordinary text. That matches [`tiktoken`](https://github.com/openai/tiktoken)'s `encode_with_special_tokens`, not its plain `encode`, which treats the same literal as ordinary text — a difference worth knowing if you're tokenizing untrusted input. To get tiktoken's non-honouring default instead, build a tokenizer from the same rank file with an empty special-token table:
 
@@ -116,6 +116,12 @@ packed.lens         # => [12, 8, 41, ...] tokens per document
 packed.token_count  # => total tokens
 packed[3]           # => document 3's ids as an Array, on demand
 ```
+
+### Errors
+
+Everything the library raises is a `Gigatoken::Error`, never a raw Rust panic — and, under it, one of three: `Gigatoken::ModelError` when a tokenizer can't be loaded (bad or hostile JSON, a missing file or directory, an unknown or unpackable encoding name, a malformed `.tiktoken`), `Gigatoken::InputError` when a document or an id can't be taken (a String that won't transcode, invalid UTF-8 on the SentencePiece path, an id outside the vocabulary in `decode`), and `Gigatoken::HubError` for everything `Gigatoken::Hub` raises (HTTP status, transport, timeout, the repo-id and header checks). `rescue Gigatoken::Error` catches all three.
+
+`encode` and `encode_batch` honour the String's encoding tag: UTF-8, US-ASCII and binary go through byte-wise, and a real non-UTF-8 encoding (ISO-8859-1, UTF-16LE, …) is transcoded first, so it gives the same ids as the same text read as UTF-8. See [the reference](docs/reference/tokenizer.md#input-encodings).
 
 ### Async
 
