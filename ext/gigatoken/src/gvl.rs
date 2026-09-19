@@ -17,7 +17,7 @@
 //! (`~/architect/src/github.com/socketry/io-event/ext/io/event/worker_pool.c:309-316`).
 //! Without such a scheduler (or with one lacking a worker pool), `rb_nogvl`
 //! degrades to exactly today's behavior: release the GVL, block this thread.
-//! See `docs/rb/async-design.md` and `docs/rb/async.md` for the full design
+//! See `docs/explanation/async-design.md` and `docs/how-to/run-under-async.md` for the full design
 //! and gotchas (worker pool is opt-in, defaults to one background worker).
 //!
 //! `func`/`data1` may now run on a different OS thread than the caller (the

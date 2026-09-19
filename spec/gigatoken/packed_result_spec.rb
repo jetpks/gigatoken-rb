@@ -18,6 +18,13 @@ RSpec.describe Gigatoken::PackedResult do
     expect(packed[2]).to eq([30, 40, 50])
   end
 
+  it "indexes from the end with a negative index and gives nil out of range, like Array" do
+    expect(packed[-1]).to eq([30, 40, 50])
+    expect(packed[-3]).to eq([10, 20])
+    expect(packed[3]).to be_nil
+    expect(packed[-4]).to be_nil
+  end
+
   it "enumerates documents in order, as an Enumerable" do
     expect(packed.each.to_a).to eq([[10, 20], [], [30, 40, 50]])
     expect(packed.map(&:size)).to eq([2, 0, 3])

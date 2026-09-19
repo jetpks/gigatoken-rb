@@ -49,8 +49,8 @@ module Gigatoken
 
     # Load tokenizer.json from HuggingFace Hub repo `repo_id` at `revision`
     # (downloaded directly; huggingface_hub is not required).
-    def self.from_hub(repo_id, revision: "main", hub: Hub.new)
-      from_file(hub.hub_file(repo_id, "tokenizer.json", revision: revision))
+    def self.from_hub(repo_id, revision: "main", hub: nil)
+      from_file((hub || Hub.new).hub_file(repo_id, "tokenizer.json", revision: revision))
     end
 
     # Load from any of the supported source shapes: an existing file or
@@ -67,7 +67,7 @@ module Gigatoken
     # here too, raising the same explanation from_encoding gives rather than
     # reaching the Hub — but only those; an unrecognized bare name like
     # "gpt2" still dispatches to the Hub.
-    def self.load(source, pretokenizer: nil, special_tokens: {}, revision: "main", hub: Hub.new)
+    def self.load(source, pretokenizer: nil, special_tokens: {}, revision: "main", hub: nil)
       source = source.to_s
       if source.end_with?(".tiktoken")
         unless pretokenizer
@@ -83,8 +83,12 @@ module Gigatoken
       raise Error, "#{source.inspect}: no such file or directory, not a .tiktoken path, and doesn't look like a HuggingFace Hub repo id"
     end
 
+    # `data` is UTF-8 JSON whatever its encoding tag says (File.binread tags
+    # binary; a US-ASCII default_external tags that), so retag rather than let
+    # JSON.parse transcode from the tag; a UTF-8-tagged String needs no copy.
     def self.special_tokens_from_json(data)
-      added = JSON.parse(data.dup.force_encoding(Encoding::UTF_8))["added_tokens"] || []
+      data = data.dup.force_encoding(Encoding::UTF_8) unless data.encoding == Encoding::UTF_8
+      added = JSON.parse(data)["added_tokens"] || []
       added.each_with_object({}) { |t, h| h[t["content"]] = t["id"] if t["special"] }
     end
     private_class_method :special_tokens_from_json

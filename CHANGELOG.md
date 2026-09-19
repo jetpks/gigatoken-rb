@@ -1,5 +1,57 @@
 # Changelog
 
+## [0.3.0] - 2026-09-19
+
+- **Packed results index in one object.** `PackedResult#[]` built an Array
+  of `:u32` symbols as long as the document on every access, only to
+  describe the layout to `IO::Buffer#get_values`; it now asks
+  `IO::Buffer#values` for the ids directly — one Array, half the bytes.
+  `#to_a` builds the ragged shape directly rather than through an
+  Enumerator. Negative indices count from the end and out-of-range ones
+  return `nil`, like Array, where they raised out of `IO::Buffer` before.
+
+- **`Tokenizer.load` by name or path no longer builds a Hub client.** The
+  `hub: Hub.new` default ran on every call — a `Gigatoken::Hub`, an
+  `Async::HTTP::Internet` and three Hashes — including for the packaged
+  encodings and local files that never touch the network. The client is
+  built only when the source turns out to be a repo id: 3 objects per load
+  instead of 8. `from_hub` takes the same lazy `hub: nil` default. The Hub
+  endpoint honours `HF_ENDPOINT`, as huggingface_hub does, so the default
+  client can be pointed at a mirror or a test server without injecting one.
+  `from_json` retags a non-UTF-8-tagged String rather than copying every
+  input.
+
+- **The extension crate is 0.3.0 too** (`ext/gigatoken/Cargo.toml`,
+  `Cargo.lock`), moving with the gem as every release has.
+
+- **No per-document copy in the ragged batch path.** The extension built
+  each document's Array from a fresh `Vec` copy of its slice of the flat
+  result; it now builds the Array from the slice directly.
+
+- **Allocation budgets are frozen** in `spec/gigatoken/allocations_spec.rb`:
+  `encode` and `decode` 1 object, ragged batches one Array per document,
+  packed batches a fixed 9, `PackedResult#[]` 1. `bench/operations.rb`
+  measures every public operation (with `tiktoken_ruby` beside it) for
+  iterations per second, objects and malloc per call; the numbers are on
+  the benchmarks page.
+
+- **Native paths are tested under GC stress.** `spec/gigatoken/gc_stress_spec.rb`
+  runs every extension path — encode, batch, packed, files in each format,
+  decode, the SentencePiece backend — with a minor GC at every allocation, in
+  seconds. CI's "hard-mode" rerun of the whole suite, which had never
+  actually set `GC.stress`, is gone (live, it takes an hour-plus on Ruby
+  3.4); `GC_STRESS=1 bundle exec rspec` still runs the whole suite that way.
+
+- **Rust toolchain pinned to `nightly-2026-09-18`** (`rust-toolchain.toml` and
+  CI), so builds are reproducible until the pin is moved on purpose. Stable
+  isn't possible yet: the core's SentencePiece scanner uses `std::simd`,
+  which is still unstable (`portable_simd`, rust-lang/rust#86656).
+
+- **Docs reorganized by Diátaxis** under `docs/`: a tutorial, how-to guides
+  (loading, files, packed results, cache budget, Async, measuring),
+  reference pages for every class, and explanation pages (benchmarks,
+  allocations, the Async design). `docs/rb/` moved into that layout.
+
 ## [0.2.2] - 2026-09-08
 
 - **Fix a fatal crash when the extension is loaded on a thread that later
@@ -63,7 +115,7 @@
   On single `#encode`, this change is **neutral within what we can measure**.
   The reproducible harness is `bench/encode_ab.rb`
   (`ruby -Ilib bench/encode_ab.rb`); the numbers, the machines and the method
-  are in `docs/rb/benchmarks.md` under "0.2.1 thread-safety benchmark".
+  are in `docs/explanation/benchmarks.md` under "0.2.1 thread-safety benchmark".
 
   Read that section before quoting a figure from it. The harness reports a
   median with a bootstrap-derived noise floor now, not a mean — an earlier

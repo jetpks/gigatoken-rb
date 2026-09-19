@@ -28,9 +28,13 @@ module Gigatoken
       lens.sum
     end
 
-    # Array of token ids for document `i`, materialized on demand.
+    # Array of token ids for document `i`, materialized on demand; negative
+    # indices count from the end and out-of-range ones give nil, like Array.
     def [](i)
-      buffer.get_values(Array.new(lens[i], :u32), @offsets[i] * 4)
+      i += size if i.negative?
+      return unless i >= 0 && i < size
+
+      buffer.values(:u32, @offsets[i] * 4, lens[i])
     end
 
     def each
@@ -42,7 +46,7 @@ module Gigatoken
     # A ragged Array of Arrays, one per document — the same shape
     # `encode_batch`/`encode_files` return with `packed: false`.
     def to_a
-      each.to_a
+      Array.new(size) { |i| self[i] }
     end
   end
 end

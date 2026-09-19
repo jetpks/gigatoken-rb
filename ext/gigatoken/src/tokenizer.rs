@@ -43,7 +43,7 @@ pub(crate) fn ragged_result(ruby: &Ruby, flat: Vec<u32>, lens: Vec<i64>) -> Resu
     let mut offset = 0usize;
     for len in lens {
         let len = len as usize;
-        result.push(flat[offset..offset + len].to_vec())?;
+        result.push(ruby.ary_from_iter(flat[offset..offset + len].iter().copied()))?;
         offset += len;
     }
     Ok(result)
@@ -460,7 +460,7 @@ impl BPETokenizer {
     /// Before you re-inline this "to simplify": rerun the evidence rather than
     /// trusting a number. `ruby -Ilib bench/encode_ab.rb` with the attributes
     /// stripped and again with them restored, and read
-    /// `docs/rb/benchmarks.md` first — no size resolves this on the hardware
+    /// `docs/explanation/benchmarks.md` first — no size resolves this on the hardware
     /// measured so far. The instrument is honest (an interleaved same-build
     /// run never calls a size faster or slower, at any size) and has power to
     /// catch a couple-percent effect reliably, but the attributes' real

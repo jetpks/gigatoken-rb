@@ -15,7 +15,7 @@ Zero-copy Ruby bindings for [marcelroed/gigatoken](https://github.com/marcelroed
 
 Mac Studio M4 Max, OpenWebText, GPT-2 tokenizer; every library produces the same tokenization, gigatoken just does it faster. The Python row includes a fix for [marcelroed/gigatoken#38](https://github.com/marcelroed/gigatoken/issues/38) — a hidden memcpy in `shrink_to_fit()` we found while chasing the last of the Ruby–Python gap and sent upstream (one-line fix; without it the wheel lands around 7.4 GB/s).
 
-**340x faster** than the fastest existing Ruby gem (tiktoken_ruby) and **1,050x faster** than the tokenizers gem. Full methodology & exact counts: [docs/rb/benchmarks.md](docs/rb/benchmarks.md).
+**340x faster** than the fastest existing Ruby gem (tiktoken_ruby) and **1,050x faster** than the tokenizers gem. Full methodology & exact counts: [docs/explanation/benchmarks.md](docs/explanation/benchmarks.md).
 
 ## Install
 
@@ -119,7 +119,7 @@ packed[3]           # => document 3's ids as an Array, on demand
 
 ### Async
 
-`encode_batch` and `encode_files` release the GVL for the whole encode; the parallelism runs on the engine's rayon pool, not Ruby threads. Under `Async`, give the fiber scheduler a worker pool (`ASYNC_SCHEDULER_WORKER_POOL=true`) and the calling fiber yields to the reactor too. Design notes: [docs/rb/async.md](docs/rb/async.md).
+`encode_batch` and `encode_files` release the GVL for the whole encode; the parallelism runs on the engine's rayon pool, not Ruby threads. Under `Async`, give the fiber scheduler a worker pool (`ASYNC_SCHEDULER_WORKER_POOL=true`) and the calling fiber yields to the reactor too. Design notes: [docs/how-to/run-under-async.md](docs/how-to/run-under-async.md).
 
 ## CLI
 
@@ -138,6 +138,16 @@ gigatoken bench lib/gigatoken/encodings/cl100k_base.tiktoken README.md --pretoke
 
 Leave it off against a `.tiktoken` TOKENIZER and both commands raise `Gigatoken::Error` naming the valid schemes instead of crashing; for every other TOKENIZER shape (`tokenizer.json`, a packaged name, a Hub repo id) `--pretokenizer` is accepted but ignored.
 
+## Documentation
+
+In-depth docs live under [`docs/`](docs/README.md), organized by
+[Diátaxis](https://diataxis.fr/):
+
+- **Tutorial:** [Getting started](docs/tutorials/getting-started.md)
+- **How-to:** [Load a tokenizer](docs/how-to/load-a-tokenizer.md), [Tokenize files](docs/how-to/tokenize-files.md), [Packed results](docs/how-to/use-packed-results.md), [Cache budget](docs/how-to/tune-the-cache-budget.md), [Async](docs/how-to/run-under-async.md), [Measure](docs/how-to/measure-time-and-allocations.md)
+- **Reference:** [`Tokenizer`](docs/reference/tokenizer.md), [`PackedResult`](docs/reference/packed-result.md), [File sources](docs/reference/file-sources.md), [Encodings and settings](docs/reference/encodings-and-settings.md), [CLI](docs/reference/cli.md)
+- **Explanation:** [Benchmarks](docs/explanation/benchmarks.md), [Allocations](docs/explanation/allocations.md), [Async design](docs/explanation/async-design.md)
+
 ## Development
 
 ```bash
@@ -145,6 +155,7 @@ bundle install
 bundle exec rake compile    # native extension (Rust nightly, via rust-toolchain.toml)
 bundle exec rspec
 bundle exec standardrb
+ruby -Ilib bench/operations.rb   # every operation: i/s, objects and malloc per call
 ```
 
 The Ruby layer is fiber-first throughout — no `Thread`, no `Mutex`; all parallelism lives in the core's rayon pool. CI runs ubuntu + macos × Ruby 3.3/3.4/4.0, and `release.yml` cross-builds the precompiled native gems (arm64-darwin, x86_64-linux, aarch64-linux).
