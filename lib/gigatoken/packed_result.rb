@@ -29,8 +29,12 @@ module Gigatoken
     end
 
     # Array of token ids for document `i`, materialized on demand; negative
-    # indices count from the end and out-of-range ones give nil, like Array.
-    def [](i)
+    # indices count from the end, out-of-range ones give nil, and a
+    # non-Integer index is a TypeError, all like Array.
+    def [](index)
+      i = Integer.try_convert(index)
+      raise TypeError, "no implicit conversion of #{index.class} into Integer" if i.nil?
+
       i += size if i.negative?
       return unless i >= 0 && i < size
 

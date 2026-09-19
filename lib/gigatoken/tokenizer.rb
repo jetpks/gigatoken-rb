@@ -10,18 +10,35 @@ module Gigatoken
     FILE_SOURCE_CLASSES = [Native::TextFileSource, Native::JsonlFileSource, Native::ParquetFileSource].freeze
     private_constant :FILE_SOURCE_CLASSES
 
+    # Encodings whose bytes reach the native call untouched. UTF-8 is checked
+    # by identity first — it is the hot path, see #encode — and these are the
+    # rest: US-ASCII already is UTF-8 bytes, and ASCII-8BIT is deliberately
+    # raw bytes. Anything else — ISO-8859-1, Windows-1252, UTF-16LE — is a
+    # real encoding whose bytes are not the text's UTF-8 bytes, so encoding it
+    # raw would give different ids than the same text read as UTF-8. (Invalid
+    # bytes in a UTF-8-tagged String stay raw: a documented difference from
+    # tiktoken, which rejects them.)
+    BYTEWISE_ENCODINGS = [Encoding::US_ASCII, Encoding::BINARY].freeze
+    private_constant :BYTEWISE_ENCODINGS
+
     # Load from in-memory tokenizer.json contents (String or bytes). Backed
     # by a BPETokenizer or a SentencePieceTokenizer, per the model's
-    # byte_fallback flag.
+    # byte_fallback flag. The document is parsed twice, deliberately: the Ruby
+    # parse runs first because JSON.parse's depth limit is what keeps hostile
+    # nesting away from the native parser (see parse_json), and it is also
+    # where the special-token table is read from.
     def self.from_json(data)
-      native = Native.load_hf_json(data)
-      new(native, special_tokens: special_tokens_from_json(data))
+      json = String.try_convert(data) or raise TypeError, "no implicit conversion of #{data.class} into String"
+      parsed = parse_json(json)
+      new(Native.load_hf_json(json), special_tokens: special_tokens_from(parsed))
     end
 
     # Load from a tokenizer.json path, or a directory containing one.
     def self.from_file(path)
-      path = File.join(path, "tokenizer.json") if File.directory?(path)
-      from_json(File.binread(path))
+      file = File.directory?(path) ? File.join(path, "tokenizer.json") : path.to_s
+      raise ModelError, "#{file.inspect}: no such file" unless File.file?(file)
+
+      from_json(File.binread(file))
     end
 
     # Load from a .tiktoken mergeable-ranks file. The file carries neither a
@@ -44,7 +61,7 @@ module Gigatoken
 
       reason = Encodings.unpackable_reason(name)
       detail = reason ? " — #{reason}" : ""
-      raise Error, "#{name.inspect}: not a packaged encoding#{detail} (packaged encodings: #{Encodings::NAMES.join(", ")})"
+      raise ModelError, "#{name.inspect}: not a packaged encoding#{detail} (packaged encodings: #{Encodings::NAMES.join(", ")})"
     end
 
     # Load tokenizer.json from HuggingFace Hub repo `repo_id` at `revision`
@@ -71,7 +88,7 @@ module Gigatoken
       source = source.to_s
       if source.end_with?(".tiktoken")
         unless pretokenizer
-          raise Error, "#{source.inspect}: a .tiktoken file carries no pretokenizer scheme of its own — " \
+          raise ModelError, "#{source.inspect}: a .tiktoken file carries no pretokenizer scheme of its own — " \
             "pass pretokenizer: (one of #{Native.pretokenizer_names.join(", ")})"
         end
         return from_tiktoken(source, pretokenizer: pretokenizer, special_tokens: special_tokens)
@@ -80,25 +97,44 @@ module Gigatoken
       return from_encoding(source) if Encodings::NAMES.include?(source) || Encodings.unpackable_reason(source)
       return from_hub(source, revision: revision, hub: hub) if Hub.looks_like_repo_id?(source)
 
-      raise Error, "#{source.inspect}: no such file or directory, not a .tiktoken path, and doesn't look like a HuggingFace Hub repo id"
+      raise ModelError, "#{source.inspect}: no such file or directory, not a .tiktoken path, and doesn't look like a HuggingFace Hub repo id"
     end
 
     # `data` is UTF-8 JSON whatever its encoding tag says (File.binread tags
     # binary; a US-ASCII default_external tags that), so retag rather than let
     # JSON.parse transcode from the tag; a UTF-8-tagged String needs no copy.
-    def self.special_tokens_from_json(data)
+    # JSON.parse's default max_nesting of 100 is the guard: the native parser
+    # is recursive with no depth limit, and deep enough nesting overflows its
+    # stack rather than raising.
+    def self.parse_json(data)
       data = data.dup.force_encoding(Encoding::UTF_8) unless data.encoding == Encoding::UTF_8
-      added = JSON.parse(data)["added_tokens"] || []
+      JSON.parse(data)
+    rescue JSON::ParserError => e
+      raise ModelError, "failed to parse tokenizer JSON: #{e.message}"
+    end
+    private_class_method :parse_json
+
+    def self.special_tokens_from(parsed)
+      added = parsed["added_tokens"] || []
       added.each_with_object({}) { |t, h| h[t["content"]] = t["id"] if t["special"] }
     end
-    private_class_method :special_tokens_from_json
+    private_class_method :special_tokens_from
 
+    # The table is frozen so `#special_tokens` can neither alias the
+    # deep-frozen registry's Hash nor a `from_tiktoken` caller's; an
+    # already-frozen one is safe to share as-is.
     def initialize(native, special_tokens: {})
       @native = native
-      @special_tokens = special_tokens
+      @special_tokens = special_tokens.frozen? ? special_tokens : special_tokens.dup.freeze
     end
 
+    # A String already tagged UTF-8 — every ordinary document — reaches the
+    # native call over one inline identity check. A helper frame here is
+    # measurable against the encode itself at document sizes this small, so
+    # the check is spelled out rather than delegated to #transcode?; anything
+    # else takes the slow path in #utf8.
     def encode(text)
+      text = utf8(text) unless text.is_a?(String) && text.encoding == Encoding::UTF_8
       @native.encode(text)
     end
 
@@ -107,6 +143,7 @@ module Gigatoken
     # token ids plus per-document lengths), avoiding the per-token Ruby
     # array materialization the ragged shape costs.
     def encode_batch(texts, packed: false)
+      texts = utf8_batch(texts)
       if packed
         PackedResult.new(*@native.encode_batch_packed(texts))
       else
@@ -154,5 +191,34 @@ module Gigatoken
     end
 
     attr_reader :special_tokens
+
+    private
+
+    # UTF-8 first and by identity, so the batch walk below costs the same one
+    # comparison per document that #encode costs; the list is only consulted
+    # for the encodings that aren't it.
+    def transcode?(text)
+      text.is_a?(String) && text.encoding != Encoding::UTF_8 && !BYTEWISE_ENCODINGS.include?(text.encoding)
+    end
+
+    # A transcode that can't be done — a dummy encoding like UTF-7, bytes the
+    # tag doesn't allow, a character the target can't hold — is a fact about
+    # the document, not about the tokenizer, and reaches the caller as one.
+    def utf8(text)
+      transcode?(text) ? text.encode(Encoding::UTF_8) : text
+    rescue EncodingError => e
+      raise InputError, e.message
+    end
+
+    # The same rule per document, without copying the Array when — as in
+    # every UTF-8 batch — there is nothing to transcode. Elements are only
+    # type-checked, never coerced: a `to_str` object is left for the native
+    # side to convert under its own snapshot of the input.
+    def utf8_batch(texts)
+      array = Array.try_convert(texts)
+      return texts if array.nil? || array.none? { |text| transcode?(text) }
+
+      array.map { |text| utf8(text) }
+    end
   end
 end

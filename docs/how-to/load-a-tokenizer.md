@@ -66,12 +66,28 @@ set (a mirror, or a local server) and huggingface.co otherwise, and lands in
 the standard HuggingFace cache (`HF_HUB_CACHE`, then `$HF_HOME/hub`), so later
 loads by this gem or by `huggingface_hub` are served from disk.
 
+Requests time out after 10 seconds — huggingface_hub's default — and follow
+`http_proxy` / `https_proxy` (with `no_proxy`) when the environment sets them.
+Every failure is a `Gigatoken::HubError` (a `Gigatoken::Error`) naming the URL,
+including a refused connection, a proxy refusing the `CONNECT` tunnel, a DNS
+failure and the timeout itself.
+
+A revision may be nested (`revision: "refs/pr/1"`), and is percent-encoded in
+the URL like huggingface_hub does it. The repo id, the filename and the
+revision may not contain a `.` or `..` path segment, a leading `/` or a NUL
+byte, and the response's `x-repo-commit` header must be a commit hash: those
+name directories in your cache, and the header comes from the server.
+
 To point at a mirror, or a local server in tests, inject the client:
 
 ```ruby
-hub = Gigatoken::Hub.new(endpoint: "http://localhost:8080")
+hub = Gigatoken::Hub.new(endpoint: "http://localhost:8080", timeout: 30)
 Gigatoken::Tokenizer.load("org/model", hub: hub)
 ```
+
+An endpoint that does not send `x-repo-commit` is not a Hub — a plain static
+mirror will be refused rather than downloaded into a snapshot the cache could
+never find again.
 
 `load` builds a `Gigatoken::Hub` only when the source turns out to be a
 repo id; packaged encodings and local files never construct one.

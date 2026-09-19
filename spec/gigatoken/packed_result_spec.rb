@@ -25,6 +25,19 @@ RSpec.describe Gigatoken::PackedResult do
     expect(packed[-4]).to be_nil
   end
 
+  it "raises TypeError for a non-Integer index, like Array" do
+    [nil, "a", 1.5..2.0].each do |index|
+      expect { packed[index] }.to raise_error(TypeError)
+    end
+  end
+
+  it "accepts anything with to_int, like Array" do
+    index = Object.new
+    index.define_singleton_method(:to_int) { 2 }
+
+    expect(packed[index]).to eq([30, 40, 50])
+  end
+
   it "enumerates documents in order, as an Enumerable" do
     expect(packed.each.to_a).to eq([[10, 20], [], [30, 40, 50]])
     expect(packed.map(&:size)).to eq([2, 0, 3])

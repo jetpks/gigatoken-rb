@@ -14,7 +14,7 @@ Python CLI.
 | Option | Default | Effect |
 | ------ | ------- | ------ |
 | `--doc-separator SEP` | none | split files on SEP (e.g. `"<\|endoftext\|>"`); whole files are single documents otherwise |
-| `--limit-bytes N` | `none` | cap the bytes benchmarked, e.g. `100MB` (parallel mode only) |
+| `--limit-bytes N` | `none` | cap the bytes benchmarked, e.g. `100MB` or `64MiB` (parallel mode only) |
 | `--[no-]parallel` | parallel | `--no-parallel` runs the fused serial core path |
 | `--packed` | off | time the fused native file path with a packed `IO::Buffer` result (ignores `--limit-bytes`) |
 | `--pretokenizer NAME` | none | required when TOKENIZER is a `.tiktoken` file; ignored otherwise |
@@ -27,8 +27,27 @@ above.
 
 TOKENIZER is anything `Gigatoken::Tokenizer.load` accepts: a
 `tokenizer.json` path or directory, a packaged encoding name, a Hub repo id,
-or a `.tiktoken` file (with `--pretokenizer`). Errors print `error: ...` and
-exit 1.
+or a `.tiktoken` file (with `--pretokenizer`).
+
+## Sizes
+
+`--limit-bytes` takes decimal units (`KB`, `MB`, `GB`, `TB` — powers of
+1000) or binary ones (`KiB`, `MiB`, `GiB`, `TiB` — powers of 1024); a bare
+number is bytes, and `none` or `unlimited` means no cap.
+
+## Compressed FILES
+
+`.gz`, `.zst` and `.zstd` files work in both commands. The Ruby-side split
+reads them through the engine's own decoder — the same one the native file
+sources load through, detecting compression from the extension — so
+`validate` compares like with like and `bench` reports MB/s over the
+decompressed bytes.
+
+## Errors
+
+Errors print a single `error: ...` line and exit 1, with no backtrace —
+a tokenizer that will not load, a missing, unreadable or undecompressable
+FILE, an empty `--doc-separator`, or an empty FILES list.
 
 ```sh
 gigatoken bench cl100k_base owt_train.txt --doc-separator "<|endoftext|>" --packed

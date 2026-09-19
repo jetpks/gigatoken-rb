@@ -30,6 +30,12 @@ Gem::Specification.new do |spec|
     "Cargo.lock",
     "rust-toolchain.toml",
     "src/**/*.rs",
+    # Cargo parses the whole workspace manifest before building the
+    # extension, and the root Cargo.toml declares these as bench targets —
+    # a missing source file there is a manifest error, not a skipped
+    # target, so an unpacked source gem would not compile without them.
+    # 52 KB of text against a 3 MB gem.
+    "benches/**/*.rs",
     "README.md",
     "LICENSE"
   ]
@@ -43,4 +49,8 @@ Gem::Specification.new do |spec|
   spec.add_dependency "async", "~> 2.43"
   spec.add_dependency "async-http", "~> 0.96"
   spec.add_dependency "dry-cli", "~> 1.0"
+  # ext/gigatoken/extconf.rb requires rb_sys/mkmf, and RubyGems fetches only
+  # declared dependencies before building an extension — undeclared, the
+  # source gem fails to install on a Ruby that doesn't already have it.
+  spec.add_dependency "rb_sys", "~> 0.9"
 end

@@ -1,5 +1,141 @@
 # Changelog
 
+## [0.4.0] - 2026-09-19
+
+### Fixed
+
+- **`Gigatoken::Hub` checks what it sends and what it gets back.** Both
+  halves of a repo id, `revision` and `filename` are rejected — before any
+  request or cache access — if they carry a `.` or `..` path segment, a
+  leading `/`, or a NUL byte, so a caller-supplied name can never escape
+  the cache directory. `revision` is percent-encoded whole the way
+  huggingface_hub does (`quote(revision, safe="")`), so `refs/pr/1` travels
+  as `refs%2Fpr%2F1`, and the ref file's parent directory is created before
+  it is written — `refs/pr/N` revisions now load and cache-hit on the second
+  call. On the response side, `x-repo-commit` must be a 40-character hex
+  commit hash: it names the snapshot directory, so a server-chosen path is
+  never trusted, and a download with no header at all no longer lands in a
+  dead `snapshots/main` that no later lookup finds.
+
+- **A failing Hub download raises instead of hanging.** A 4xx or 5xx with a
+  body over HTTP/1.x used to stall inside `Sync` waiting for a connection
+  that was never drained; every non-2xx path now closes the response before
+  raising. Requests carry a 10-second connect/read timeout by default
+  (huggingface_hub's `HF_HUB_ETAG_TIMEOUT` / `HF_HUB_DOWNLOAD_TIMEOUT`
+  value), overridable with `Gigatoken::Hub.new(timeout:)`.
+
+- **Redirects carry the right headers.** The `Authorization` header travels
+  on a same-origin redirect — huggingface.co answers a renamed repo with a
+  307 to its new name, which used to fail — and is dropped crossing to
+  another origin, so the LFS CDN never sees the token (huggingface_hub's
+  rule). `x-repo-commit` is read from the first hop that carries it, whether
+  that is the `resolve/` hop or the one that finally answers 200.
+
+- **A batch encode interrupted mid-flight stops there.** `Timeout`,
+  `Thread#kill`, Ctrl-C and — on Ruby 4.0, where the fiber scheduler's worker
+  pool exists — an Async timeout cancel `encode_batch` / `encode_files` at the
+  next document boundary and raise where you called it, instead of running
+  the whole corpus to completion first. The partial
+  result is discarded and the inputs are left untouched. A single-chunk
+  batch interrupted by a trapped (non-raising) signal returns its complete
+  result rather than a truncated one.
+
+- **No more reader/writer deadlock in `BPETokenizer`.** The writer-preferring
+  lock could stall the VM when one thread's cache write queued behind
+  readers while holding the GVL; the lock is gone from the encode path.
+
+- **Native failures raise instead of aborting the process.** `#decode` with
+  an id outside the vocabulary, and a malformed `.tiktoken` rank file, now
+  raise a `Gigatoken::Error` subclass; both used to take the process down.
+  The SentencePiece backend accepts `to_str`-convertible batch elements.
+
+- **The source gem installs on a clean Ruby.** `ext/gigatoken/extconf.rb`
+  requires `rb_sys/mkmf`, and RubyGems fetches only declared dependencies
+  before building an extension, so `gem install gigatoken` failed with
+  `LoadError: cannot load such file -- rb_sys/mkmf` on any machine that
+  didn't already have it — including 0.3.0. `rb_sys` is now a declared
+  runtime dependency, and the release workflow builds, installs and
+  requires the source gem with a Rust toolchain set up the way CI does.
+  The profiling profile's `rustflags` line and its `.cargo/config.toml`
+  opt-in are gone, so an unpacked source gem is a manifest Cargo accepts on
+  its own; `scripts/profile-cpu.fish` sets `RUSTFLAGS` for its own build.
+
+- **Smaller shapes.** `Tokenizer.from_file` names the path it couldn't find,
+  whether it was a missing file or a directory with no `tokenizer.json`;
+  `PackedResult#[]` with a non-Integer raises `TypeError` like `Array#[]`;
+  the CLI prints `error: …` and exits 1 for a missing file, an unreadable
+  one, an empty `--doc-separator` or an empty FILES list, rather than a
+  backtrace; `parse_size` reads `KiB`/`MiB`/`GiB`/`TiB` as binary units and
+  `KB`/`MB`/… as decimal.
+
+### Added
+
+- **An error hierarchy under `Gigatoken::Error`.** `Gigatoken::HubError` for
+  everything `Gigatoken::Hub` raises (HTTP status, transport, timeout, the
+  validation above); `Gigatoken::InputError` for a document the tokenizer
+  cannot take (an untranscodable String, invalid UTF-8 on the SentencePiece
+  path, an id outside the vocabulary in `#decode`); `Gigatoken::ModelError`
+  for a tokenizer that cannot be loaded (bad or hostile JSON, a missing file
+  or directory, an unknown or unpackable encoding name, a malformed
+  `.tiktoken`). All three subclass `Gigatoken::Error`, so `rescue
+  Gigatoken::Error` keeps catching everything it caught before.
+
+- **`Gigatoken::Hub` honours the proxy environment.** `http_proxy` /
+  `HTTP_PROXY` and `https_proxy` / `HTTPS_PROXY` are used per scheme (the
+  lowercase spelling wins, as in `requests`) and suppressed for hosts named
+  by `no_proxy` / `NO_PROXY`. An http request travels with the absolute URI
+  in its request line, an https one through a `CONNECT` tunnel.
+
+- **`.zst` on the CLI.** `bench` and `validate` decompress `.gz` and `.zst`
+  inputs through the core's own decoder — the same one `encode_files` uses —
+  and report MB/s over the decompressed byte count, so a compressed corpus
+  and its plain twin report the same figure. 0.3.0 read compressed FILES raw
+  on the Ruby side, so `validate` mismatched on them and `bench` counted
+  compressed bytes.
+
+- **`from_encoding` takes a Symbol**, matching `load(:cl100k_base)`.
+
+- **`docs/reference/file-sources.md` states the SIGBUS constraint**:
+  uncompressed inputs are memory-mapped, so they must not be truncated or
+  rewritten in place while `encode_files` runs (the process takes SIGBUS,
+  which Ruby cannot rescue). Rotate by rename. Compressed inputs are read
+  into memory and are unaffected.
+
+### Changed
+
+- **An endpoint that omits `x-repo-commit` is refused.** It cannot be a Hub:
+  its download could never be found in the cache again. Static file mirrors
+  behind `HF_ENDPOINT` that used to "work" now raise `Gigatoken::HubError`
+  naming the URL and the header.
+
+- **`#encode` transcodes a String tagged with a real non-UTF-8 encoding.**
+  ISO-8859-1, Windows-1252, UTF-16LE and friends are converted to UTF-8
+  before the native call, so they give the same ids as the same text read as
+  UTF-8; previously their bytes went through raw and produced different ids.
+  UTF-8, US-ASCII and ASCII-8BIT are unchanged — binary stays deliberately
+  byte-wise, and invalid bytes in a UTF-8-tagged String stay raw (a
+  documented difference from tiktoken). The same rule applies to every
+  element of `encode_batch` and to `packed:`. A transcode that cannot be
+  done raises `Gigatoken::InputError` where the exception used to escape as
+  a raw `Encoding::ConverterNotFoundError` / `InvalidByteSequenceError` /
+  `UndefinedConversionError`. The UTF-8 fast path costs one inline identity
+  check and holds the allocation budgets `spec/gigatoken/allocations_spec.rb`
+  freezes.
+
+- **Cancellation replaces run-to-completion.** See the interrupt entry above:
+  code that relied on an interrupted batch finishing its corpus anyway will
+  now get the exception at the next document boundary with no result.
+
+- **`Gigatoken::Encodings::REGISTRY` is deep-frozen** — entries, their
+  `special_tokens` Hashes and `rank_file` Strings — and `Tokenizer#initialize`
+  stores a frozen copy of the table it is given. `Tokenizer#special_tokens`
+  hands back a frozen Hash, so one caller's poke can no longer rewrite what
+  every later `from_encoding` in the process loads. Mutating it raises
+  `FrozenError` where it used to silently succeed.
+
+- **The extension crate is 0.4.0 too** (`ext/gigatoken/Cargo.toml`,
+  `Cargo.lock`), moving with the gem as every release has.
+
 ## [0.3.0] - 2026-09-19
 
 - **Packed results index in one object.** `PackedResult#[]` built an Array

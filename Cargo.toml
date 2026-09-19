@@ -70,6 +70,13 @@ debug = true
 strip = "none"
 split-debuginfo = "packed"
 
+# Frame pointers make Instruments' stack unwinding reliable, but a per-profile
+# `rustflags` here is nightly-only and would need a `.cargo/config.toml` opt-in
+# that the gem does not ship — which made the source gem unbuildable. The
+# profile keeps the debug info; scripts/profile-cpu.fish exports RUSTFLAGS for
+# its own build instead (this profile has its own target subdirectory, so that
+# never reaches a release build). Mangling stays at the toolchain default (v0);
+# `cargo instruments` demangles v0 symbols itself.
 [profile.profiling]
 inherits = "release"
 debug = 2
@@ -77,9 +84,6 @@ lto = false
 codegen-units = 1
 strip = "none"
 split-debuginfo = "packed"
-# Frame pointers make Instruments' stack unwinding reliable. Mangling is left at
-# the toolchain default (v0); `cargo instruments` demangles v0 symbols itself.
-rustflags = ["-C", "force-frame-pointers=yes"]
 
 [profile.profiling.package."*"]
 debug = 2

@@ -12,7 +12,7 @@ use crate::pretokenize::{
     Pretoken, PretokenSpans, PretokenizerType, SpanBatch, pack_pretoken_key, pretoken_key_hash,
 };
 use crate::token::TokenId;
-use eyre::Result;
+use eyre::{Result, ensure, eyre};
 use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
@@ -708,6 +708,12 @@ impl Tokenizer {
     /// merges map and returns a Tokenizer.
     ///
     /// This process is necessary to load some tokenizers found in tiktoken.
+    ///
+    /// A rank file is untrusted input, so the two shapes that make the
+    /// reconstruction impossible are errors rather than panics: a multi-byte
+    /// token whose bytes have no single-byte tokens to build from, and one
+    /// that does not reduce to a pair of tokens already seen (the merge it
+    /// would record has no two operands).
     pub fn from_ranks(vocab: Vec<Vec<u8>>) -> Result<Self> {
         let mut merges: HashMap<(TokenId, TokenId), TokenId, rustc_hash::FxBuildHasher> =
             HashMap::with_hasher(rustc_hash::FxBuildHasher {});
@@ -727,10 +733,21 @@ impl Tokenizer {
             }
             let byte_symbols: Vec<u8> = token_bytes
                 .iter()
-                .map(|b| vocab_inv.get(std::slice::from_ref(b)).unwrap().0 as u8)
-                .collect();
+                .map(|b| {
+                    vocab_inv
+                        .get(std::slice::from_ref(b))
+                        .map(|id| id.0 as u8)
+                        .ok_or_else(|| {
+                            eyre!("rank {token_idx}: no single-byte token for byte {b:#04x}")
+                        })
+                })
+                .collect::<Result<_>>()?;
             let tokenized = simple_bpe_merge(&merges, &byte_symbols);
-            assert_eq!(tokenized.len(), 2);
+            ensure!(
+                tokenized.len() == 2,
+                "rank {token_idx}: reduces to {} tokens, not a mergeable pair",
+                tokenized.len()
+            );
             merges.insert((tokenized[0], tokenized[1]), TokenId::from(token_idx));
         }
 
@@ -1694,9 +1711,17 @@ impl Tokenizer {
         }
     }
 
+    /// Concatenate the vocabulary entries of `v`. An id at or past
+    /// [`Self::vocab_size`] contributes nothing rather than indexing out of
+    /// bounds — a boundary that accepts ids from outside (the Ruby
+    /// extension's `decode`) rejects them before getting here, and this is
+    /// what keeps an unchecked one from taking the process down with it.
     pub fn decode(&self, v: &[TokenId]) -> impl Iterator<Item = u8> {
         v.iter()
-            .flat_map(|&token| self.vocab[token.0 as usize].as_ref())
+            .flat_map(|&token| match self.vocab.get(token.0 as usize) {
+                Some(bytes) => bytes.as_ref(),
+                None => &[],
+            })
             .copied()
     }
 

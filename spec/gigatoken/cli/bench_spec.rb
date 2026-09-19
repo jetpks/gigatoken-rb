@@ -3,6 +3,8 @@
 require_relative "../../spec_helper"
 require "gigatoken/cli"
 require "stringio"
+require "tmpdir"
+require "zlib"
 
 RSpec.describe Gigatoken::CLI::Bench do
   fixtures = File.expand_path("../../fixtures", __dir__)
@@ -10,11 +12,21 @@ RSpec.describe Gigatoken::CLI::Bench do
   docs_txt = File.join(fixtures, "docs.txt")
 
   let(:stdout) { StringIO.new }
+  let(:stderr) { StringIO.new }
   let(:command) do
     described_class.new.tap do |cmd|
       cmd.instance_variable_set(:@out, stdout)
-      cmd.instance_variable_set(:@err, StringIO.new)
+      cmd.instance_variable_set(:@err, stderr)
     end
+  end
+
+  # The MB figure from the throughput line just printed, clearing the capture
+  # for the next call (StringIO#truncate leaves the write position behind).
+  def reported_mb
+    mb = stdout.string[/([\d.]+) MB at/, 1]
+    stdout.truncate(0)
+    stdout.rewind
+    mb
   end
 
   it "prints the cpu line and the gigatoken throughput line in the Python CLI's shape" do
@@ -84,5 +96,96 @@ RSpec.describe Gigatoken::CLI::Bench do
   it "surfaces tokenizer load failures as a friendly error, exiting 1" do
     expect { command.call(tokenizer: "/no/such/tokenizer.json", files: [docs_txt]) }
       .to raise_error(SystemExit) { |e| expect(e.status).to eq(1) }
+  end
+
+  # MB/s over the compressed size would understate throughput by the whole
+  # compression ratio, and the batch path would be tokenizing gzip bytes.
+  it "reports MB over the decompressed bytes of a .gz input, on every path" do
+    Dir.mktmpdir do |dir|
+      text = "the quick brown fox jumps over the lazy dog. " * 20_000
+      plain = File.join(dir, "docs.txt")
+      File.write(plain, text)
+      Zlib::GzipWriter.open("#{plain}.gz") { |gz| gz.write(text) }
+
+      [{}, {packed: true}, {parallel: false}].each do |options|
+        command.call(tokenizer: fixture_path, files: ["#{plain}.gz"], **options)
+        gz_mb = reported_mb
+        command.call(tokenizer: fixture_path, files: [plain], **options)
+
+        expect(gz_mb).to eq(reported_mb)
+        expect(gz_mb.to_f).to be > 0.5
+      end
+    end
+  end
+
+  # The same property for .zst, off the checked-in fixture: nothing here
+  # compresses zstd (the CLI only decompresses, through the core's decoder),
+  # so the corpus is the fixture pair rather than one generated per run.
+  it "reports the same MB for a .zst input as for the file it was compressed from, on every path" do
+    [{}, {packed: true}, {parallel: false}].each do |options|
+      command.call(tokenizer: fixture_path, files: [File.join(fixtures, "docs.txt.zst")], **options)
+      zst_mb = reported_mb
+      command.call(tokenizer: fixture_path, files: [docs_txt], **options)
+
+      expect(zst_mb).to eq(reported_mb)
+    end
+  end
+
+  it "prints one error line and exits 1 for a missing FILE" do
+    expect { command.call(tokenizer: fixture_path, files: ["/no/such/file.txt"]) }
+      .to raise_error(SystemExit) { |e| expect(e.status).to eq(1) }
+    expect(stderr.string).to match(/\Aerror: .+\n\z/)
+  end
+
+  it "prints one error line and exits 1 for a directory given as a FILE" do
+    Dir.mktmpdir do |dir|
+      expect { command.call(tokenizer: fixture_path, files: [dir]) }
+        .to raise_error(SystemExit) { |e| expect(e.status).to eq(1) }
+      expect(stderr.string).to match(/\Aerror: .+\n\z/)
+    end
+  end
+
+  ["docs.txt.gz", "docs.txt.zst"].each do |name|
+    it "prints one error line and exits 1 for a #{File.extname(name)} that is not #{File.extname(name).delete(".")}" do
+      Dir.mktmpdir do |dir|
+        corrupt = File.join(dir, name)
+        File.binwrite(corrupt, "not really compressed")
+
+        expect { command.call(tokenizer: fixture_path, files: [corrupt]) }
+          .to raise_error(SystemExit) { |e| expect(e.status).to eq(1) }
+        expect(stderr.string).to match(/\Aerror: .+\n\z/)
+      end
+    end
+  end
+
+  it "rejects an empty FILES list as a usage error" do
+    expect { command.call(tokenizer: fixture_path, files: []) }
+      .to raise_error(SystemExit) { |e| expect(e.status).to eq(1) }
+    expect(stderr.string).to match(/\Aerror: .*FILES/)
+  end
+
+  it "rejects an empty --doc-separator as a usage error" do
+    expect { command.call(tokenizer: fixture_path, files: [docs_txt], doc_separator: "") }
+      .to raise_error(SystemExit) { |e| expect(e.status).to eq(1) }
+    expect(stderr.string).to match(/\Aerror: .*doc-separator/)
+  end
+
+  describe "--limit-bytes units" do
+    it "reads KiB/MiB/GiB/TiB as binary and KB/MB/GB/TB as decimal" do
+      expect(Gigatoken::CLI::Support.parse_size("1KiB")).to eq(1024)
+      expect(Gigatoken::CLI::Support.parse_size("1KB")).to eq(1000)
+      expect(Gigatoken::CLI::Support.parse_size("2MiB")).to eq(2 * 1024**2)
+      expect(Gigatoken::CLI::Support.parse_size("2MB")).to eq(2_000_000)
+      expect(Gigatoken::CLI::Support.parse_size("1500")).to eq(1500)
+    end
+
+    it "treats none and unlimited as no cap" do
+      expect(Gigatoken::CLI::Support.parse_size("none")).to be_nil
+      expect(Gigatoken::CLI::Support.parse_size("unlimited")).to be_nil
+    end
+
+    it "raises Gigatoken::Error naming the unparseable size" do
+      expect { Gigatoken::CLI::Support.parse_size("1e3") }.to raise_error(Gigatoken::Error, /1e3/)
+    end
   end
 end

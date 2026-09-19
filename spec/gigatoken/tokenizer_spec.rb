@@ -28,6 +28,52 @@ RSpec.describe Gigatoken::Tokenizer do
     expect(tokenizer.encode_batch(texts)).to eq(texts.map { |t| tokenizer.encode(t) })
   end
 
+  describe "input encodings" do
+    # Latin-1-representable, so every tag below can hold it.
+    let(:utf8) { "café naïve résumé" }
+
+    it "transcodes a String tagged with a real non-UTF-8 encoding to the UTF-8 ids" do
+      %w[ISO-8859-1 Windows-1252 UTF-16LE UTF-32BE].each do |tag|
+        expect(tokenizer.encode(utf8.encode(tag))).to eq(tokenizer.encode(utf8))
+      end
+    end
+
+    it "transcodes every element of a batch, packed or ragged" do
+      texts = [utf8.encode("ISO-8859-1"), utf8.encode("UTF-16LE"), utf8]
+      expected = [tokenizer.encode(utf8)] * 3
+
+      expect(tokenizer.encode_batch(texts)).to eq(expected)
+      expect(tokenizer.encode_batch(texts, packed: true).to_a).to eq(expected)
+    end
+
+    it "encodes a binary String byte-wise, tag untouched" do
+      latin1 = utf8.encode("ISO-8859-1")
+      expect(tokenizer.encode(latin1.b)).to eq(tokenizer.encode(latin1.b.dup))
+      expect(tokenizer.encode(latin1.b)).not_to eq(tokenizer.encode(utf8))
+    end
+
+    it "leaves the caller's String alone" do
+      latin1 = utf8.encode("ISO-8859-1")
+      tokenizer.encode(latin1)
+      expect(latin1.encoding).to eq(Encoding::ISO_8859_1)
+      expect(latin1).not_to be_frozen
+    end
+
+    # A dummy encoding with no converter, bytes the tag doesn't allow, and a
+    # byte the tag leaves undefined — the three ways String#encode gives up.
+    {
+      "a dummy encoding" => ["hello".dup.force_encoding("UTF-7"), /converter/],
+      "invalid bytes for the tag" => ["\x82".dup.force_encoding("Shift_JIS"), /Shift_JIS/],
+      "an undefined byte" => ["\x81".dup.force_encoding("Windows-1252"), /Windows-1252/]
+    }.each do |description, (text, message)|
+      it "raises Gigatoken::InputError carrying String#encode's message for #{description}" do
+        expect { tokenizer.encode(text) }.to raise_error(Gigatoken::InputError, message)
+        expect { tokenizer.encode_batch([utf8, text]) }.to raise_error(Gigatoken::InputError, message)
+        expect { tokenizer.encode_batch([utf8, text], packed: true) }.to raise_error(Gigatoken::InputError, message)
+      end
+    end
+  end
+
   it "encodes a packed batch identically to the ragged batch" do
     texts = ["Hello, world!", "", "café", "日本語のテキスト", "a longer sentence for batching."]
     ragged = tokenizer.encode_batch(texts)
@@ -62,14 +108,50 @@ RSpec.describe Gigatoken::Tokenizer do
     expect(tokenizer.decode([15496]).encoding).to eq(Encoding::ASCII_8BIT)
   end
 
-  it "raises Gigatoken::Error for invalid tokenizer JSON" do
-    expect { Gigatoken::Tokenizer.from_json("not json") }.to raise_error(Gigatoken::Error)
+  it "raises Gigatoken::ModelError for invalid tokenizer JSON" do
+    expect { Gigatoken::Tokenizer.from_json("not json") }.to raise_error(Gigatoken::ModelError)
+  end
+
+  # The native parser is recursive with no depth limit; the Ruby parse that
+  # reads the special tokens runs first precisely so nesting this deep is
+  # refused before it can overflow that stack.
+  it "raises Gigatoken::ModelError for hostile nesting, never SystemStackError" do
+    expect { described_class.from_json("[" * 200_000 + "]" * 200_000) }.to raise_error(Gigatoken::ModelError)
+  end
+
+  it "raises TypeError for a from_json argument that is not String-convertible" do
+    expect { described_class.from_json(nil) }.to raise_error(TypeError, /NilClass/)
+    expect { described_class.from_json(42) }.to raise_error(TypeError, /Integer/)
+  end
+
+  it "accepts a to_str-convertible from_json argument" do
+    convertible = Object.new
+    convertible.define_singleton_method(:to_str) { fixture }
+
+    expect(described_class.from_json(convertible).vocab_size).to eq(50257)
   end
 
   it "reads special tokens from the JSON bytes whatever the String's encoding tag" do
     from_binary = described_class.from_json(fixture).special_tokens
     %w[UTF-8 US-ASCII ISO-8859-1].each do |tag|
       expect(described_class.from_json(fixture.dup.force_encoding(tag)).special_tokens).to eq(from_binary)
+    end
+  end
+
+  it "freezes the special-token table it hands back" do
+    expect(tokenizer.special_tokens).to be_frozen
+  end
+
+  describe ".from_file" do
+    it "raises Gigatoken::ModelError naming the path for a missing file" do
+      expect { described_class.from_file("/no/such/tokenizer.json") }
+        .to raise_error(Gigatoken::ModelError, %r{/no/such/tokenizer\.json})
+    end
+
+    it "raises Gigatoken::ModelError naming the path for a directory with no tokenizer.json" do
+      Dir.mktmpdir do |dir|
+        expect { described_class.from_file(dir) }.to raise_error(Gigatoken::ModelError, /tokenizer\.json/)
+      end
     end
   end
 
@@ -95,6 +177,15 @@ RSpec.describe Gigatoken::Tokenizer do
       expect(tokenizer.encode("<|endoftext|>")).to eq([300])
       expect(tokenizer.decode([300]).force_encoding(Encoding::UTF_8)).to eq("<|endoftext|>")
     end
+
+    # Otherwise #special_tokens would report a table encode never honoured.
+    it "does not alias the caller's special-token Hash" do
+      special = {"<|endoftext|>" => 300}
+      tokenizer = described_class.from_tiktoken(ranks_path, pretokenizer: "gpt2", special_tokens: special)
+      special["<|late|>"] = 301
+
+      expect(tokenizer.special_tokens).to eq({"<|endoftext|>" => 300}).and be_frozen
+    end
   end
 
   describe ".from_encoding" do
@@ -115,18 +206,31 @@ RSpec.describe Gigatoken::Tokenizer do
       end
     end
 
-    it "raises Gigatoken::Error naming the bad input and the packaged encodings" do
-      expect { described_class.from_encoding("not_an_encoding") }.to raise_error(Gigatoken::Error) do |error|
+    it "accepts a Symbol name, like .load does" do
+      expect(described_class.from_encoding(:cl100k_base).vocab_size).to eq(100277)
+      expect { described_class.from_encoding(:p50k_base) }.to raise_error(Gigatoken::ModelError, /dense/i)
+    end
+
+    it "hands back a frozen special-token table that is not the registry's to mutate" do
+      special = described_class.from_encoding("r50k_base").special_tokens
+
+      expect(special).to be_frozen
+      expect { special["<|pwned|>"] = 1 }.to raise_error(FrozenError)
+      expect(described_class.from_encoding("r50k_base").special_tokens).to eq({"<|endoftext|>" => 50256})
+    end
+
+    it "raises Gigatoken::ModelError naming the bad input and the packaged encodings" do
+      expect { described_class.from_encoding("not_an_encoding") }.to raise_error(Gigatoken::ModelError) do |error|
         expect(error.message).to include("not_an_encoding", "r50k_base", "cl100k_base", "o200k_base")
       end
     end
 
     it "explains p50k_base's non-dense ranks rather than only that it is unpackaged" do
-      expect { described_class.from_encoding("p50k_base") }.to raise_error(Gigatoken::Error, /dense/i)
+      expect { described_class.from_encoding("p50k_base") }.to raise_error(Gigatoken::ModelError, /dense/i)
     end
 
     it "explains p50k_edit's non-dense ranks rather than only that it is unpackaged" do
-      expect { described_class.from_encoding("p50k_edit") }.to raise_error(Gigatoken::Error, /dense/i)
+      expect { described_class.from_encoding("p50k_edit") }.to raise_error(Gigatoken::ModelError, /dense/i)
     end
   end
 
@@ -149,14 +253,16 @@ RSpec.describe Gigatoken::Tokenizer do
       expect(tokenizer.vocab_size).to eq(257) # 256 bytes + <|endoftext|>
     end
 
-    it "raises Gigatoken::Error for a .tiktoken path with no pretokenizer, naming the valid schemes" do
-      expect { described_class.load(ranks_path) }.to raise_error(Gigatoken::Error, /pretokenizer/)
+    it "raises Gigatoken::ModelError for a .tiktoken path with no pretokenizer, naming the valid schemes" do
+      expect { described_class.load(ranks_path) }.to raise_error(Gigatoken::ModelError, /pretokenizer/)
+    end
+
+    it "raises Gigatoken::ModelError for a source that is no file, no packaged name and no repo id" do
+      expect { described_class.load("/no/such/thing") }.to raise_error(Gigatoken::ModelError, %r{/no/such/thing})
     end
 
     it "dispatches a repo-id-shaped string to from_hub, via an injected Hub" do
-      Dir.mktmpdir do |cache_dir|
-        original_home = ENV["HF_HOME"]
-        ENV["HF_HOME"] = cache_dir
+      with_hub_env do
         app = ->(_request) { Protocol::HTTP::Response[200, {"x-repo-commit" => "b" * 40}, [fixture]] }
 
         run_hub_server(app) do |base_url|
@@ -164,23 +270,17 @@ RSpec.describe Gigatoken::Tokenizer do
           tokenizer = described_class.load("acme/gpt2", hub: hub)
           expect(tokenizer.encode("Hello, world!")).to eq([15496, 11, 995, 0])
         end
-      ensure
-        ENV["HF_HOME"] = original_home
       end
     end
 
     it "dispatches a repo-id-shaped string to from_hub with a default Hub, honoring HF_ENDPOINT" do
-      Dir.mktmpdir do |cache_dir|
-        original = ENV.values_at("HF_HOME", "HF_ENDPOINT")
-        ENV["HF_HOME"] = cache_dir
+      with_hub_env do
         app = ->(_request) { Protocol::HTTP::Response[200, {"x-repo-commit" => "c" * 40}, [fixture]] }
 
         run_hub_server(app) do |base_url|
           ENV["HF_ENDPOINT"] = base_url
           expect(described_class.load("acme/gpt2").encode("Hello, world!")).to eq([15496, 11, 995, 0])
         end
-      ensure
-        ENV["HF_HOME"], ENV["HF_ENDPOINT"] = original
       end
     end
 

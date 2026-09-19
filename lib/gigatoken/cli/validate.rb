@@ -20,6 +20,7 @@ module Gigatoken
       option :pretokenizer, desc: "pretokenizer scheme, required when TOKENIZER is a .tiktoken file (one of #{Native.pretokenizer_names.join(", ")}); ignored otherwise"
 
       def call(tokenizer:, files:, doc_separator: nil, pretokenizer: nil, **)
+        Support.check_usage!(files, doc_separator)
         gt_tokenizer = Support.load_tokenizer(tokenizer, pretokenizer: pretokenizer)
 
         via_files = gt_tokenizer.encode_files(Support.text_file_source(files, doc_separator))
@@ -38,7 +39,7 @@ module Gigatoken
         end
 
         out.puts "validation OK: #{via_files.length} documents match"
-      rescue Gigatoken::Error => e
+      rescue Gigatoken::Error, SystemCallError => e
         err.puts "error: #{e.message}"
         exit(1)
       end

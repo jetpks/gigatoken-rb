@@ -204,19 +204,21 @@ uses for ordinary errors — as part of whichever iteration lands this change,
 since `ext/gigatoken/**` is out of this spike's boundary to fix directly.
 See DISAGREEMENTS.
 
-**Ruby/Async version floor.** `blocking_operation_wait` and
-`RB_NOGVL_OFFLOAD_SAFE` are Ruby 3.4+/Async v2.21+ features
-(`~/architect/src/github.com/socketry/async/lib/async/scheduler.rb:55-56`,
-"@public Since *Async v2.21* and *Ruby v3.4*"; release note at
-`~/architect/src/github.com/socketry/async/releases.md:382`, "Ruby 3.4 will
-feature a new fiber scheduler hook"). `gigatoken.gemspec` currently floors at
-`>= 3.3.0`. Hand-declaring the flag constant (as `gvl.rs` already does for
-`rb_thread_call_without_gvl`, avoiding an `rb-sys` dependency — see its
-top-of-file comment) means this compiles regardless of Ruby version; the
-open question is runtime behavior of an unrecognized flag bit on Ruby 3.3,
-which needs verifying against 3.3 before merging (this worktree only has
-Ruby 4.0.6 installed — `ruby -v` → `ruby 4.0.6 (2026-07-14 revision
-03b6d3f889) +PRISM [arm64-darwin27]`). See DISAGREEMENTS.
+**Ruby/Async version floor.** Three layers, three floors. The
+`RB_NOGVL_OFFLOAD_SAFE` flag and the `blocking_operation_wait` hook are Ruby
+3.4 (`thread.c` `rb_nogvl` hands the call to the scheduler when the flag is
+set; Async v2.21 added the hook, "Since *Async v2.21* and *Ruby v3.4*").
+The pool that services the hook is Ruby 4.0: io-event's `extconf.rb` compiles
+`IO::Event::WorkerPool` only when
+`rb_fiber_scheduler_blocking_operation_extract` exists, and `extract` /
+`execute` / `cancel` are 4.0 additions to `ruby/fiber/scheduler.h`. So on
+3.4 the hook fires but no scheduler implements it, and on 3.3 `rb_nogvl`
+ignores the bit altogether (`gvl.rs`'s comment): both degrade to the plain
+blocking `rb_nogvl` — GVL released, calling fiber blocked, an `Async` timeout
+raised only after the batch returns. `gigatoken.gemspec` floors at `>= 3.3.0`
+and the flag constant is hand-declared in `gvl.rs`, so the extension builds
+everywhere; the Async-timeout cancellation spec skips without the pool.
+Verified on 3.3.12, 3.4.10 and 4.0.7 (2026-09-19).
 
 ## Rejected alternatives
 
@@ -277,10 +279,31 @@ Ruby 4.0.6 installed — `ruby -v` → `ruby 4.0.6 (2026-07-14 revision
    worker pool on vs. off (per Async's own release-note caveat that it
    isn't a guaranteed net win), sized against `benches/encode*.rs`'s
    existing harness.
-6. Not in scope for the follow-up: real mid-encode cancellation (today's
-   `ubf: None` means a fiber interrupt/timeout waits for the in-flight
-   encode to finish rather than aborting it — unchanged by this
-   recommendation, and follows the existing `without_gvl` contract).
+6. Real mid-encode cancellation — out of scope when this was written
+   (`ubf: None` meant a fiber interrupt/timeout waited for the in-flight
+   encode to finish), **shipped since**. `without_gvl_cancellable` passes an
+   unblock function that sets an `AtomicBool` the core's chunk loop polls
+   per document (`src/batch.rs`), so an interrupt cancels a BPE batch
+   instead of waiting it out, and the partial result is discarded. Both
+   callers of that unblock function matter: Ruby itself, when an interrupt
+   is pending for the thread (`Timeout`, `Thread#kill`, `Interrupt`), and a
+   fiber scheduler cancelling an offloaded operation —
+   `rb_fiber_scheduler_blocking_operation_cancel` "marks it as cancelled and
+   calls the unblock function" (`ruby/fiber/scheduler.h`), which is how an
+   `Async` timeout reaches an encode running on the worker pool. io-event
+   drains the cancelled operation before unwinding
+   (`worker_pool_work_wait`/`_ensure`), so the closure is never still
+   running when the caller's frames go away.
+
+   Two consequences worth knowing. The `rb_nogvl` call is wrapped in
+   `magnus::rb_sys::protect`: the raise `rb_nogvl` performs on its way out
+   is a longjmp over every Rust frame, and catching it is what lets the
+   guards and Ruby String locks in `tokenizer.rs` unwind normally instead of
+   leaking. And Ruby calls the unblock function for interrupts that never
+   raise (a signal trap, a `Thread#wakeup`), so a run cancelled without a
+   raise is redone once, uninterruptibly — returning the half-encoded batch
+   would be a silently truncated result. SentencePiece batches have no
+   cancellation token yet: they complete, then raise.
 
 ## Experiment log
 

@@ -20,30 +20,36 @@ module Gigatoken
       option :pretokenizer, desc: "pretokenizer scheme, required when TOKENIZER is a .tiktoken file (one of #{Native.pretokenizer_names.join(", ")}); ignored otherwise"
 
       def call(tokenizer:, files:, doc_separator: nil, limit_bytes: "none", parallel: true, packed: false, pretokenizer: nil, **)
+        Support.check_usage!(files, doc_separator)
         limit = Support.parse_size(limit_bytes)
         out.puts "#{label("cpu")}: #{Support.cpu_info}"
 
         gt_tokenizer = Support.load_tokenizer(tokenizer, pretokenizer: pretokenizer)
 
+        # Only the batch path materializes the documents; the native paths
+        # leave this nil and count their bytes off the clock below.
+        docs = nil
         start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
         if packed
           encoded = gt_tokenizer.encode_files(Support.text_file_source(files, doc_separator), parallel: parallel, packed: true)
-          n_bytes = files.sum { |file| File.size(file) }
           n_tokens = encoded.token_count
         elsif parallel
           docs = Support.subset_docs(Support.split_docs(files, doc_separator), limit)
           encoded = gt_tokenizer.encode_batch(docs)
-          n_bytes = docs.sum(&:bytesize)
           n_tokens = encoded.sum(&:length)
         else
           encoded = gt_tokenizer.encode_files(Support.text_file_source(files, doc_separator), parallel: false)
-          n_bytes = files.sum { |file| File.size(file) }
           n_tokens = encoded.sum(&:length)
         end
         seconds = Process.clock_gettime(Process::CLOCK_MONOTONIC) - start
 
+        # The throughput is over the bytes encoded, which for a compressed
+        # file are its decompressed bytes. Counting those means reading the
+        # file, so the native paths count off the clock; the batch path
+        # already holds the documents it encoded.
+        n_bytes = docs ? docs.sum(&:bytesize) : Support.input_bytesize(files)
         out.puts report("gigatoken", seconds, n_bytes, n_tokens)
-      rescue Gigatoken::Error => e
+      rescue Gigatoken::Error, SystemCallError => e
         err.puts "error: #{e.message}"
         exit(1)
       end

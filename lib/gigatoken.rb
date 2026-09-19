@@ -4,8 +4,24 @@ require_relative "gigatoken/version"
 
 module Gigatoken
   # Raised for tokenizer load and encode failures surfaced from the native
-  # extension — never a raw Rust panic across the Ruby boundary.
+  # extension — never a raw Rust panic across the Ruby boundary. The base of
+  # the three below: rescue this to catch everything gigatoken raises.
+  # Anything narrower than the three has no class of its own — CLI usage
+  # errors and the odd leftover are this one directly.
   class Error < StandardError; end
+
+  # Everything Gigatoken::Hub raises: HTTP status, transport, timeout, repo-id
+  # / revision / filename / x-repo-commit validation.
+  class HubError < Error; end
+
+  # A document the tokenizer cannot take: an untranscodable or invalid-byte
+  # String, invalid UTF-8 on the SentencePiece path, an id outside the
+  # vocabulary in #decode.
+  class InputError < Error; end
+
+  # A tokenizer that cannot be loaded: bad or hostile JSON, a missing file or
+  # directory, an unknown or unpackable encoding name, a malformed .tiktoken.
+  class ModelError < Error; end
 
   class << self
     # The process-global encode-cache budget in bytes per worker (a parallel
