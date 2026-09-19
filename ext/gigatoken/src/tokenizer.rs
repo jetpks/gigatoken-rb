@@ -43,7 +43,7 @@ pub(crate) fn ragged_result(ruby: &Ruby, flat: Vec<u32>, lens: Vec<i64>) -> Resu
     let mut offset = 0usize;
     for len in lens {
         let len = len as usize;
-        result.push(flat[offset..offset + len].to_vec())?;
+        result.push(ruby.ary_from_iter(flat[offset..offset + len].iter().copied()))?;
         offset += len;
     }
     Ok(result)
@@ -440,7 +440,7 @@ impl BPETokenizer {
             // SAFETY: read-only, for the duration of this synchronous call,
             // with no GVL release in between.
             let bytes = unsafe { input.as_slice() };
-            let mut out = Vec::new();
+            let mut out = Vec::with_capacity(bytes.len() / 4);
             tokenizer.encode_with_added_tokens_flat(bytes, &mut out);
             return out;
         }

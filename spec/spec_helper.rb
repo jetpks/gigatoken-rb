@@ -5,6 +5,10 @@ Warning[:experimental] = false
 
 require "gigatoken"
 
+# CI runs the suite a second time with GC_STRESS set: a GC at every
+# allocation, to catch a native object read after it was freed or moved.
+GC.stress = true if ENV["GC_STRESS"]
+
 Dir[File.join(__dir__, "support", "**", "*.rb")].sort.each { |f| require f }
 
 RSpec.configure do |config|

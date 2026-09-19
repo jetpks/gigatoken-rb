@@ -67,7 +67,7 @@ module Gigatoken
     # here too, raising the same explanation from_encoding gives rather than
     # reaching the Hub — but only those; an unrecognized bare name like
     # "gpt2" still dispatches to the Hub.
-    def self.load(source, pretokenizer: nil, special_tokens: {}, revision: "main", hub: Hub.new)
+    def self.load(source, pretokenizer: nil, special_tokens: {}, revision: "main", hub: nil)
       source = source.to_s
       if source.end_with?(".tiktoken")
         unless pretokenizer
@@ -78,13 +78,13 @@ module Gigatoken
       end
       return from_file(source) if File.exist?(source)
       return from_encoding(source) if Encodings::NAMES.include?(source) || Encodings.unpackable_reason(source)
-      return from_hub(source, revision: revision, hub: hub) if Hub.looks_like_repo_id?(source)
+      return from_hub(source, revision: revision, hub: hub || Hub.new) if Hub.looks_like_repo_id?(source)
 
       raise Error, "#{source.inspect}: no such file or directory, not a .tiktoken path, and doesn't look like a HuggingFace Hub repo id"
     end
 
     def self.special_tokens_from_json(data)
-      added = JSON.parse(data.dup.force_encoding(Encoding::UTF_8))["added_tokens"] || []
+      added = JSON.parse(data)["added_tokens"] || []
       added.each_with_object({}) { |t, h| h[t["content"]] = t["id"] if t["special"] }
     end
     private_class_method :special_tokens_from_json
