@@ -127,7 +127,8 @@ pub(crate) struct ChunkTokens {
 /// between chunks: a chunk is a megabyte or more of input, and the caller's
 /// interrupt should not wait out the one already in flight. What is left is
 /// a partial `ChunkTokens`, which is safe because a cancelled run discards
-/// every chunk it encoded (see `encode_chunks_gathered`).
+/// every chunk it encoded — including a run of one chunk (see
+/// `encode_chunks_gathered`).
 fn encode_chunk(
     tokenizer: &mut Tokenizer,
     chunk: &EncodeChunk,
@@ -701,17 +702,16 @@ fn encode_chunks_gathered_with_cap(
         |c: &EncodeChunk| workers.with_worker(proto, share, |tok| encode_chunk(tok, c, cancel));
     if chunks.len() <= 1 {
         // Small inputs skip the thread fan-out — and a lone chunk's id
-        // buffer IS the flat result, no gather copy at all. Cancellation is
-        // chunk-granular, so a lone chunk always runs to completion; it is
-        // at most MIN_CHUNK_BYTES of input.
-        return Some(match chunks.first() {
-            Some(chunk) => {
-                let out = encode(chunk);
-                let counts = row_counts(std::slice::from_ref(&out));
-                (out.ids, counts)
-            }
-            None => (Vec::new(), Vec::new()),
-        });
+        // buffer IS the flat result, no gather copy at all. `encode_chunk`
+        // polls the token per document, so even a lone chunk can come back
+        // short; report that as a cancelled run like every other path
+        // rather than returning the truncated prefix.
+        let Some(chunk) = chunks.first() else {
+            return Some((Vec::new(), Vec::new()));
+        };
+        let out = encode(chunk);
+        let counts = row_counts(std::slice::from_ref(&out));
+        return (!cancelled(cancel)).then(|| (out.ids, counts));
     }
     let next = AtomicUsize::new(0);
     let outs: Vec<OnceLock<ChunkTokens>> = (0..chunks.len()).map(|_| OnceLock::new()).collect();
@@ -783,22 +783,26 @@ pub(crate) fn encode_chunks_into(
     let encode =
         |c: &EncodeChunk| workers.with_worker(proto, share, |tok| encode_chunk(tok, c, cancel));
     if chunks.len() <= 1 {
-        return Some(match chunks.first() {
-            Some(chunk) => {
-                let out = encode(chunk);
-                let counts = row_counts(std::slice::from_ref(&out));
-                if out.ids.len() <= dest.cap {
-                    // SAFETY: the only chunk, so the only write; in bounds
-                    // per the check above.
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(out.ids.as_ptr(), dest.ptr, out.ids.len());
-                    }
-                    GatherOutcome::Committed(out.ids.len(), counts)
-                } else {
-                    GatherOutcome::Fallback(out.ids, counts)
-                }
+        // A lone chunk can still be cancelled part way through (see
+        // `encode_chunks_gathered_with_cap`); `dest` is then left partly
+        // written, exactly as on the parallel path.
+        let Some(chunk) = chunks.first() else {
+            return Some(GatherOutcome::Committed(0, Vec::new()));
+        };
+        let out = encode(chunk);
+        let counts = row_counts(std::slice::from_ref(&out));
+        if cancelled(cancel) {
+            return None;
+        }
+        return Some(if out.ids.len() <= dest.cap {
+            // SAFETY: the only chunk, so the only write; in bounds per the
+            // check above.
+            unsafe {
+                std::ptr::copy_nonoverlapping(out.ids.as_ptr(), dest.ptr, out.ids.len());
             }
-            None => GatherOutcome::Committed(0, Vec::new()),
+            GatherOutcome::Committed(out.ids.len(), counts)
+        } else {
+            GatherOutcome::Fallback(out.ids, counts)
         });
     }
     let next = AtomicUsize::new(0);
@@ -1970,7 +1974,8 @@ mod tests {
         let vocab = (0..=u8::MAX).map(|b| vec![b]).collect();
         let proto = Tokenizer::new(merges, vocab, None);
         // Eight chunk-sized documents, so the parallel paths really do have
-        // chunk boundaries to stop at (a lone chunk always completes).
+        // chunk boundaries to stop at (the lone-chunk shape every small
+        // input takes is `cancelled_lone_chunk_returns_nothing`).
         let owned: Vec<Vec<u8>> = (0..8).map(|_| vec![b'a'; MIN_CHUNK_BYTES]).collect();
         let docs: Vec<&[u8]> = owned.iter().map(|d| d.as_slice()).collect();
         let total: usize = docs.iter().map(|d| d.len()).sum();
@@ -1997,5 +2002,40 @@ mod tests {
         let files = workers.encode_files_docs_cancellable(&proto, &docs, &format, &cancel);
         let serial = workers.encode_files_docs_serial_cancellable(&proto, &docs, &format, &cancel);
         assert!(ragged.is_none() && into.is_none() && files.is_none() && serial.is_none());
+    }
+
+    /// The same contract for an input small enough to be one chunk — the
+    /// shape every sub-MiB batch takes, and the one the cancellable entry
+    /// points used to answer with a truncated result (I01 G1). The token is
+    /// polled per document inside the chunk, so the run really does stop
+    /// short; what it must not do is report that prefix as the batch.
+    #[test]
+    fn cancelled_lone_chunk_returns_nothing() {
+        let merges = HashMap::with_hasher(rustc_hash::FxBuildHasher {});
+        let vocab = (0..=u8::MAX).map(|b| vec![b]).collect();
+        let proto = Tokenizer::new(merges, vocab, None);
+        let owned: Vec<Vec<u8>> = (0..64).map(|i| vec![b'a' + (i % 26) as u8; 512]).collect();
+        let docs: Vec<&[u8]> = owned.iter().map(|d| d.as_slice()).collect();
+        let total: usize = docs.iter().map(|d| d.len()).sum();
+        assert!(total < MIN_CHUNK_BYTES, "the input must be a single chunk");
+        let format = DocFormat::Text { separator: None };
+        let workers = WorkerPool::new();
+
+        let cancel = AtomicBool::new(true);
+        let mut buf = vec![0u32; total];
+        // SAFETY: `buf` holds `total` tokens and is exclusively owned here.
+        let dest = unsafe { GatherBuf::new(buf.as_mut_ptr(), total) };
+        let ragged = workers.encode_docs_ragged_cancellable(&proto, &docs, &cancel);
+        let into = workers.encode_docs_into_cancellable(&proto, &docs, dest, &cancel);
+        let files = workers.encode_files_docs_cancellable(&proto, &docs, &format, &cancel);
+        let serial = workers.encode_files_docs_serial_cancellable(&proto, &docs, &format, &cancel);
+        assert!(ragged.is_none() && into.is_none() && files.is_none() && serial.is_none());
+
+        // With the token clear, the same lone chunk is the uncancellable
+        // path's result exactly.
+        let cancel = AtomicBool::new(false);
+        let reference = encode_docs_ragged(&workers, &proto, &docs);
+        let got = workers.encode_docs_ragged_cancellable(&proto, &docs, &cancel);
+        assert!(got.as_ref() == Some(&reference), "lone chunk differs");
     }
 }

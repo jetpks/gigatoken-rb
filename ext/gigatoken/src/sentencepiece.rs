@@ -22,16 +22,16 @@ use magnus::{
     scan_args::{get_kwargs, scan_args},
 };
 
-use crate::error::raise;
+use crate::error::{input_error, raise};
 use crate::gvl::without_gvl;
 use crate::sources;
 use crate::tokenizer::{
-    binary_string, packed_result, ragged_result, snapshot_entry, snapshot_inputs,
+    binary_string, packed_result, ragged_result, require_known_ids, snapshot_entry, snapshot_inputs,
 };
 
-/// Validate that `bytes` is UTF-8, raising `Gigatoken::Error` otherwise.
+/// Validate that `bytes` is UTF-8, raising `Gigatoken::InputError` otherwise.
 fn require_utf8<'a>(ruby: &Ruby, bytes: &'a [u8]) -> Result<&'a str, Error> {
-    std::str::from_utf8(bytes).map_err(|e| raise(ruby, format!("invalid UTF-8: {e}")))
+    std::str::from_utf8(bytes).map_err(|e| input_error(ruby, format!("invalid UTF-8: {e}")))
 }
 
 #[magnus::wrap(class = "Gigatoken::Native::SentencePieceTokenizer", free_immediately, size)]
@@ -177,6 +177,7 @@ impl SentencePieceTokenizer {
 
     fn decode(ruby: &Ruby, rb_self: &Self, tokens: RArray) -> Result<RString, Error> {
         let ids: Vec<u32> = tokens.to_vec()?;
+        require_known_ids(ruby, &ids, rb_self.tokenizer.vocab_size())?;
         let ids: Vec<_> = ids.into_iter().map(Into::into).collect();
         let bytes = rb_self.tokenizer.decode(&ids);
         Ok(binary_string(ruby, &bytes))

@@ -53,6 +53,10 @@ bytes); shrinking it is not.
 Compressed inputs are exempt: `.gz` and `.zst` files are decompressed into
 memory up front, so nothing maps the file after the read completes.
 
+This decoder is not private to the file sources: the `gigatoken` CLI's
+Ruby-side split reads through it too (see [CLI](cli.md)), so `validate`'s two
+paths never disagree about what a compressed file contains.
+
 ## Related
 
 - [Tokenize files without leaving Rust](../how-to/tokenize-files.md)

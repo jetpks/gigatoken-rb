@@ -118,14 +118,16 @@ RSpec.describe Gigatoken::CLI::Bench do
     end
   end
 
-  it "refuses .zst, naming the missing decoder and the native path that handles it" do
-    Dir.mktmpdir do |dir|
-      zst = File.join(dir, "docs.txt.zst")
-      File.binwrite(zst, "not really zstd")
+  # The same property for .zst, off the checked-in fixture: nothing here
+  # compresses zstd (the CLI only decompresses, through the core's decoder),
+  # so the corpus is the fixture pair rather than one generated per run.
+  it "reports the same MB for a .zst input as for the file it was compressed from, on every path" do
+    [{}, {packed: true}, {parallel: false}].each do |options|
+      command.call(tokenizer: fixture_path, files: [File.join(fixtures, "docs.txt.zst")], **options)
+      zst_mb = reported_mb
+      command.call(tokenizer: fixture_path, files: [docs_txt], **options)
 
-      expect { command.call(tokenizer: fixture_path, files: [zst]) }
-        .to raise_error(SystemExit) { |e| expect(e.status).to eq(1) }
-      expect(stderr.string).to match(/\Aerror: .*zstd.*encode_files/)
+      expect(zst_mb).to eq(reported_mb)
     end
   end
 
@@ -143,14 +145,16 @@ RSpec.describe Gigatoken::CLI::Bench do
     end
   end
 
-  it "prints one error line and exits 1 for a .gz that is not gzip" do
-    Dir.mktmpdir do |dir|
-      corrupt = File.join(dir, "docs.txt.gz")
-      File.binwrite(corrupt, "not really gzip")
+  ["docs.txt.gz", "docs.txt.zst"].each do |name|
+    it "prints one error line and exits 1 for a #{File.extname(name)} that is not #{File.extname(name).delete(".")}" do
+      Dir.mktmpdir do |dir|
+        corrupt = File.join(dir, name)
+        File.binwrite(corrupt, "not really compressed")
 
-      expect { command.call(tokenizer: fixture_path, files: [corrupt]) }
-        .to raise_error(SystemExit) { |e| expect(e.status).to eq(1) }
-      expect(stderr.string).to match(/\Aerror: .+\n\z/)
+        expect { command.call(tokenizer: fixture_path, files: [corrupt]) }
+          .to raise_error(SystemExit) { |e| expect(e.status).to eq(1) }
+        expect(stderr.string).to match(/\Aerror: .+\n\z/)
+      end
     end
   end
 

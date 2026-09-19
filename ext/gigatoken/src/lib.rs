@@ -1,3 +1,4 @@
+use gigatoken_rs::input::file_source::load_file;
 use gigatoken_rs::load_tokenizer::hf::{self, HfTokenizer};
 use gigatoken_rs::pretokenize::PretokenizerType;
 use magnus::{Error, Module, RString, Ruby, Value, function};
@@ -26,9 +27,9 @@ mod sentencepiece;
 mod sources;
 mod tokenizer;
 
-use error::raise;
+use error::{model_error, raise};
 use sentencepiece::SentencePieceTokenizer;
-use tokenizer::BPETokenizer;
+use tokenizer::{binary_string, BPETokenizer};
 
 // The gigatoken core crate exposes no version constant of its own, so this
 // is the ext crate's (gigatoken-rb's) version — see the builder report.
@@ -66,7 +67,20 @@ fn load_hf_json(ruby: &Ruby, data: RString) -> Result<Value, Error> {
     match hf::load_hf_slice(bytes) {
         Ok(HfTokenizer::Bpe(tokenizer)) => Ok(ruby.into_value(BPETokenizer::from_tokenizer(tokenizer))),
         Ok(HfTokenizer::SentencePiece(tokenizer)) => Ok(ruby.into_value(SentencePieceTokenizer::from_tokenizer(tokenizer))),
-        Err(e) => Err(raise(ruby, e.to_string())),
+        Err(e) => Err(model_error(ruby, e.to_string())),
+    }
+}
+
+/// One file's contents as a binary String, decompressed by extension the way
+/// the native file sources do it (`.gz`, `.zst`/`.zstd`, plain — see the core's
+/// `load_file`). The CLI's Ruby-side split reads through here so both sides of
+/// `gigatoken validate` see the same bytes with one decoder between them
+/// (`lib/gigatoken/cli/support.rb`); the encode paths never touch it, which is
+/// why it keeps the GVL.
+fn read_input(ruby: &Ruby, path: String) -> Result<RString, Error> {
+    match load_file(std::path::Path::new(&path)) {
+        Ok(file) => Ok(binary_string(ruby, file.as_bytes())),
+        Err(e) => Err(raise(ruby, format!("{path}: {e}"))),
     }
 }
 
@@ -77,6 +91,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     native.define_module_function("crate_version", function!(crate_version, 0))?;
     native.define_module_function("load_hf_json", function!(load_hf_json, 1))?;
     native.define_module_function("pretokenizer_names", function!(pretokenizer_names, 0))?;
+    native.define_module_function("read_input", function!(read_input, 1))?;
     native.define_module_function("set_max_cache_bytes", function!(set_max_cache_bytes, 1))?;
     native.define_module_function("get_max_cache_bytes", function!(get_max_cache_bytes, 0))?;
     sources::init(ruby, native)?;

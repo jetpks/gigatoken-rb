@@ -19,12 +19,27 @@ use magnus::{
 };
 use rb_sys::{RSTRING_PTR, rb_ary_dup, rb_str_locktmp, rb_str_set_len, rb_str_unlocktmp};
 
-use crate::error::raise;
+use crate::error::{input_error, model_error, raise};
 use crate::gvl::{without_gvl, without_gvl_cancellable};
 use crate::sources;
 
 pub(crate) fn binary_string(ruby: &Ruby, bytes: &[u8]) -> RString {
     ruby.enc_str_new(bytes, ruby.ascii8bit_encoding())
+}
+
+/// Reject a `decode` argument holding an id the vocabulary does not reach.
+/// Both backends' cores answer such an id with no bytes rather than indexing
+/// out of bounds (see the core's `Tokenizer::decode`), so the only place that
+/// can tell the caller what went wrong is here, at the boundary the id came
+/// in through. Shared with `crate::sentencepiece`.
+pub(crate) fn require_known_ids(ruby: &Ruby, ids: &[u32], vocab_size: usize) -> Result<(), Error> {
+    match ids.iter().find(|&&id| id as usize >= vocab_size) {
+        Some(id) => Err(input_error(
+            ruby,
+            format!("token id {id} is outside the vocabulary (0...{vocab_size})"),
+        )),
+        None => Ok(()),
+    }
 }
 
 /// Reinterpret a `Vec<u32>` as raw bytes in the host's native byte order.
@@ -401,12 +416,12 @@ impl BPETokenizer {
         let bytes = unsafe { data.as_slice() };
         match hf::load_hf_slice(bytes) {
             Ok(HfTokenizer::Bpe(tokenizer)) => Ok(Self::from_tokenizer(tokenizer)),
-            Ok(HfTokenizer::SentencePiece(_)) => Err(raise(
+            Ok(HfTokenizer::SentencePiece(_)) => Err(model_error(
                 ruby,
                 "SentencePiece tokenizer.json data loads as a SentencePieceTokenizer, not a \
                  BPETokenizer — use Gigatoken::Native.load_hf_json instead",
             )),
-            Err(e) => Err(raise(ruby, e.to_string())),
+            Err(e) => Err(model_error(ruby, e.to_string())),
         }
     }
 
@@ -422,7 +437,7 @@ impl BPETokenizer {
         special_tokens: HashMap<String, u32>,
     ) -> Result<Self, Error> {
         let scheme = PretokenizerType::from_name(&pretokenizer).ok_or_else(|| {
-            raise(
+            model_error(
                 ruby,
                 format!(
                     "unknown pretokenizer scheme {pretokenizer:?}; expected one of {}",
@@ -433,7 +448,7 @@ impl BPETokenizer {
         let special_tokens: Vec<(String, u32)> = special_tokens.into_iter().collect();
         match tiktoken::load_tiktoken(&path, scheme, special_tokens) {
             Ok(tokenizer) => Ok(Self::from_tokenizer(tokenizer)),
-            Err(e) => Err(raise(ruby, e.to_string())),
+            Err(e) => Err(model_error(ruby, format!("{path}: {e}"))),
         }
     }
 
@@ -684,6 +699,7 @@ impl BPETokenizer {
 
     fn decode(ruby: &Ruby, rb_self: &Self, tokens: RArray) -> Result<RString, Error> {
         let ids: Vec<u32> = tokens.to_vec()?;
+        require_known_ids(ruby, &ids, rb_self.tokenizer.vocab_size())?;
         let ids: Vec<_> = ids.into_iter().map(Into::into).collect();
         let bytes: Vec<u8> = rb_self.tokenizer.decode(&ids).collect();
         Ok(binary_string(ruby, &bytes))

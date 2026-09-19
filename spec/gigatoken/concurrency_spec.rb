@@ -159,6 +159,45 @@ RSpec.describe "concurrent use of a shared tokenizer" do
     expect(status).to be_success
   end
 
+  # Not every interrupt raises: a trapped signal runs its handler and the
+  # batch carries on. Ruby still calls the unblock function for one, so the
+  # encode sees its cancellation token set and stops — and must then be redone
+  # rather than reported. A batch small enough to be a single chunk used to
+  # slip through that (I01 G1): the lone-chunk path returned the prefix
+  # `encode_chunk` had reached, with nothing to tell the caller it was short.
+  it "returns the whole result when a trapped signal interrupts a single-chunk batch" do
+    status, out = run_ruby(<<~RUBY)
+      #{preamble}
+      #{uncached}
+      require "tmpdir"
+      docs = uncached_corpus(400, 120)
+      raise "the input must be a single chunk" unless docs.sum(&:bytesize) < 1 << 20
+      expected = tok.encode_batch(docs)
+
+      trap("USR1") { }
+      def storm(runs) = Thread.new { runs.times { Process.kill("USR1", Process.pid); sleep 0.0002 } }
+      def check(runs, expected)
+        pinger = storm(runs * 2)
+        wrong = runs.times.count { yield != expected }
+        pinger.join
+        raise "truncated \#{wrong}/\#{runs} times" unless wrong.zero?
+      end
+
+      check(100, expected) { tok.encode_batch(docs) }
+      check(100, expected) { tok.encode_batch(docs, packed: true).to_a }
+      Dir.mktmpdir do |dir|
+        path = File.join(dir, "docs.txt")
+        File.write(path, docs.join("\\n"))
+        source = -> { Gigatoken::Native::TextFileSource.new([path], separator: "\\n") }
+        check(50, tok.encode_files(source.call())) { tok.encode_files(source.call()) }
+      end
+      puts "OK"
+    RUBY
+
+    expect(out).to include("OK"), "subprocess died or hung: #{out}"
+    expect(status).to be_success
+  end
+
   it "leaves the inputs mutable and the tokenizer usable after Thread#kill" do
     status, out = run_ruby(<<~RUBY)
       #{preamble}

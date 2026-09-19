@@ -92,14 +92,16 @@ RSpec.describe "gigatoken validate (integration)" do
     expect(output).not_to match(/\.rb:\d+:in /)
   end
 
-  it "validates a gzipped corpus, which the Ruby-side split has to decompress too" do
-    output = IO.popen(
-      %w[ruby -Ilib exe/gigatoken validate cl100k_base spec/fixtures/docs.txt.gz --doc-separator <|endoftext|>],
-      chdir: root, err: [:child, :out], &:read
-    )
-    status = $?
+  ["docs.txt.gz", "docs.txt.zst"].each do |name|
+    it "validates a #{File.extname(name).delete(".")}-compressed corpus, which the Ruby-side split has to decompress too" do
+      output = IO.popen(
+        ["ruby", "-Ilib", "exe/gigatoken", "validate", "cl100k_base", "spec/fixtures/#{name}", "--doc-separator", "<|endoftext|>"],
+        chdir: root, err: [:child, :out], &:read
+      )
+      status = $?
 
-    expect(status).to be_success
-    expect(output).to match(/validation OK: [1-9]\d* documents match/)
+      expect(status).to be_success
+      expect(output).to match(/validation OK: [1-9]\d* documents match/)
+    end
   end
 end
