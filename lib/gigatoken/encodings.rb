@@ -40,6 +40,10 @@ module Gigatoken
     HARMONY_RESERVED_TAIL = (200013..201087).to_h { |id| ["<|reserved_#{id}|>", id] }.freeze
     private_constant :HARMONY_RESERVED_TAIL
 
+    # Deep-frozen: entries, their `special_tokens` tables and the `rank_file`
+    # paths. `Tokenizer#special_tokens` hands the registry's own Hash back to
+    # callers, so anything less lets one caller's poke rewrite what every
+    # later `from_encoding` in the process loads.
     REGISTRY = {
       "r50k_base" => {
         rank_file: File.join(DATA_DIR, "r50k_base.tiktoken"),
@@ -67,7 +71,7 @@ module Gigatoken
         pretokenizer: "o200k",
         special_tokens: HARMONY_HEAD_TOKENS.merge(HARMONY_RESERVED_TAIL).freeze
       }
-    }.freeze
+    }.each_value { |encoding| encoding.each_value(&:freeze).freeze }.freeze
     private_constant :REGISTRY
 
     # The packaged encoding names — the single source error messages naming
@@ -88,15 +92,16 @@ module Gigatoken
 
     class << self
       # The {rank_file:, pretokenizer:, special_tokens:} registered for a
-      # packaged encoding name, or nil.
+      # packaged encoding name, or nil. Names are Strings or Symbols, as
+      # Tokenizer.load accepts both.
       def [](name)
-        REGISTRY[name]
+        REGISTRY[name.to_s]
       end
 
       # Why `name` can't be packaged, or nil when there's no reason on
       # record (it's either packaged, or simply not one gigatoken knows of).
       def unpackable_reason(name)
-        UNPACKABLE_REASONS[name]
+        UNPACKABLE_REASONS[name.to_s]
       end
     end
   end

@@ -26,9 +26,14 @@ end
 # Fresh single-run trace (cargo-instruments would otherwise append a Run).
 rm -rf "$trace"
 
+# RUSTFLAGS: frame pointers make Instruments' stack unwinding reliable. Set
+# here rather than as a per-profile `rustflags` in Cargo.toml, which is
+# nightly-only and needs a `.cargo/config.toml` opt-in the gem cannot ship. The
+# profiling profile has its own target subdirectory, so this never touches a
+# release build.
 # CARGO_INCREMENTAL=0: incremental codegen units can cache symbol names from a
 # prior mangling setting, leaving stale symbols in the build.
-CARGO_INCREMENTAL=0 cargo instruments \
+RUSTFLAGS="-C force-frame-pointers=yes" CARGO_INCREMENTAL=0 cargo instruments \
     -t cpu \
     --bench $bench \
     --profile profiling \

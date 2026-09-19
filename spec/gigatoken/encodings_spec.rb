@@ -63,6 +63,24 @@ RSpec.describe Gigatoken::Encodings do
       expect(described_class["not_an_encoding"]).to be_nil
     end
 
+    it "resolves a Symbol name the same as the String" do
+      expect(described_class[:cl100k_base]).to equal(described_class["cl100k_base"])
+    end
+
+    # Tokenizer#special_tokens hands the registry's own Hash back, so a
+    # shallow freeze would let one caller's poke rewrite every later load.
+    it "is frozen all the way down: entry, special tokens, and rank file" do
+      described_class::NAMES.each do |name|
+        encoding = described_class[name]
+
+        expect(encoding).to be_frozen
+        expect(encoding[:rank_file]).to be_frozen
+        expect(encoding[:special_tokens]).to be_frozen
+        expect { encoding[:special_tokens]["<|pwned|>"] = 1 }.to raise_error(FrozenError)
+        expect { encoding[:pretokenizer] = "gpt2" }.to raise_error(FrozenError)
+      end
+    end
+
     it "points each rank file at a file that actually exists on disk" do
       described_class::NAMES.each do |name|
         expect(File.exist?(described_class[name][:rank_file])).to be(true)
@@ -85,6 +103,10 @@ RSpec.describe Gigatoken::Encodings do
 
     it "returns nil for a name with no reason on record" do
       expect(described_class.unpackable_reason("not_an_encoding")).to be_nil
+    end
+
+    it "explains a Symbol name too" do
+      expect(described_class.unpackable_reason(:p50k_base)).to match(/dense/i)
     end
   end
 end

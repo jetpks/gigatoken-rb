@@ -47,8 +47,10 @@ packed.buffer.get_string             # the raw bytes, if you need them as a Stri
 packed.buffer.values(:u32, 0, 8)     # the first eight ids, straight from the buffer
 ```
 
-Offsets are in bytes (four per token). The buffer is frozen: it wraps the
-String the engine gathered into, with no copy.
+Offsets are in bytes (four per token). The buffer is read-only — writing to
+it raises `IO::Buffer::AccessError` — because it wraps the String the engine
+gathered into, with no copy. Read-only is not the same as `frozen?`, which
+is `false` for the buffer object itself.
 
 ## Related
 

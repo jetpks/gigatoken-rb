@@ -15,7 +15,8 @@ is public for tests and for wrapping a buffer you built yourself.
 
 ### `#buffer → IO::Buffer`
 
-Read-only, `u32` token ids in native byte order, four bytes per token, no
+Read-only (writes raise `IO::Buffer::AccessError`; the object itself is not
+`frozen?`), `u32` token ids in native byte order, four bytes per token, no
 padding between documents. Wraps the String the engine gathered into
 without copying it.
 
@@ -39,7 +40,8 @@ Total tokens across every document.
 
 Document `i`'s ids as a new Array, read straight from the buffer
 (`IO::Buffer#values`). Negative indices count from the end; an index out
-of range returns `nil`. One object per call.
+of range returns `nil`; a non-Integer index raises `TypeError`, all like
+`Array#[]`. One object per call.
 
 ### `#each { |ids| } → self`, `#each → Enumerator`
 

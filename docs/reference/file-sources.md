@@ -36,6 +36,23 @@ empty documents.
   to be valid UTF-8; otherwise `Gigatoken::Error`.
 - A missing file raises `Gigatoken::Error` with the OS error.
 
+## Files must not change under a running `encode_files`
+
+An uncompressed file is memory-mapped, not copied, so the worker threads
+read the file itself for the whole call. Truncating it or rewriting it in
+place while `encode_files` runs faults those pages and the process receives
+**SIGBUS** — a signal Ruby cannot rescue, so the process dies mid-call; no
+`begin`/`rescue` around `encode_files` can save it.
+
+Rotate by rename, never by truncate: write the replacement to a new path and
+`File.rename` it over the old one. The mapping keeps the original inode
+alive until the call finishes, and the next call picks up the new file.
+Appending to a mapped file is safe (the mapping simply does not see the new
+bytes); shrinking it is not.
+
+Compressed inputs are exempt: `.gz` and `.zst` files are decompressed into
+memory up front, so nothing maps the file after the read completes.
+
 ## Related
 
 - [Tokenize files without leaving Rust](../how-to/tokenize-files.md)
