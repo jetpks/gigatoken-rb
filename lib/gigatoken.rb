@@ -7,6 +7,19 @@ module Gigatoken
   # extension — never a raw Rust panic across the Ruby boundary.
   class Error < StandardError; end
 
+  # Everything Gigatoken::Hub raises: HTTP status, transport, timeout, repo-id
+  # / revision / filename / x-repo-commit validation.
+  class HubError < Error; end
+
+  # A document the tokenizer cannot take: an untranscodable or invalid-byte
+  # String, invalid UTF-8 on the SentencePiece path, an id outside the
+  # vocabulary in #decode.
+  class InputError < Error; end
+
+  # A tokenizer that cannot be loaded: bad or hostile JSON, a missing file or
+  # directory, an unknown or unpackable encoding name, a malformed .tiktoken.
+  class ModelError < Error; end
+
   class << self
     # The process-global encode-cache budget in bytes per worker (a parallel
     # batch encode may use up to workers x budget), applied to tokenizers of
