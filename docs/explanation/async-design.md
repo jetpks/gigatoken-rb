@@ -1,4 +1,12 @@
-# Async-friendly batch/file encodes (BRIEF §5 spike)
+---
+type: explanation
+---
+
+# Async design: how batch encodes release the GVL and yield the fiber
+
+The spike report the implementation followed, kept as the record of why
+`ext/gigatoken/src/gvl.rs` is shaped the way it is. The user-facing recipe is
+[Run encodes under Async](../how-to/run-under-async.md).
 
 ## Question
 

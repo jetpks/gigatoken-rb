@@ -1,4 +1,8 @@
-# Async-cooperative encodes
+---
+type: how-to
+---
+
+# Run encodes under Async
 
 `Tokenizer#encode_batch` and `#encode_files` release the GVL via
 `rb_nogvl(..., RB_NOGVL_OFFLOAD_SAFE)` (`ext/gigatoken/src/gvl.rs`). No new
@@ -33,6 +37,6 @@ from another fiber queues behind the first rather than running in parallel.
 Apps that want several encodes in flight at once should size the pool
 themselves (`IO::Event::WorkerPool.new(maximum_worker_count: N)`).
 
-See `docs/rb/async-design.md` for the full design/safety writeup and
-`bench/async_heartbeat.rb` for a runnable proof that the calling fiber yields
-only with the worker pool enabled.
+See [Async design](../explanation/async-design.md) for the full design and
+safety writeup, and `bench/async_heartbeat.rb` for a runnable proof that the
+calling fiber yields only with the worker pool enabled.

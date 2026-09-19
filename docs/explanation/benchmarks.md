@@ -1,3 +1,7 @@
+---
+type: explanation
+---
+
 # Benchmarks: methodology and full results
 
 The README carries the headline numbers. This is everything behind them.
@@ -198,3 +202,61 @@ false confidence of a two- to nine-percent phantom delta, is evidence. Keep
 the attributes on the strength of that direction and the original
 inline-regression measurement that motivated them, not on a number from
 this harness.
+
+## 0.3.0 operations benchmark (2026-09-19)
+
+Every public operation, with `tiktoken_ruby`'s equivalent beside it where
+one exists, from `bench/operations.rb`: iterations per second
+(`benchmark-ips`, 2 s windows after 1 s warmup), Ruby objects allocated per
+call (`GC.stat`, exact) and Ruby-heap bytes malloc'd per call. Apple M2 Max
+(12 cores, macOS 26), Ruby 4.0.7, `cl100k_base`. Texts are deterministic
+English-ish prose with a little non-ASCII; the batch is 1,000 documents of
+1 KB. Reproduce with `ruby -Ilib bench/operations.rb`.
+
+| Operation | gigatoken i/s | tiktoken_ruby i/s | gigatoken objects/call | tiktoken_ruby objects/call | gigatoken malloc/call |
+|---|---|---|---|---|---|
+| encode, 45 B | 3,655,875 | 466,769 | 1 | 2 | 128 |
+| encode, 2 KB | 613,437 | 21,231 | 1 | 2 | 3 KiB |
+| encode, 200 KB | 7,578 | 221 | 1 | 2 | 273 KiB |
+| decode, 2 KB of ids | 438,980 | 349,673 | 1 | 1 | 2 KiB |
+| encode_batch, 1000 x 1 KB | 1,061 | 41 | 1,002 | 2,001 | 1,387 KiB |
+| encode_batch packed, 1000 x 1 KB | 1,213 | — | 9 | — | 3,944 KiB |
+| PackedResult#[], one 1 KB doc | 1,110,608 | — | 1 | — | 1 KiB |
+| PackedResult#to_a, 1000 docs | 1,059 | — | 1,001 | — | 1,379 KiB |
+| encode_files, 1000 x 1 KB | 987 | — | 1,009 | — | 1,379 KiB |
+| encode_files packed, 1000 x 1 KB | 1,135 | — | 16 | — | 703 KiB |
+| Tokenizer.from_encoding | 20 | — | 2 | — | 0 |
+| Tokenizer.load("cl100k_base") | 20 | — | 3 | — | 0 |
+
+**How to read it.** Single-string `encode` runs 8x `tiktoken_ruby` at 45 B
+and 30x at 2 KB and above, in one Ruby object. A ragged batch is one Array
+per document; the packed shape is nine objects however many documents, and
+its malloc column is the up-front reservation of four bytes per input byte
+that the engine gathers straight into (see
+[Allocations](allocations.md)). The batch rows are throughput at 1 MB per
+call: about 1.0–1.2 GB/s on this laptop, with the GVL released. The
+`tiktoken_ruby` batch row is a Ruby loop over its per-string `encode`,
+since it has no batch API.
+
+**Since 0.2.2.** Same machine, same script, `main` at `e685fed` vs 0.3.0:
+
+| Operation | 0.2.2 → 0.3.0 | objects/call |
+|---|---|---|
+| PackedResult#[], one 1 KB doc | 774,326 → 1,110,608 i/s | 2 → 1 |
+| PackedResult#to_a, 1000 docs | 721 → 1,059 i/s | 2,003 → 1,001 |
+| Tokenizer.load("cl100k_base") | 20 → 20 i/s | 8 → 3 |
+| encode_batch, 1000 x 1 KB | 838 → 1,061 i/s | 1,002 → 1,002 |
+| encode_files, 1000 x 1 KB | 790 → 987 i/s | 1,009 → 1,009 |
+
+The batch rows in that table overstate the change: every batch row,
+including the packed ones whose code did not change, moved about 25%
+between the two `benchmark-ips` runs, so those runs are not comparable
+with each other at that precision. Interleaved runs of the same build pair
+(three each, alternating, medians of 15 samples of 5 calls) put the ragged
+paths' real gain from dropping the per-document copy at 2–4%
+(`encode_batch` 973 → 949 µs, `encode_files` 997 → 960 µs), the packed
+paths unchanged (832 → 828 µs), and `PackedResult#to_a` 31% faster
+(1,538 → 1,064 µs). An attempt to pre-size `encode`'s output Vec from the
+input length was measured with `bench/encode_ab.rb` and reverted: 13%
+slower at 45 B in two interleaved runs (above the harness's ~4–5% floor at
+that size), within noise at 2 KB, 2.5% faster at 200 KB.

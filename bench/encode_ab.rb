@@ -22,7 +22,7 @@
 # *methodology* (interleaving, a self-derived noise floor, distinguishing a
 # real delta from noise) against itself; it is not evidence that the
 # attributes matter. For that, rebuild with them stripped and rerun — see
-# "Counterfactual procedure" below, and docs/rb/benchmarks.md for the
+# "Counterfactual procedure" below, and docs/explanation/benchmarks.md for the
 # numbers from the one time this was done.
 #
 # The reported statistic is the **median** of per-round samples, not the
@@ -30,7 +30,7 @@
 # scheduler hiccup costs one round several times its usual cost — and the
 # mean lets that single round move the whole result by double digits; the
 # median doesn't move until a majority of samples shift. See
-# docs/rb/benchmarks.md's "How much of this can you trust" for the
+# docs/explanation/benchmarks.md's "How much of this can you trust" for the
 # comparison across candidate estimators that this choice is based on.
 #
 # Each round measures arm A *twice* (A1, A2) and arm B once, rotating which

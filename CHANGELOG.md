@@ -1,5 +1,42 @@
 # Changelog
 
+## [0.3.0] - 2026-09-19
+
+- **Packed results index in one object.** `PackedResult#[]` built an Array
+  of `:u32` symbols as long as the document on every access, only to
+  describe the layout to `IO::Buffer#get_values`; it now asks
+  `IO::Buffer#values` for the ids directly — one Array, half the bytes.
+  `#to_a` builds the ragged shape directly rather than through an
+  Enumerator. Negative indices count from the end and out-of-range ones
+  return `nil`, like Array, where they raised out of `IO::Buffer` before.
+
+- **`Tokenizer.load` by name or path no longer builds a Hub client.** The
+  `hub: Hub.new` default ran on every call — a `Gigatoken::Hub`, an
+  `Async::HTTP::Internet` and three Hashes — including for the packaged
+  encodings and local files that never touch the network. The client is
+  built only when the source turns out to be a repo id: 3 objects per load
+  instead of 8. `from_json` no longer copies the whole `tokenizer.json` to
+  retag its encoding.
+
+- **No per-document copy in the ragged batch path.** The extension built
+  each document's Array from a fresh `Vec` copy of its slice of the flat
+  result; it now builds the Array from the slice directly.
+
+- **Allocation budgets are frozen** in `spec/gigatoken/allocations_spec.rb`:
+  `encode` and `decode` 1 object, ragged batches one Array per document,
+  packed batches a fixed 9, `PackedResult#[]` 1. `bench/operations.rb`
+  measures every public operation (with `tiktoken_ruby` beside it) for
+  iterations per second, objects and malloc per call; the numbers are on
+  the benchmarks page.
+
+- **`GC_STRESS` is honored.** CI's second run of the suite sets it, but
+  nothing read it; `spec_helper` now turns `GC.stress` on under it.
+
+- **Docs reorganized by Diátaxis** under `docs/`: a tutorial, how-to guides
+  (loading, files, packed results, cache budget, Async, measuring),
+  reference pages for every class, and explanation pages (benchmarks,
+  allocations, the Async design). `docs/rb/` moved into that layout.
+
 ## [0.2.2] - 2026-09-08
 
 - **Fix a fatal crash when the extension is loaded on a thread that later
@@ -63,7 +100,7 @@
   On single `#encode`, this change is **neutral within what we can measure**.
   The reproducible harness is `bench/encode_ab.rb`
   (`ruby -Ilib bench/encode_ab.rb`); the numbers, the machines and the method
-  are in `docs/rb/benchmarks.md` under "0.2.1 thread-safety benchmark".
+  are in `docs/explanation/benchmarks.md` under "0.2.1 thread-safety benchmark".
 
   Read that section before quoting a figure from it. The harness reports a
   median with a bootstrap-derived noise floor now, not a mean — an earlier
