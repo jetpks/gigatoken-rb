@@ -28,6 +28,38 @@ RSpec.describe Gigatoken::Tokenizer do
     expect(tokenizer.encode_batch(texts)).to eq(texts.map { |t| tokenizer.encode(t) })
   end
 
+  describe "input encodings" do
+    # Latin-1-representable, so every tag below can hold it.
+    let(:utf8) { "café naïve résumé" }
+
+    it "transcodes a String tagged with a real non-UTF-8 encoding to the UTF-8 ids" do
+      %w[ISO-8859-1 Windows-1252 UTF-16LE UTF-32BE].each do |tag|
+        expect(tokenizer.encode(utf8.encode(tag))).to eq(tokenizer.encode(utf8))
+      end
+    end
+
+    it "transcodes every element of a batch, packed or ragged" do
+      texts = [utf8.encode("ISO-8859-1"), utf8.encode("UTF-16LE"), utf8]
+      expected = [tokenizer.encode(utf8)] * 3
+
+      expect(tokenizer.encode_batch(texts)).to eq(expected)
+      expect(tokenizer.encode_batch(texts, packed: true).to_a).to eq(expected)
+    end
+
+    it "encodes a binary String byte-wise, tag untouched" do
+      latin1 = utf8.encode("ISO-8859-1")
+      expect(tokenizer.encode(latin1.b)).to eq(tokenizer.encode(latin1.b.dup))
+      expect(tokenizer.encode(latin1.b)).not_to eq(tokenizer.encode(utf8))
+    end
+
+    it "leaves the caller's String alone" do
+      latin1 = utf8.encode("ISO-8859-1")
+      tokenizer.encode(latin1)
+      expect(latin1.encoding).to eq(Encoding::ISO_8859_1)
+      expect(latin1).not_to be_frozen
+    end
+  end
+
   it "encodes a packed batch identically to the ragged batch" do
     texts = ["Hello, world!", "", "café", "日本語のテキスト", "a longer sentence for batching."]
     ragged = tokenizer.encode_batch(texts)
@@ -66,10 +98,34 @@ RSpec.describe Gigatoken::Tokenizer do
     expect { Gigatoken::Tokenizer.from_json("not json") }.to raise_error(Gigatoken::Error)
   end
 
+  # The native parser is recursive with no depth limit; the Ruby parse that
+  # reads the special tokens runs first precisely so nesting this deep is
+  # refused before it can overflow that stack.
+  it "raises Gigatoken::Error for hostile nesting, never SystemStackError" do
+    expect { described_class.from_json("[" * 200_000 + "]" * 200_000) }.to raise_error(Gigatoken::Error)
+  end
+
   it "reads special tokens from the JSON bytes whatever the String's encoding tag" do
     from_binary = described_class.from_json(fixture).special_tokens
     %w[UTF-8 US-ASCII ISO-8859-1].each do |tag|
       expect(described_class.from_json(fixture.dup.force_encoding(tag)).special_tokens).to eq(from_binary)
+    end
+  end
+
+  it "freezes the special-token table it hands back" do
+    expect(tokenizer.special_tokens).to be_frozen
+  end
+
+  describe ".from_file" do
+    it "raises Gigatoken::Error naming the path for a missing file" do
+      expect { described_class.from_file("/no/such/tokenizer.json") }
+        .to raise_error(Gigatoken::Error, %r{/no/such/tokenizer\.json})
+    end
+
+    it "raises Gigatoken::Error naming the path for a directory with no tokenizer.json" do
+      Dir.mktmpdir do |dir|
+        expect { described_class.from_file(dir) }.to raise_error(Gigatoken::Error, /tokenizer\.json/)
+      end
     end
   end
 
@@ -95,6 +151,15 @@ RSpec.describe Gigatoken::Tokenizer do
       expect(tokenizer.encode("<|endoftext|>")).to eq([300])
       expect(tokenizer.decode([300]).force_encoding(Encoding::UTF_8)).to eq("<|endoftext|>")
     end
+
+    # Otherwise #special_tokens would report a table encode never honoured.
+    it "does not alias the caller's special-token Hash" do
+      special = {"<|endoftext|>" => 300}
+      tokenizer = described_class.from_tiktoken(ranks_path, pretokenizer: "gpt2", special_tokens: special)
+      special["<|late|>"] = 301
+
+      expect(tokenizer.special_tokens).to eq({"<|endoftext|>" => 300}).and be_frozen
+    end
   end
 
   describe ".from_encoding" do
@@ -113,6 +178,19 @@ RSpec.describe Gigatoken::Tokenizer do
         tokenizer = described_class.from_encoding(name)
         cases.each { |text, ids| expect(tokenizer.encode(text)).to eq(ids) }
       end
+    end
+
+    it "accepts a Symbol name, like .load does" do
+      expect(described_class.from_encoding(:cl100k_base).vocab_size).to eq(100277)
+      expect { described_class.from_encoding(:p50k_base) }.to raise_error(Gigatoken::Error, /dense/i)
+    end
+
+    it "hands back a frozen special-token table that is not the registry's to mutate" do
+      special = described_class.from_encoding("r50k_base").special_tokens
+
+      expect(special).to be_frozen
+      expect { special["<|pwned|>"] = 1 }.to raise_error(FrozenError)
+      expect(described_class.from_encoding("r50k_base").special_tokens).to eq({"<|endoftext|>" => 50256})
     end
 
     it "raises Gigatoken::Error naming the bad input and the packaged encodings" do

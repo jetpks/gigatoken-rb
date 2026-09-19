@@ -30,6 +30,12 @@ Gem::Specification.new do |spec|
     "Cargo.lock",
     "rust-toolchain.toml",
     "src/**/*.rs",
+    # Cargo parses the whole workspace manifest before building the
+    # extension, and the root Cargo.toml declares these as bench targets —
+    # a missing source file there is a manifest error, not a skipped
+    # target, so an unpacked source gem would not compile without them.
+    # 52 KB of text against a 3 MB gem.
+    "benches/**/*.rs",
     "README.md",
     "LICENSE"
   ]
