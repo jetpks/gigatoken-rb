@@ -5,11 +5,11 @@ Warning[:experimental] = false
 
 require "gigatoken"
 
-# CI runs the suite a second time with GC_STRESS set: a GC at every
-# allocation, to catch a native object read after it was freed or moved. A
-# minor GC (flag 0x01, no major) is what catches an unmarked young object —
-# the C-extension bug class — at ~14x the suite's runtime; a full GC per
-# allocation is ~700x and takes hours.
+# GC_STRESS=1 runs the whole suite with a minor GC at every allocation (flag
+# 0x01), to catch a native object read after it was freed or moved. It is a
+# manual hard mode — ~14x the suite's runtime on 4.0, an hour-plus on 3.4 —
+# so CI relies on spec/gigatoken/gc_stress_spec.rb, which puts every native
+# path under the same stress with small inputs in seconds.
 GC.stress = 1 if %w[1 true yes].include?(ENV["GC_STRESS"].to_s.downcase)
 
 Dir[File.join(__dir__, "support", "**", "*.rb")].sort.each { |f| require f }

@@ -35,8 +35,12 @@
   iterations per second, objects and malloc per call; the numbers are on
   the benchmarks page.
 
-- **`GC_STRESS` is honored.** CI's second run of the suite sets it, but
-  nothing read it; `spec_helper` now turns `GC.stress` on under it.
+- **Native paths are tested under GC stress.** `spec/gigatoken/gc_stress_spec.rb`
+  runs every extension path — encode, batch, packed, files in each format,
+  decode, the SentencePiece backend — with a minor GC at every allocation, in
+  seconds. CI's "hard-mode" rerun of the whole suite, which had never
+  actually set `GC.stress`, is gone (live, it takes an hour-plus on Ruby
+  3.4); `GC_STRESS=1 bundle exec rspec` still runs the whole suite that way.
 
 - **Rust toolchain pinned to `nightly-2026-09-18`** (`rust-toolchain.toml` and
   CI), so builds are reproducible until the pin is moved on purpose. Stable
