@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative "../spec_helper"
+require "timeout"
 
 RSpec.describe Gigatoken::Hub do
   fixture_path = File.expand_path("../../tests/fixtures/gpt2_tokenizer.json", __dir__)
@@ -89,6 +90,21 @@ RSpec.describe Gigatoken::Hub do
       end
     end
 
+    it "raises promptly when the cache write fails after the 200, rather than hanging on the response" do
+      run_hub_server(app) do |base_url|
+        # The snapshots directory the download has to create is a file.
+        repo_dir = described_class.repo_cache_dir("acme/blocked")
+        FileUtils.mkdir_p(repo_dir)
+        File.write(repo_dir.join("snapshots"), "not a directory")
+
+        hub = described_class.new(endpoint: base_url, timeout: 5)
+        # Bounded: the failure used to leave the response, and so its
+        # connection and the enclosing Sync, open for good.
+        expect { Timeout.timeout(5) { hub.hub_file("acme/blocked") } }
+          .to raise_error(Gigatoken::HubError, /snapshots \(Errno::/)
+      end
+    end
+
     it "raises when the response has no x-repo-commit header, rather than caching an unfindable snapshot" do
       run_hub_server(->(_request) { Protocol::HTTP::Response[200, {}, [fixture]] }) do |base_url|
         expect { described_class.new(endpoint: base_url).hub_file("acme/nocommit") }
@@ -149,6 +165,57 @@ RSpec.describe Gigatoken::Hub do
     end
   end
 
+  describe "redirects" do
+    it "keeps the Authorization header same-origin and reads x-repo-commit from the final hop" do
+      ENV["HF_TOKEN"] = "renamed-repo-token"
+      seen = []
+      # huggingface.co answers a renamed repo this way: a same-origin 307,
+      # with x-repo-commit only on the hop that finally serves the file.
+      renaming = lambda do |request|
+        seen << [request.path, request.headers["authorization"]]
+        if request.path.start_with?("/acme/old/")
+          Protocol::HTTP::Response[307, {"location" => "/acme/new/resolve/main/tokenizer.json"}, []]
+        else
+          Protocol::HTTP::Response[200, {"x-repo-commit" => commit}, [fixture]]
+        end
+      end
+
+      path = nil
+      run_hub_server(renaming) { |base_url| path = described_class.new(endpoint: base_url).hub_file("acme/old") }
+
+      expect(seen.map(&:first))
+        .to eq(["/acme/old/resolve/main/tokenizer.json", "/acme/new/resolve/main/tokenizer.json"])
+      expect(seen.map(&:last)).to all(eq("Bearer renamed-repo-token"))
+      expect(path).to eq(described_class.repo_cache_dir("acme/old").join("snapshots", commit, "tokenizer.json"))
+      expect(File.binread(path)).to eq(fixture)
+    end
+
+    it "drops the Authorization header on a cross-origin redirect" do
+      ENV["HF_TOKEN"] = "the-cdn-must-not-see-this"
+      seen = []
+      recording = lambda do |request|
+        seen << request.headers["authorization"]
+        Protocol::HTTP::Response[200, {"x-repo-commit" => commit}, [fixture]]
+      end
+
+      path = nil
+      # The LFS CDN is a second origin, authenticating by signed URL.
+      run_hub_server(recording) do |cdn_url|
+        redirecting = lambda do |request|
+          seen << request.headers["authorization"]
+          Protocol::HTTP::Response[307, {"location" => "#{cdn_url}/lfs/tokenizer.json"}, []]
+        end
+
+        run_hub_server(redirecting) do |base_url|
+          path = described_class.new(endpoint: base_url).hub_file("acme/lfs")
+        end
+      end
+
+      expect(seen).to eq(["Bearer the-cdn-must-not-see-this", nil])
+      expect(File.binread(path)).to eq(fixture)
+    end
+  end
+
   describe "proxy environment" do
     it "sends an http request to http_proxy with the absolute URI in its request line" do
       seen = nil
@@ -168,6 +235,47 @@ RSpec.describe Gigatoken::Hub do
 
       expect(seen).to eq(["http", "example.invalid", "/acme/proxied/resolve/main/tokenizer.json"])
       expect(File.binread(path)).to eq(fixture)
+    end
+
+    it "tunnels an https request through https_proxy with CONNECT, returns, then hits the cache" do
+      requests = 0
+      counting_app = lambda do |_request|
+        requests += 1
+        Protocol::HTTP::Response[200, {"x-repo-commit" => commit}, [fixture]]
+      end
+
+      path = nil
+      connects = nil
+      run_connect_proxy(:tunnel) do |proxy_url, seen|
+        connects = seen
+        ENV["https_proxy"] = proxy_url
+
+        run_hub_server(counting_app, ssl_context: trusted_localhost_ssl_context) do |base_url|
+          hub = described_class.new(endpoint: base_url, timeout: 5)
+          # Twice, and bounded: closing the proxy client before the tunnel
+          # client it holds open used to hang here for good, and the cache
+          # hit proves the download got as far as writing the file.
+          Timeout.timeout(20) do
+            path = hub.hub_file("acme/tunnelled")
+            hub.hub_file("acme/tunnelled")
+          end
+        end
+      end
+
+      expect(connects).to contain_exactly(match(%r{\ACONNECT 127\.0\.0\.1:\d+ HTTP/1\.1\z}))
+      expect(requests).to eq(1)
+      expect(File.binread(path)).to eq(fixture)
+    end
+
+    it "raises when the proxy refuses the CONNECT" do
+      run_connect_proxy(:refuse) do |proxy_url, _connects|
+        ENV["https_proxy"] = proxy_url
+
+        run_hub_server(app, ssl_context: trusted_localhost_ssl_context) do |base_url|
+          expect { described_class.new(endpoint: base_url, timeout: 5).hub_file("acme/refused") }
+            .to raise_error(Gigatoken::HubError, /407/)
+        end
+      end
     end
 
     it "goes direct when no_proxy names the host" do
