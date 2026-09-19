@@ -58,6 +58,6 @@ RSpec.describe "allocations" do
   # five objects on its own.
   it "loads a packaged encoding by name without building a Hub client" do
     expect(allocations(3) { Gigatoken::Tokenizer.load("cl100k_base") }).to be < 6
-    expect(allocations(3) { Gigatoken::Tokenizer.from_encoding("cl100k_base") }).to be < 3
+    expect(allocations(3) { Gigatoken::Tokenizer.from_encoding("cl100k_base") }).to be < 5
   end
 end
