@@ -32,6 +32,11 @@
 - **`GC_STRESS` is honored.** CI's second run of the suite sets it, but
   nothing read it; `spec_helper` now turns `GC.stress` on under it.
 
+- **Rust toolchain pinned to `nightly-2026-09-18`** (`rust-toolchain.toml` and
+  CI), so builds are reproducible until the pin is moved on purpose. Stable
+  isn't possible yet: the core's SentencePiece scanner uses `std::simd`,
+  which is still unstable (`portable_simd`, rust-lang/rust#86656).
+
 - **Docs reorganized by Diátaxis** under `docs/`: a tutorial, how-to guides
   (loading, files, packed results, cache budget, Async, measuring),
   reference pages for every class, and explanation pages (benchmarks,

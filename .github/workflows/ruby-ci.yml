@@ -41,7 +41,7 @@ jobs:
           # dtolnay/rust-toolchain@master (defaulting to "stable"), which
           # takes precedence over file-based auto-detection. The pin must be
           # named here explicitly to get a nightly toolchain at all.
-          rustup-toolchain: nightly
+          rustup-toolchain: nightly-2026-09-18
 
       - name: Compile extension
         run: bundle exec rake compile

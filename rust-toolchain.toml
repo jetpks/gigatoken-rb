@@ -1,5 +1,5 @@
 [toolchain]
-channel = "nightly"
+channel = "nightly-2026-09-18"
 # Cross triples for the precompiled-gem builds (ruby-gem.yml). rustup's
 # toolchain-file auto-install is the only thing that provisions nightly
 # inside the rb-sys-dock containers, so the targets must be declared here —
