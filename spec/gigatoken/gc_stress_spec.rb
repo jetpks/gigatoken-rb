@@ -20,6 +20,15 @@ RSpec.describe "native objects under GC stress" do
     GC.stress = false
   end
 
+  # A batch element that is not a String: converting it runs arbitrary Ruby
+  # (and, here, a GC at every allocation) in the middle of the marshal, on
+  # both backends' snapshot walk.
+  def to_str_doc(text)
+    doc = Object.new
+    doc.define_singleton_method(:to_str) { text }
+    doc
+  end
+
   let(:bpe) do
     Gigatoken::Tokenizer.from_tiktoken(File.join(fixtures, "ranks.tiktoken"), pretokenizer: "gpt2",
       special_tokens: {"<|endoftext|>" => 256})
@@ -32,6 +41,7 @@ RSpec.describe "native objects under GC stress" do
     stressed do
       expect(docs.map { |d| tok.encode(d) }).to eq(expected)
       expect(tok.encode_batch(docs)).to eq(expected)
+      expect(tok.encode_batch(docs + [to_str_doc("converted")])).to eq(expected + [tok.encode("converted")])
       packed = tok.encode_batch(docs, packed: true)
       expect(packed.to_a).to eq(expected)
       expect(packed[1]).to eq(expected[1])
@@ -64,6 +74,7 @@ RSpec.describe "native objects under GC stress" do
     stressed do
       expect(inputs.map { |d| tok.encode(d) }).to eq(expected)
       expect(tok.encode_batch(inputs)).to eq(expected)
+      expect(tok.encode_batch(inputs + [to_str_doc("converted")])).to eq(expected + [tok.encode("converted")])
       expect(tok.encode_batch(inputs, packed: true).to_a).to eq(expected)
       expect(tok.decode(expected[0])).to be_a(String)
     end

@@ -114,9 +114,20 @@ now. See [Tune the encode-cache budget](../how-to/tune-the-cache-budget.md).
 
 ## Thread safety
 
-One instance may be shared across threads. Batch encodes and readers never
-exclude each other; `#encode` takes a short exclusive lock and, only when
-it must wait on an in-flight batch, releases the GVL while it waits.
+One instance may be shared across threads, in any combination of calls: no
+path blocks on a lock while holding the GVL, so none of them can stall the
+VM. Batch encodes, `#decode` and the vocabulary readers take no lock at all;
+`#encode` has its own per-instance worker, which it takes without waiting and
+— on the rare occasion another thread's `#encode` holds it — waits for with
+the GVL released.
+
+An interrupt that arrives while a batch is in flight — `Timeout`,
+`Thread#kill`, `Interrupt`, an [Async](../how-to/run-under-async.md) timeout
+— cancels the batch at the next document boundary and raises where you called
+it. The partial result is discarded, and the input Strings and the tokenizer
+are left exactly as they were. SentencePiece `#encode_batch`/`#encode_files`
+are the exception: they run to completion and raise after (interrupted
+safely, just not early).
 
 ## Related
 

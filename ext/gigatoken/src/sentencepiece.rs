@@ -25,7 +25,9 @@ use magnus::{
 use crate::error::raise;
 use crate::gvl::without_gvl;
 use crate::sources;
-use crate::tokenizer::{binary_string, packed_result, ragged_result};
+use crate::tokenizer::{
+    binary_string, packed_result, ragged_result, snapshot_entry, snapshot_inputs,
+};
 
 /// Validate that `bytes` is UTF-8, raising `Gigatoken::Error` otherwise.
 fn require_utf8<'a>(ruby: &Ruby, bytes: &'a [u8]) -> Result<&'a str, Error> {
@@ -40,7 +42,10 @@ pub struct SentencePieceTokenizer {
     tokenizer: SentencePieceBPE,
     // The one mutable piece. A `Mutex` rather than a `RefCell` so the wrapped
     // object is `Sync`: Ruby hands the same instance to every thread, and a
-    // `RefCell` shared that way is unsound (see `BPETokenizer`'s lock).
+    // `RefCell` shared that way is unsound. It is only ever taken with the
+    // GVL held — the batch paths build their own per-call encoders — so it
+    // cannot actually block, which is what `BPETokenizer`'s invariant asks
+    // of any lock on this side of the boundary.
     state: Mutex<EncodeState>,
 }
 
@@ -74,21 +79,27 @@ impl SentencePieceTokenizer {
     /// string is validated as UTF-8 and copied into an owned `String`
     /// before release: nothing Ruby-managed may be touched once the GVL is
     /// gone.
+    ///
+    /// The walk reads a [`snapshot_inputs`] copy of the caller's array, one
+    /// slot at a time — never a Rust borrow of the array's buffer held
+    /// across `try_convert`, which runs `to_str` and with it arbitrary Ruby
+    /// code, including code that re-homes the array out from under the
+    /// walk. Same contract as the BPE path: the result reflects the array
+    /// as it was at entry.
     fn encode_batch_ragged(ruby: &Ruby, rb_self: &Self, inputs: RArray) -> Result<(Vec<u32>, Vec<i64>), Error> {
-        // SAFETY: values are read (checked-converted to `RString`, then
-        // validated and copied into owned buffers below) before anything
-        // else runs.
-        let docs: Vec<String> = unsafe { inputs.as_slice() }
-            .iter()
-            .map(|&v| {
-                let s = RString::try_convert(v)?;
+        let snapshot = snapshot_inputs(inputs);
+        let docs: Vec<String> = (0..snapshot.len())
+            .map(|i| {
+                let s = RString::try_convert(snapshot_entry(snapshot, i))?;
+                // SAFETY: validated and copied into an owned buffer right
+                // here, with no Ruby call in between to invalidate it.
                 let bytes = unsafe { s.as_slice() };
                 require_utf8(ruby, bytes).map(str::to_owned)
             })
             .collect::<Result<_, _>>()?;
         let doc_refs: Vec<&str> = docs.iter().map(String::as_str).collect();
         let tokenizer: &SentencePieceBPE = &rb_self.tokenizer;
-        Ok(without_gvl(|| sp_encode_docs_ragged(tokenizer, &doc_refs)))
+        without_gvl(|| sp_encode_docs_ragged(tokenizer, &doc_refs))
     }
 
     fn encode_batch(ruby: &Ruby, rb_self: &Self, inputs: RArray) -> Result<RArray, Error> {
@@ -133,7 +144,7 @@ impl SentencePieceTokenizer {
         }
 
         let tokenizer: &SentencePieceBPE = &rb_self.tokenizer;
-        let encoded: std::io::Result<(Vec<u32>, Vec<i64>)> = without_gvl(|| {
+        let encoded = without_gvl(|| {
             sources::encode_files_ragged(&source, parallel, |files, format| {
                 for &region in files {
                     std::str::from_utf8(region).map_err(|e| {
@@ -146,7 +157,7 @@ impl SentencePieceTokenizer {
                     sp_encode_files_docs_serial(tokenizer, files, format)
                 })
             })
-        });
+        })?;
         encoded.map_err(|e| raise(ruby, e.to_string()))
     }
 

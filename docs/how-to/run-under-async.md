@@ -37,6 +37,25 @@ from another fiber queues behind the first rather than running in parallel.
 Apps that want several encodes in flight at once should size the pool
 themselves (`IO::Event::WorkerPool.new(maximum_worker_count: N)`).
 
+## Timeouts cancel the encode
+
+A timeout around a batch cancels it rather than waiting for it:
+
+```ruby
+Async do |task|
+  task.with_timeout(0.5) { tokenizer.encode_batch(docs) }
+rescue Async::TimeoutError
+  # raised within a document of the deadline, not when the batch would
+  # have finished; `docs` is untouched and the tokenizer is reusable
+end
+```
+
+The scheduler cancels the offloaded operation, the encode stops at the next
+document boundary and its partial result is discarded. The same holds for
+`Timeout.timeout`, `Thread#kill` and Ctrl-C outside Async. SentencePiece
+batches are the exception: they finish the encode first and raise after —
+safely, just not early.
+
 See [Async design](../explanation/async-design.md) for the full design and
 safety writeup, and `bench/async_heartbeat.rb` for a runnable proof that the
 calling fiber yields only with the worker pool enabled.

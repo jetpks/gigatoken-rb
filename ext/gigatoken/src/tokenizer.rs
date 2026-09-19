@@ -3,17 +3,15 @@
 //! the core crate's `src/lib.rs` (the `python` feature), minus the
 //! numpy/awkward-array machinery that has no Ruby analog.
 
-use std::sync::RwLock;
 use std::collections::{HashMap, HashSet};
 use std::os::raw::c_long;
+use std::sync::atomic::Ordering;
+use std::sync::{Mutex, MutexGuard, TryLockError};
 
 use gigatoken_rs::load_tokenizer::hf::HfTokenizer;
 use gigatoken_rs::load_tokenizer::{hf, tiktoken};
 use gigatoken_rs::pretokenize::PretokenizerType;
-use gigatoken_rs::{
-    GatherBuf, GatherOutcome, Tokenizer, WorkerPool, encode_docs_into, encode_docs_ragged,
-    encode_files_docs, encode_files_docs_serial,
-};
+use gigatoken_rs::{GatherBuf, GatherOutcome, Tokenizer, WorkerPool};
 use magnus::{
     Error, RArray, RClass, RHash, RModule, RString, Ruby, Value, function, method, prelude::*,
     rb_sys::{AsRawValue, FromRawValue},
@@ -22,7 +20,7 @@ use magnus::{
 use rb_sys::{RSTRING_PTR, rb_ary_dup, rb_str_locktmp, rb_str_set_len, rb_str_unlocktmp};
 
 use crate::error::raise;
-use crate::gvl::without_gvl;
+use crate::gvl::{without_gvl, without_gvl_cancellable};
 use crate::sources;
 
 pub(crate) fn binary_string(ruby: &Ruby, bytes: &[u8]) -> RString {
@@ -207,45 +205,60 @@ impl Drop for InputDocs {
 /// that can allocate and trigger GC compaction), since compaction rewrites a
 /// moved element's slot in place. `Value`'s own `TryConvert` is an
 /// infallible identity conversion, so this can't fail.
-fn snapshot_entry(snapshot: RArray, index: usize) -> Value {
+pub(crate) fn snapshot_entry(snapshot: RArray, index: usize) -> Value {
     snapshot.entry(index as isize).expect("Value's TryConvert is infallible")
+}
+
+/// `rb_ary_dup` `inputs` into a snapshot: a C-level shallow copy of the
+/// array's slots that runs no user code (not even `initialize_copy`). Every
+/// pass that follows reads the snapshot's slots via [`snapshot_entry`], never
+/// `inputs` again, which is what closes three hazards a direct-`inputs`
+/// walk has (I19 Verdict):
+///
+/// 1. a `to_str` conversion for one element can run arbitrary Ruby code,
+///    including code that mutates or replaces later elements of the caller's
+///    array out from under an in-progress pass;
+/// 2. while the GVL is released for the encode itself, another Ruby thread
+///    can replace or clear the caller's slots, making a borrowed string
+///    collectible mid-encode;
+/// 3. holding one Rust borrow of the caller's array buffer across a `to_str`
+///    call is unsound if that call resizes the array.
+///
+/// None of these can reach the snapshot: no Ruby code holds a reference to
+/// it, so nothing can mutate, resize or replace its slots from Ruby, and the
+/// returned `RArray` stays alive as a conservatively-scanned stack root for
+/// as long as the caller keeps it — which is also, incidentally, why
+/// compaction never relocates the snapshot array itself. Its *slots* remain
+/// ordinary, precisely-marked Ruby state, though, and compaction does
+/// rewrite a slot in place when that element's RVALUE moves, hence
+/// [`snapshot_entry`] rather than a cached `Value`.
+///
+/// One consequence is now a pinned public contract for both backends'
+/// `encode_batch`: the result reflects the input array as it was *at the
+/// call's entry*. A pathological `to_str` that mutates the caller's array
+/// mid-marshal can no longer change which documents get encoded — the
+/// caller's own mutations remain visible to the caller afterwards, just no
+/// longer to this encode.
+pub(crate) fn snapshot_inputs(inputs: RArray) -> RArray {
+    // SAFETY: `inputs.as_raw()` is a live, array-typed VALUE for the
+    // duration of this synchronous, GVL-held call; `rb_ary_dup` only reads
+    // it and allocates a fresh Array via a C-level shallow slot copy that
+    // runs no user code, so nothing here can run arbitrary Ruby code or
+    // raise. Its result is always an Array, per the Ruby C API.
+    RArray::from_value(unsafe { Value::from_raw(rb_ary_dup(inputs.as_raw())) })
+        .expect("rb_ary_dup's result is always an Array")
 }
 
 /// Marshal `inputs` (an Array of Strings, or objects converting to one via
 /// `to_str`) into `InputDocs`, borrowing zero-copy wherever it's sound
 /// instead of copying.
 ///
-/// The first thing this does is `rb_ary_dup` `inputs` into a snapshot: a
-/// C-level shallow copy of the array's slots that runs no user code (not
-/// even `initialize_copy`). From that point on, every pass below —
-/// classification, `to_str` conversion, locking, and `InputDocs`'s Drop —
-/// reads exclusively from the snapshot's slots; `inputs` itself is never
-/// read again. This closes three hazards a direct-`inputs` version has (I19
-/// Verdict): (1) a `to_str` conversion for one element can run arbitrary
-/// Ruby code, including code that mutates or replaces later elements of the
-/// caller's array out from under an in-progress classify/lock pass; (2)
-/// while the GVL is released for the encode itself, another Ruby thread can
-/// replace or clear the caller's slots, making a borrowed string
-/// collectible mid-encode; (3) holding one Rust borrow of the caller's
-/// array buffer across a `to_str` call is unsound if that call resizes the
-/// array. None of these can reach the snapshot: no Ruby code holds a
-/// reference to it (so nothing can mutate, resize, or replace its slots
-/// from Ruby), and the snapshot `RArray` local stays alive as a
-/// conservatively-scanned stack root the whole call through — via
-/// `InputDocs::snapshot`, kept in the calling frame including across the
-/// `without_gvl` window — which is also, incidentally, why compaction never
-/// relocates the snapshot array itself. The snapshot's *slots* remain
-/// ordinary, precisely-marked Ruby state, though, and compaction does
-/// rewrite a slot in place when that element's RVALUE moves — so every pass
-/// below re-reads a slot fresh (`snapshot_entry`) rather than reusing a
-/// `Value` obtained before a Ruby-code-running call, and never holds a
-/// `snapshot.as_slice()` borrow across one.
-///
-/// One consequence is now a pinned public contract: `encode_batch`'s result
-/// reflects the input array as it was *at this call's entry*. A
-/// pathological `to_str` that mutates the caller's array mid-marshal can no
-/// longer change which documents get encoded — the caller's own mutations
-/// remain visible to the caller afterwards, just no longer to this encode.
+/// The first thing this does is take a [`snapshot_inputs`] copy of the
+/// caller's array; from that point on, every pass below — classification,
+/// `to_str` conversion, locking, and `InputDocs`'s Drop — reads exclusively
+/// from the snapshot's slots, and `inputs` itself is never read again. The
+/// snapshot stays alive for the whole call, including across the
+/// `without_gvl` window, as `InputDocs::snapshot`.
 ///
 /// - a heap (non-embedded) `RString` that's frozen is borrowed unlocked —
 ///   its immutability is itself the guard, and `rb_str_locktmp` isn't legal
@@ -274,13 +287,7 @@ fn snapshot_entry(snapshot: RArray, index: usize) -> Value {
 /// `Value` read before a `to_str` call can go stale under compaction before
 /// the lock pass gets to it.
 fn marshal_inputs(inputs: RArray) -> Result<InputDocs, Error> {
-    // SAFETY: `inputs.as_raw()` is a live, array-typed VALUE for the
-    // duration of this synchronous, GVL-held call; `rb_ary_dup` only reads
-    // it and allocates a fresh Array via a C-level shallow slot copy that
-    // runs no user code, so nothing here can run arbitrary Ruby code or
-    // raise. Its result is always an Array, per the Ruby C API.
-    let snapshot = RArray::from_value(unsafe { Value::from_raw(rb_ary_dup(inputs.as_raw())) })
-        .expect("rb_ary_dup's result is always an Array");
+    let snapshot = snapshot_inputs(inputs);
     let len = snapshot.len();
 
     enum Classified {
@@ -351,16 +358,39 @@ fn marshal_inputs(inputs: RArray) -> Result<InputDocs, Error> {
     })
 }
 
+/// The invariant every path below holds: **no code path blocks on a lock
+/// while holding the GVL.** A thread that parks with the GVL in hand stops
+/// the whole VM — including the thread it is waiting for, which needs the
+/// GVL to finish and release what it wants. So: the readers take no lock at
+/// all, `encode` takes the single-document worker with `try_lock` and moves
+/// the wait inside `without_gvl` when that fails, and `cache_entries`'
+/// blocking lock is inside `without_gvl` too.
 #[magnus::wrap(class = "Gigatoken::Native::BPETokenizer", free_immediately, size)]
 pub struct BPETokenizer {
-    tokenizer: RwLock<Tokenizer>,
+    /// The loaded model, never mutated after construction — the loaders do
+    /// all of their mutating (`apply_max_cache_bytes`, `from_tiktoken`'s
+    /// special tokens) before it gets here — so the batch paths, `decode`,
+    /// `vocab`, `vocab_size`, `merges` and `cache_entries` just borrow it.
+    /// It is also the prototype the workers below fork from, which
+    /// `WorkerPool`'s type-level invariant requires stay unmutated.
+    tokenizer: Tokenizer,
+    /// The single-document `encode` path's own worker: a fork of the
+    /// prototype (model tables shared by `Arc`, its own pretoken cache),
+    /// behind a `Mutex` because Ruby hands one instance to every thread.
+    /// Same shape as `WorkerPool`'s serial worker — forked lazily, so a
+    /// tokenizer that only ever batches never pays for one, and rebuilt if
+    /// a panic poisons it — but its own worker rather than that one, since
+    /// a sequential `encode_files` can hold the pool's for minutes and
+    /// `encode` must never wait that long for a `try_lock`.
+    single: Mutex<Option<Tokenizer>>,
     workers: WorkerPool,
 }
 
 impl BPETokenizer {
     pub(crate) fn from_tokenizer(tokenizer: Tokenizer) -> Self {
         Self {
-            tokenizer: RwLock::new(crate::cache::apply_max_cache_bytes(tokenizer)),
+            tokenizer: crate::cache::apply_max_cache_bytes(tokenizer),
+            single: Mutex::new(None),
             workers: WorkerPool::new(),
         }
     }
@@ -407,55 +437,72 @@ impl BPETokenizer {
         }
     }
 
-    /// Shared access to the tokenizer, for everything that only reads it —
-    /// the batch paths, `decode`, `vocab`, `merges`, the size accessors.
-    ///
-    /// Readers never exclude each other, which is what makes the long holds
-    /// safe: `encode_batch`/`encode_files` keep this across a GVL release
-    /// (they run the core pool over `&Tokenizer`), and any other Ruby thread
-    /// reading meanwhile just proceeds. The only exclusive holder is
-    /// [`Self::encode`], which is short.
-    fn read_tokenizer(&self) -> std::sync::RwLockReadGuard<'_, Tokenizer> {
-        self.tokenizer.read().unwrap_or_else(|e| e.into_inner())
+    /// Take the single-document worker, or `None` if another thread holds
+    /// it. A poisoned worker panicked mid-encode and its cache may be
+    /// inconsistent, so it is dropped and re-forked — what `WorkerPool`
+    /// does with its own.
+    fn try_take_worker(&self) -> Option<MutexGuard<'_, Option<Tokenizer>>> {
+        match self.single.try_lock() {
+            Ok(guard) => Some(guard),
+            Err(TryLockError::Poisoned(poisoned)) => {
+                let mut guard = poisoned.into_inner();
+                *guard = None;
+                Some(guard)
+            }
+            Err(TryLockError::WouldBlock) => None,
+        }
     }
 
-    /// Encode one string, mutating the tokenizer's pretoken cache — the only
-    /// exclusive use of the lock.
-    ///
-    /// Uncontended (every single-threaded caller, and the common case under
-    /// threads) this takes the fast path: grab the write guard, encode against
-    /// the Ruby string's own bytes, never release the GVL. Identical cost to
-    /// the pre-lock version plus one uncontended atomic.
-    ///
-    /// Contended, the writer is waiting on a reader that will hold the lock
-    /// for as long as a batch encode takes. Blocking there while holding the
-    /// GVL would stall every other Ruby thread in the VM, so instead the input
-    /// is copied and the whole wait-and-encode moves inside `without_gvl`.
-    /// The copy is what makes that sound: no Ruby `VALUE` and no `RString`
-    /// buffer may outlive the release (see `marshal_inputs`), and the guard is
-    /// taken and dropped inside the closure, so it never crosses OS threads
-    /// even when the scheduler offloads it (see `gvl`).
-    fn encode(&self, input: RString) -> Vec<u32> {
-        if let Ok(mut tokenizer) = self.tokenizer.try_write() {
-            // SAFETY: read-only, for the duration of this synchronous call,
-            // with no GVL release in between.
-            let bytes = unsafe { input.as_slice() };
-            let mut out = Vec::new();
-            tokenizer.encode_with_added_tokens_flat(bytes, &mut out);
-            return out;
-        }
+    /// Encode `bytes` on the worker held by `guard`, forking it from the
+    /// prototype on first use.
+    fn encode_on(&self, guard: &mut Option<Tokenizer>, bytes: &[u8]) -> Vec<u32> {
+        let mut out = Vec::new();
+        guard
+            .get_or_insert_with(|| self.tokenizer.fork())
+            .encode_with_added_tokens_flat(bytes, &mut out);
+        out
+    }
 
-        self.encode_contended(input)
+    /// Encode one string on the single-document worker, mutating that
+    /// worker's pretoken cache.
+    ///
+    /// Uncontended — every single-threaded caller, and the common case under
+    /// threads — this is one `try_lock` plus the encode, against the Ruby
+    /// string's own bytes, with the GVL held throughout. Ruby only switches
+    /// threads at its own checkpoints and this call has none, so the only
+    /// way to lose the `try_lock` is against a thread that took the worker
+    /// with the GVL released: [`Self::encode_contended`] or
+    /// [`Self::cache_entries`].
+    fn encode(&self, input: RString) -> Result<Vec<u32>, Error> {
+        match self.try_take_worker() {
+            Some(mut guard) => {
+                // SAFETY: read-only, for the duration of this synchronous
+                // call, with no GVL release in between.
+                let bytes = unsafe { input.as_slice() };
+                Ok(self.encode_on(&mut guard, bytes))
+            }
+            None => self.encode_contended(input),
+        }
     }
 
     /// The contended half of [`Self::encode`], outlined and `#[cold]`.
+    ///
+    /// The holder needs no GVL to finish, so waiting for it with the GVL
+    /// held would stall the VM for a whole document's encode. Instead the
+    /// input is copied and the wait moves inside `without_gvl`, where it
+    /// polls with `try_lock` rather than parking — so a pending interrupt
+    /// still cancels it (the token comes from `gvl`'s unblock function).
+    /// The copy is what makes that sound: no Ruby `VALUE` and no `RString`
+    /// buffer may outlive the release (see `marshal_inputs`), and the guard
+    /// is taken and dropped inside the closure, so it never crosses OS
+    /// threads even when the scheduler offloads it (see `gvl`).
     ///
     /// Keeping this out of `encode`'s body is a measured requirement, not
     /// tidiness: the workspace builds with `lto = "fat"`, so the core encode
     /// routine inlines into `encode`, and inlining is sensitive to the caller's
     /// size. Written inline, this second path measured slower on single
     /// encodes — no lock overhead, just a flipped inlining decision. Outlined,
-    /// `encode`'s hot body is the original three lines behind a `try_write`.
+    /// `encode`'s hot body is the original three lines behind a `try_lock`.
     ///
     /// Before you re-inline this "to simplify": rerun the evidence rather than
     /// trusting a number. `ruby -Ilib bench/encode_ab.rb` with the attributes
@@ -472,30 +519,38 @@ impl BPETokenizer {
     /// inline-regression measurement, not on a pinned-down magnitude.
     #[cold]
     #[inline(never)]
-    fn encode_contended(&self, input: RString) -> Vec<u32> {
+    fn encode_contended(&self, input: RString) -> Result<Vec<u32>, Error> {
         // SAFETY: copied before any GVL release, so nothing Ruby-owned is
         // captured by the closure below.
         let owned = unsafe { input.as_slice() }.to_vec();
-        without_gvl(move || {
-            let mut tokenizer = self.tokenizer.write().unwrap_or_else(|e| e.into_inner());
-            let mut out = Vec::new();
-            tokenizer.encode_with_added_tokens_flat(&owned, &mut out);
-            out
+        without_gvl_cancellable(|| {
+            |cancel| loop {
+                if let Some(mut guard) = self.try_take_worker() {
+                    return Some(self.encode_on(&mut guard, &owned));
+                }
+                if cancel.load(Ordering::Relaxed) {
+                    return None;
+                }
+                std::thread::yield_now();
+            }
         })
     }
 
     /// Encode a batch on the core worker pool, with the GVL released for the
-    /// parallel encode itself (see `gvl::without_gvl`). Each input string is
-    /// borrowed zero-copy where `marshal_inputs` finds it sound to, and
-    /// copied into an owned buffer otherwise; either way, only raw byte
-    /// slices — never a Ruby `VALUE` — are captured once the GVL is gone.
+    /// parallel encode itself (see `gvl::without_gvl_cancellable`, which
+    /// also makes an interrupt arriving mid-batch cancel it at the next
+    /// document boundary). Each input string is borrowed zero-copy where
+    /// `marshal_inputs` finds it sound to, and copied into an owned buffer
+    /// otherwise; either way, only raw byte slices — never a Ruby `VALUE` —
+    /// are captured once the GVL is gone.
     fn encode_batch_ragged(rb_self: &Self, inputs: RArray) -> Result<(Vec<u32>, Vec<i64>), Error> {
         let marshaled = marshal_inputs(inputs)?;
         let doc_slices = marshaled.as_slices();
-        let tokenizer = rb_self.read_tokenizer();
-        let tokenizer: &Tokenizer = &tokenizer;
+        let tokenizer = &rb_self.tokenizer;
         let workers = &rb_self.workers;
-        Ok(without_gvl(|| encode_docs_ragged(workers, tokenizer, &doc_slices)))
+        without_gvl_cancellable(|| {
+            |cancel| workers.encode_docs_ragged_cancellable(tokenizer, &doc_slices, cancel)
+        })
     }
 
     fn encode_batch(ruby: &Ruby, rb_self: &Self, inputs: RArray) -> Result<RArray, Error> {
@@ -537,14 +592,20 @@ impl BPETokenizer {
         // frozen, not wrapped), so nothing else can read or write through it
         // concurrently.
         let ptr = unsafe { RSTRING_PTR(string.as_raw()) as *mut u32 };
-        // SAFETY: `ptr` is valid for `total_bytes` disjoint u32 writes for
-        // the duration of the gather below (see the allocation above).
-        let dest = unsafe { GatherBuf::new(ptr, total_bytes) };
 
-        let tokenizer = rb_self.read_tokenizer();
-        let tokenizer: &Tokenizer = &tokenizer;
+        let tokenizer = &rb_self.tokenizer;
         let workers = &rb_self.workers;
-        match without_gvl(|| encode_docs_into(workers, tokenizer, &doc_slices, dest)) {
+        let docs: &[&[u8]] = &doc_slices;
+        let gathered = without_gvl_cancellable(|| {
+            // SAFETY: `ptr` is valid for `total_bytes` disjoint u32 writes
+            // for the duration of the gather below (see the allocation
+            // above). A cancelled attempt leaves the destination partly
+            // written and unusable; the retry (see `without_gvl_cancellable`)
+            // starts a fresh gather over the same, still unexposed, buffer.
+            let dest = unsafe { GatherBuf::new(ptr, total_bytes) };
+            move |cancel| workers.encode_docs_into_cancellable(tokenizer, docs, dest, cancel)
+        })?;
+        match gathered {
             GatherOutcome::Committed(total_tokens, lens) => {
                 // SAFETY: `encode_docs_into` only returns `Committed` once
                 // every one of `total_tokens` u32s at `ptr` has been
@@ -582,18 +643,28 @@ impl BPETokenizer {
         };
 
         let source = sources::resolve(ruby, source)?;
-        let tokenizer = rb_self.read_tokenizer();
-        let tokenizer: &Tokenizer = &tokenizer;
+        let tokenizer = &rb_self.tokenizer;
         let workers = &rb_self.workers;
-        let encoded: std::io::Result<(Vec<u32>, Vec<i64>)> = without_gvl(|| {
-            sources::encode_files_ragged(&source, parallel, |files, format| {
-                Ok(if parallel {
-                    encode_files_docs(workers, tokenizer, files, format)
-                } else {
-                    encode_files_docs_serial(workers, tokenizer, files, format)
-                })
-            })
-        });
+        let encoded = without_gvl_cancellable(|| {
+            |cancel| {
+                // `sources::encode_files_ragged`'s callback owes it a
+                // `(flat, lens)`, so a cancelled encode reports itself here
+                // instead of through the return value. The tokens it hands
+                // back are a partial run, thrown away with the `None`.
+                let mut cancelled = false;
+                let encoded = sources::encode_files_ragged(&source, parallel, |files, format| {
+                    let tokens = if parallel {
+                        workers.encode_files_docs_cancellable(tokenizer, files, format, cancel)
+                    } else {
+                        workers
+                            .encode_files_docs_serial_cancellable(tokenizer, files, format, cancel)
+                    };
+                    cancelled = tokens.is_none();
+                    Ok(tokens.unwrap_or_default())
+                });
+                (!cancelled).then_some(encoded)
+            }
+        })?;
         encoded.map_err(|e| raise(ruby, e.to_string()))
     }
 
@@ -614,26 +685,24 @@ impl BPETokenizer {
     fn decode(ruby: &Ruby, rb_self: &Self, tokens: RArray) -> Result<RString, Error> {
         let ids: Vec<u32> = tokens.to_vec()?;
         let ids: Vec<_> = ids.into_iter().map(Into::into).collect();
-        let bytes: Vec<u8> = rb_self.read_tokenizer().decode(&ids).collect();
+        let bytes: Vec<u8> = rb_self.tokenizer.decode(&ids).collect();
         Ok(binary_string(ruby, &bytes))
     }
 
     fn vocab_size(&self) -> usize {
-        self.read_tokenizer().vocab_size()
+        self.tokenizer.vocab_size()
     }
 
     fn vocab(ruby: &Ruby, rb_self: &Self) -> Result<RHash, Error> {
-        let tokenizer = rb_self.read_tokenizer();
         let hash = ruby.hash_new();
-        for (id, bytes) in tokenizer.vocab_entries() {
+        for (id, bytes) in rb_self.tokenizer.vocab_entries() {
             hash.aset(id, binary_string(ruby, bytes))?;
         }
         Ok(hash)
     }
 
     fn merges(ruby: &Ruby, rb_self: &Self) -> Result<RArray, Error> {
-        let tokenizer = rb_self.read_tokenizer();
-        let entries = tokenizer.merge_entries();
+        let entries = rb_self.tokenizer.merge_entries();
         let result = ruby.ary_new_capa(entries.len());
         for (a, b) in entries {
             result.push((binary_string(ruby, a), binary_string(ruby, b)))?;
@@ -641,11 +710,20 @@ impl BPETokenizer {
         Ok(result)
     }
 
-    /// Cached pretoken entries on this tokenizer: grows as text is encoded,
-    /// drops back toward vocab-seed level when a budgeted cache wipes (see
-    /// `Gigatoken.max_cache_bytes`).
-    fn cache_entries(&self) -> usize {
-        self.read_tokenizer().cache_entries()
+    /// Cached pretoken entries on the single-document `encode` path's
+    /// worker: grows as text is encoded, drops back toward vocab-seed level
+    /// when a budgeted cache wipes (see `Gigatoken.max_cache_bytes`). Before
+    /// that worker's first encode there is no fork yet, so this reports the
+    /// prototype's seed — the count the fork will start from.
+    ///
+    /// Blocks for the worker rather than skipping a busy one, which is why
+    /// it releases the GVL first: the holder is an encode that needs no GVL
+    /// to finish, and waiting for it with the GVL held would stall the VM.
+    fn cache_entries(&self) -> Result<usize, Error> {
+        without_gvl(|| {
+            let guard = self.single.lock().unwrap_or_else(|e| e.into_inner());
+            guard.as_ref().unwrap_or(&self.tokenizer).cache_entries()
+        })
     }
 }
 
