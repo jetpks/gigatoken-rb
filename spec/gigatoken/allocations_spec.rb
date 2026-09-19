@@ -52,9 +52,12 @@ RSpec.describe "allocations" do
   end
 
   # The Tokenizer and its native tokenizer; `load` also pays for the path
-  # copy `File.exist?` makes on macOS while deciding the source's shape.
+  # copy `File.exist?` makes on macOS while deciding the source's shape,
+  # and on Ruby 3.3 a Hash per keyword-argument hop on the way down (Ruby
+  # 3.4+ passes them without one). The Hub client it no longer builds was
+  # five objects on its own.
   it "loads a packaged encoding by name without building a Hub client" do
-    expect(allocations(3) { Gigatoken::Tokenizer.load("cl100k_base") }).to be < 4
+    expect(allocations(3) { Gigatoken::Tokenizer.load("cl100k_base") }).to be < 6
     expect(allocations(3) { Gigatoken::Tokenizer.from_encoding("cl100k_base") }).to be < 3
   end
 end
