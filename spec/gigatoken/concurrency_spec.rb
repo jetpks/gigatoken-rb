@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative "../spec_helper"
+require "io/event"
 
 # Ruby hands one tokenizer instance to every thread, so the wrapped state has to
 # be safe under concurrent use. Before the RwLock, `encode` took a mutable
@@ -220,8 +221,14 @@ RSpec.describe "concurrent use of a shared tokenizer" do
   # The same interrupt under a fiber scheduler with a worker pool, where the
   # encode runs on an `IO::Event::WorkerPool` thread and the timeout reaches
   # it through `rb_fiber_scheduler_blocking_operation_cancel` — the same
-  # unblock function, a different caller.
+  # unblock function, a different caller. io-event builds that pool only
+  # against Ruby 4.0's blocking-operation API; without it the scheduler has
+  # no `blocking_operation_wait`, the encode blocks the calling thread as it
+  # does outside Async, and the timer cannot fire until the batch returns —
+  # nothing to cancel, so nothing to assert (docs/how-to/run-under-async.md).
   it "cancels the batch an Async timeout interrupts" do
+    skip "needs IO::Event::WorkerPool (Ruby 4.0)" unless IO::Event.const_defined?(:WorkerPool)
+
     status, out = run_ruby(<<~RUBY)
       ENV["ASYNC_SCHEDULER_WORKER_POOL"] = "true"
       #{preamble}

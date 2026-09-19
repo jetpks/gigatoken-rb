@@ -204,19 +204,21 @@ uses for ordinary errors — as part of whichever iteration lands this change,
 since `ext/gigatoken/**` is out of this spike's boundary to fix directly.
 See DISAGREEMENTS.
 
-**Ruby/Async version floor.** `blocking_operation_wait` and
-`RB_NOGVL_OFFLOAD_SAFE` are Ruby 3.4+/Async v2.21+ features
-(`~/architect/src/github.com/socketry/async/lib/async/scheduler.rb:55-56`,
-"@public Since *Async v2.21* and *Ruby v3.4*"; release note at
-`~/architect/src/github.com/socketry/async/releases.md:382`, "Ruby 3.4 will
-feature a new fiber scheduler hook"). `gigatoken.gemspec` currently floors at
-`>= 3.3.0`. Hand-declaring the flag constant (as `gvl.rs` already does for
-`rb_thread_call_without_gvl`, avoiding an `rb-sys` dependency — see its
-top-of-file comment) means this compiles regardless of Ruby version; the
-open question is runtime behavior of an unrecognized flag bit on Ruby 3.3,
-which needs verifying against 3.3 before merging (this worktree only has
-Ruby 4.0.6 installed — `ruby -v` → `ruby 4.0.6 (2026-07-14 revision
-03b6d3f889) +PRISM [arm64-darwin27]`). See DISAGREEMENTS.
+**Ruby/Async version floor.** Three layers, three floors. The
+`RB_NOGVL_OFFLOAD_SAFE` flag and the `blocking_operation_wait` hook are Ruby
+3.4 (`thread.c` `rb_nogvl` hands the call to the scheduler when the flag is
+set; Async v2.21 added the hook, "Since *Async v2.21* and *Ruby v3.4*").
+The pool that services the hook is Ruby 4.0: io-event's `extconf.rb` compiles
+`IO::Event::WorkerPool` only when
+`rb_fiber_scheduler_blocking_operation_extract` exists, and `extract` /
+`execute` / `cancel` are 4.0 additions to `ruby/fiber/scheduler.h`. So on
+3.4 the hook fires but no scheduler implements it, and on 3.3 `rb_nogvl`
+ignores the bit altogether (`gvl.rs`'s comment): both degrade to the plain
+blocking `rb_nogvl` — GVL released, calling fiber blocked, an `Async` timeout
+raised only after the batch returns. `gigatoken.gemspec` floors at `>= 3.3.0`
+and the flag constant is hand-declared in `gvl.rs`, so the extension builds
+everywhere; the Async-timeout cancellation spec skips without the pool.
+Verified on 3.3.12, 3.4.10 and 4.0.7 (2026-09-19).
 
 ## Rejected alternatives
 

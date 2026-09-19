@@ -32,6 +32,13 @@ Without a worker pool — a bare `Async { ... }`, or no scheduler at all —
 (other Ruby Threads can run) but the calling fiber does not yield to the
 reactor.
 
+The pool is a **Ruby 4.0** feature: io-event builds `IO::Event::WorkerPool`
+only against 4.0's blocking-operation API, so on Ruby 3.3 and 3.4
+`ASYNC_SCHEDULER_WORKER_POOL=true` changes nothing — the encode blocks the
+calling fiber, and an `Async` timeout around it fires only once the batch
+returns. `Timeout.timeout`, `Thread#kill` and Ctrl-C cancel the encode on
+every supported Ruby.
+
 The pool defaults to **one** background worker: a second concurrent encode
 from another fiber queues behind the first rather than running in parallel.
 Apps that want several encodes in flight at once should size the pool
@@ -51,8 +58,9 @@ end
 ```
 
 The scheduler cancels the offloaded operation, the encode stops at the next
-document boundary and its partial result is discarded. The same holds for
-`Timeout.timeout`, `Thread#kill` and Ctrl-C outside Async. SentencePiece
+document boundary and its partial result is discarded — with the worker pool,
+so on Ruby 4.0 (above). The same holds for `Timeout.timeout`, `Thread#kill`
+and Ctrl-C outside Async, on every supported Ruby. SentencePiece
 batches are the exception: they finish the encode first and raise after —
 safely, just not early.
 
