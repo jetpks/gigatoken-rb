@@ -12,7 +12,7 @@ use crate::input::DocumentIter;
 use crate::input::file_source::{DocFormat, chunk_ranges};
 use std::ops::Range;
 use std::cell::UnsafeCell;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock, TryLockError};
 
 /// Parallel chunks must hold at least this many bytes: a chunk this size
@@ -123,7 +123,16 @@ pub(crate) struct ChunkTokens {
     pub(crate) continues: bool,
 }
 
-fn encode_chunk(tokenizer: &mut Tokenizer, chunk: &EncodeChunk) -> ChunkTokens {
+/// Encode one chunk. `cancel` is polled per document rather than only
+/// between chunks: a chunk is a megabyte or more of input, and the caller's
+/// interrupt should not wait out the one already in flight. What is left is
+/// a partial `ChunkTokens`, which is safe because a cancelled run discards
+/// every chunk it encoded (see `encode_chunks_gathered`).
+fn encode_chunk(
+    tokenizer: &mut Tokenizer,
+    chunk: &EncodeChunk,
+    cancel: Option<&AtomicBool>,
+) -> ChunkTokens {
     // Reserve the output once, from a bytes-per-token estimate on the low
     // side of natural language (~4.4 on OWT/GPT-2). Growing from empty
     // instead re-copies roughly the final size in doublings — per chunk,
@@ -141,12 +150,20 @@ fn encode_chunk(tokenizer: &mut Tokenizer, chunk: &EncodeChunk) -> ChunkTokens {
     match chunk {
         EncodeChunk::Docs(docs) => {
             for doc in docs {
+                if cancelled(cancel) {
+                    break;
+                }
                 encode_into(tokenizer, doc, &mut ids, &mut lens);
             }
         }
         EncodeChunk::Region { bytes, format } => {
             for_each_doc(bytes, format, |doc| {
-                encode_into(tokenizer, doc, &mut ids, &mut lens)
+                // `for_each_doc` has no break; once cancelled the rest of
+                // the region is walked but not encoded (see the sequential
+                // path in `encode_files_docs_serial_with`).
+                if !cancelled(cancel) {
+                    encode_into(tokenizer, doc, &mut ids, &mut lens)
+                }
             })
         }
         EncodeChunk::Fragment { bytes, first } => {
@@ -621,9 +638,29 @@ impl Committer {
     }
 }
 
+/// Whether the caller's cancellation token has been set — polled between
+/// chunks by the loops below and per document inside one (`encode_chunk`),
+/// so an interrupt waits out a document rather than a whole chunk.
+/// `None` is a run that cannot be cancelled: what the free functions this
+/// module exports (the pyo3 bindings' and the benches' entry points) pass,
+/// and why they may `expect` a result.
+///
+/// The flag carries no data, only the decision to stop, so `Relaxed` is all
+/// the ordering it needs. What sets it is the Ruby extension's unblock
+/// function, from whichever thread Ruby delivers the interrupt on — see
+/// `ext/gigatoken/src/gvl.rs`.
+fn cancelled(cancel: Option<&AtomicBool>) -> bool {
+    cancel.is_some_and(|flag| flag.load(Ordering::Relaxed))
+}
+
+/// What an uncancellable entry point `expect`s of the cancellable core.
+const UNCANCELLABLE: &str = "a run with no cancellation token encodes every chunk";
+
 /// Encode all chunks with pooled workers and gather them into one flat id
 /// buffer plus per-document row counts — in parallel when there is more
-/// than one chunk, serially otherwise. Each worker's caches are pre-sized
+/// than one chunk, serially otherwise. `None` means `cancel` was set part
+/// way through: the chunks encoded so far are dropped, since a batch missing
+/// its tail is nothing a caller can use. Each worker's caches are pre-sized
 /// for its share of `total_bytes` (capacity hints only — see
 /// `Tokenizer::fork_sized`; workers already forked on an earlier call keep
 /// their warm caches).
@@ -642,10 +679,11 @@ pub(crate) fn encode_chunks_gathered(
     proto: &Tokenizer,
     chunks: &[EncodeChunk],
     total_bytes: usize,
-) -> (Vec<u32>, Vec<i64>) {
+    cancel: Option<&AtomicBool>,
+) -> Option<(Vec<u32>, Vec<i64>)> {
     // A token consumes >= 1 input byte, so total_bytes tokens is the
     // reservation bound (NFC expansion is caught by the overflow escape).
-    encode_chunks_gathered_with_cap(workers, proto, chunks, total_bytes, total_bytes)
+    encode_chunks_gathered_with_cap(workers, proto, chunks, total_bytes, total_bytes, cancel)
 }
 
 /// `encode_chunks_gathered` with the committer's reservation bound passed
@@ -656,20 +694,24 @@ fn encode_chunks_gathered_with_cap(
     chunks: &[EncodeChunk],
     total_bytes: usize,
     cap_tokens: usize,
-) -> (Vec<u32>, Vec<i64>) {
+    cancel: Option<&AtomicBool>,
+) -> Option<(Vec<u32>, Vec<i64>)> {
     let share = total_bytes / rayon::current_num_threads().max(1);
-    let encode = |c: &EncodeChunk| workers.with_worker(proto, share, |tok| encode_chunk(tok, c));
+    let encode =
+        |c: &EncodeChunk| workers.with_worker(proto, share, |tok| encode_chunk(tok, c, cancel));
     if chunks.len() <= 1 {
         // Small inputs skip the thread fan-out — and a lone chunk's id
-        // buffer IS the flat result, no gather copy at all.
-        return match chunks.first() {
+        // buffer IS the flat result, no gather copy at all. Cancellation is
+        // chunk-granular, so a lone chunk always runs to completion; it is
+        // at most MIN_CHUNK_BYTES of input.
+        return Some(match chunks.first() {
             Some(chunk) => {
                 let out = encode(chunk);
                 let counts = row_counts(std::slice::from_ref(&out));
                 (out.ids, counts)
             }
             None => (Vec::new(), Vec::new()),
-        };
+        });
     }
     let next = AtomicUsize::new(0);
     let outs: Vec<OnceLock<ChunkTokens>> = (0..chunks.len()).map(|_| OnceLock::new()).collect();
@@ -678,7 +720,10 @@ fn encode_chunks_gathered_with_cap(
     rayon::scope(|s| {
         for _ in 0..tasks {
             s.spawn(|_| {
-                loop {
+                // A cancelled run is discarded whole, so a worker that sees
+                // the token set just stops claiming chunks — no drain, no
+                // commit, nothing to salvage.
+                while !cancelled(cancel) {
                     let i = next.fetch_add(1, Ordering::Relaxed);
                     let Some(chunk) = chunks.get(i) else {
                         // One last opportunistic drain on the way out: this
@@ -699,20 +744,23 @@ fn encode_chunks_gathered_with_cap(
             });
         }
     });
+    if cancelled(cancel) {
+        return None;
+    }
     let outs: Vec<ChunkTokens> = outs
         .into_iter()
         .map(|slot| slot.into_inner().expect("every claimed chunk was encoded"))
         .collect();
     let counts = row_counts(&outs);
     let total: usize = outs.iter().map(|c| c.ids.len()).sum();
-    match committer.and_then(|c| c.finish(&outs, total)) {
+    Some(match committer.and_then(|c| c.finish(&outs, total)) {
         Some(flat) => {
             // The copies are done; the spent chunk buffers are dead weight.
             defer_drop(outs);
             (flat, counts)
         }
         None => (gather_flat(outs), counts),
-    }
+    })
 }
 
 /// `encode_chunks_gathered_with_cap`, but gathering directly into a
@@ -721,18 +769,21 @@ fn encode_chunks_gathered_with_cap(
 /// `encode_docs_into` and `ext/gigatoken/src/tokenizer.rs`). Every chunk is
 /// encoded either way, so an overrun `GatherOutcome::Fallback` carries the
 /// classic gathered result rather than asking the caller to re-run the
-/// encode.
+/// encode. `None` means `cancel` was set part way through (see
+/// `encode_chunks_gathered`), leaving `dest` partly written and unusable.
 pub(crate) fn encode_chunks_into(
     workers: &WorkerPool,
     proto: &Tokenizer,
     chunks: &[EncodeChunk],
     total_bytes: usize,
     dest: GatherBuf,
-) -> GatherOutcome {
+    cancel: Option<&AtomicBool>,
+) -> Option<GatherOutcome> {
     let share = total_bytes / rayon::current_num_threads().max(1);
-    let encode = |c: &EncodeChunk| workers.with_worker(proto, share, |tok| encode_chunk(tok, c));
+    let encode =
+        |c: &EncodeChunk| workers.with_worker(proto, share, |tok| encode_chunk(tok, c, cancel));
     if chunks.len() <= 1 {
-        return match chunks.first() {
+        return Some(match chunks.first() {
             Some(chunk) => {
                 let out = encode(chunk);
                 let counts = row_counts(std::slice::from_ref(&out));
@@ -748,7 +799,7 @@ pub(crate) fn encode_chunks_into(
                 }
             }
             None => GatherOutcome::Committed(0, Vec::new()),
-        };
+        });
     }
     let next = AtomicUsize::new(0);
     let outs: Vec<OnceLock<ChunkTokens>> = (0..chunks.len()).map(|_| OnceLock::new()).collect();
@@ -757,7 +808,10 @@ pub(crate) fn encode_chunks_into(
     rayon::scope(|s| {
         for _ in 0..tasks {
             s.spawn(|_| {
-                loop {
+                // Stop claiming chunks once cancelled (see
+                // `encode_chunks_gathered_with_cap`); the destination is
+                // left half-written for the caller to discard or reuse.
+                while !cancelled(cancel) {
                     let i = next.fetch_add(1, Ordering::Relaxed);
                     let Some(chunk) = chunks.get(i) else {
                         // One last opportunistic drain on the way out: this
@@ -774,19 +828,22 @@ pub(crate) fn encode_chunks_into(
             });
         }
     });
+    if cancelled(cancel) {
+        return None;
+    }
     let outs: Vec<ChunkTokens> = outs
         .into_iter()
         .map(|slot| slot.into_inner().expect("every claimed chunk was encoded"))
         .collect();
     let counts = row_counts(&outs);
     let total: usize = outs.iter().map(|c| c.ids.len()).sum();
-    if committer.finish_external(&outs, total) {
+    Some(if committer.finish_external(&outs, total) {
         // The copies are done; the spent chunk buffers are dead weight.
         defer_drop(outs);
         GatherOutcome::Committed(total, counts)
     } else {
         GatherOutcome::Fallback(gather_flat(outs), counts)
-    }
+    })
 }
 
 /// Merge per-chunk outputs into one flat id buffer and per-document row
@@ -922,6 +979,59 @@ impl WorkerPool {
         });
         f(guard.get_or_insert_with(|| proto.fork_sized(expected_bytes)))
     }
+
+    /// `encode_docs_ragged` with a cancellation token: the same encode, plus
+    /// a flag polled at chunk granularity, and `None` when it was set part
+    /// way through (see `encode_chunks_gathered`).
+    ///
+    /// This and the three below are methods rather than free functions like
+    /// their uncancellable twins: the crate's free-function set is the
+    /// surface the pyo3 bindings and the Rust benches are written against,
+    /// and the pool is the receiver either way. They are what the Ruby
+    /// extension calls, so that an interrupt cancels a batch instead of
+    /// waiting it out (`ext/gigatoken/src/gvl.rs`).
+    pub fn encode_docs_ragged_cancellable(
+        &self,
+        proto: &Tokenizer,
+        docs: &[&[u8]],
+        cancel: &AtomicBool,
+    ) -> Option<(Vec<u32>, Vec<i64>)> {
+        encode_docs_ragged_with(self, proto, docs, lpt_from_env(), Some(cancel))
+    }
+
+    /// `encode_docs_into` with a cancellation token.
+    pub fn encode_docs_into_cancellable(
+        &self,
+        proto: &Tokenizer,
+        docs: &[&[u8]],
+        dest: GatherBuf,
+        cancel: &AtomicBool,
+    ) -> Option<GatherOutcome> {
+        encode_docs_into_with(self, proto, docs, dest, Some(cancel))
+    }
+
+    /// `encode_files_docs` with a cancellation token.
+    pub fn encode_files_docs_cancellable(
+        &self,
+        proto: &Tokenizer,
+        files: &[&[u8]],
+        format: &DocFormat,
+        cancel: &AtomicBool,
+    ) -> Option<(Vec<u32>, Vec<i64>)> {
+        encode_files_docs_with(self, proto, files, format, Some(cancel))
+    }
+
+    /// `encode_files_docs_serial` with a cancellation token, polled per
+    /// document.
+    pub fn encode_files_docs_serial_cancellable(
+        &self,
+        proto: &Tokenizer,
+        files: &[&[u8]],
+        format: &DocFormat,
+        cancel: &AtomicBool,
+    ) -> Option<(Vec<u32>, Vec<i64>)> {
+        encode_files_docs_serial_with(self, proto, files, format, Some(cancel))
+    }
 }
 
 /// Shared core of encode_batch / encode_files for pre-resolved document
@@ -939,7 +1049,7 @@ pub fn encode_docs_ragged(
     proto: &Tokenizer,
     docs: &[&[u8]],
 ) -> (Vec<u32>, Vec<i64>) {
-    encode_docs_ragged_with(workers, proto, docs, lpt_from_env())
+    encode_docs_ragged_with(workers, proto, docs, lpt_from_env(), None).expect(UNCANCELLABLE)
 }
 
 /// `encode_docs_ragged` with the LPT switch passed explicitly instead of
@@ -950,11 +1060,12 @@ pub(crate) fn encode_docs_ragged_with(
     proto: &Tokenizer,
     docs: &[&[u8]],
     lpt: bool,
-) -> (Vec<u32>, Vec<i64>) {
+    cancel: Option<&AtomicBool>,
+) -> Option<(Vec<u32>, Vec<i64>)> {
     let total: usize = docs.iter().map(|d| d.len()).sum();
     let added = proto.added_token_split_blockers();
     let chunks = build_doc_chunks(docs, total, chunk_target_bytes(total), &added, lpt);
-    encode_chunks_gathered(workers, proto, &chunks, total)
+    encode_chunks_gathered(workers, proto, &chunks, total, cancel)
 }
 
 /// `encode_docs_ragged`, but gathering directly into a caller-supplied
@@ -969,10 +1080,21 @@ pub fn encode_docs_into(
     docs: &[&[u8]],
     dest: GatherBuf,
 ) -> GatherOutcome {
+    encode_docs_into_with(workers, proto, docs, dest, None).expect(UNCANCELLABLE)
+}
+
+/// `encode_docs_into` with a cancellation token (see `encode_chunks_gathered`).
+fn encode_docs_into_with(
+    workers: &WorkerPool,
+    proto: &Tokenizer,
+    docs: &[&[u8]],
+    dest: GatherBuf,
+    cancel: Option<&AtomicBool>,
+) -> Option<GatherOutcome> {
     let total: usize = docs.iter().map(|d| d.len()).sum();
     let added = proto.added_token_split_blockers();
     let chunks = build_doc_chunks(docs, total, chunk_target_bytes(total), &added, lpt_from_env());
-    encode_chunks_into(workers, proto, &chunks, total, dest)
+    encode_chunks_into(workers, proto, &chunks, total, dest, cancel)
 }
 
 /// Sequential `encode_docs_ragged`: encode every document in order on the
@@ -1136,8 +1258,19 @@ pub fn encode_files_docs(
     files: &[&[u8]],
     format: &DocFormat,
 ) -> (Vec<u32>, Vec<i64>) {
+    encode_files_docs_with(workers, proto, files, format, None).expect(UNCANCELLABLE)
+}
+
+/// `encode_files_docs` with a cancellation token (see `encode_chunks_gathered`).
+fn encode_files_docs_with(
+    workers: &WorkerPool,
+    proto: &Tokenizer,
+    files: &[&[u8]],
+    format: &DocFormat,
+    cancel: Option<&AtomicBool>,
+) -> Option<(Vec<u32>, Vec<i64>)> {
     if matches!(format, DocFormat::Text { separator: None }) {
-        return encode_docs_ragged(workers, proto, files);
+        return encode_docs_ragged_with(workers, proto, files, lpt_from_env(), cancel);
     }
     let total: usize = files.iter().map(|f| f.len()).sum();
     let target = chunk_target_bytes(total);
@@ -1152,7 +1285,7 @@ pub fn encode_files_docs(
                 })
         })
         .collect();
-    encode_chunks_gathered(workers, proto, &chunks, total)
+    encode_chunks_gathered(workers, proto, &chunks, total, cancel)
 }
 
 /// Sequential `encode_files_docs`: extract and encode every document in
@@ -1165,6 +1298,19 @@ pub fn encode_files_docs_serial(
     files: &[&[u8]],
     format: &DocFormat,
 ) -> (Vec<u32>, Vec<i64>) {
+    encode_files_docs_serial_with(workers, proto, files, format, None).expect(UNCANCELLABLE)
+}
+
+/// `encode_files_docs_serial` with a cancellation token, polled per
+/// document — this path has no chunks to stop between (see
+/// `encode_chunks_gathered`).
+fn encode_files_docs_serial_with(
+    workers: &WorkerPool,
+    proto: &Tokenizer,
+    files: &[&[u8]],
+    format: &DocFormat,
+    cancel: Option<&AtomicBool>,
+) -> Option<(Vec<u32>, Vec<i64>)> {
     let total: usize = files.iter().map(|f| f.len()).sum();
     workers.with_serial_worker(proto, total, |tok| {
         let mut ids: Vec<u32> = Vec::with_capacity(total / 4 + 16);
@@ -1173,9 +1319,16 @@ pub fn encode_files_docs_serial(
         madvise_hugepage(ids.as_mut_ptr() as *mut u8, ids.capacity() * 4);
         let mut lens = Vec::new();
         for &bytes in files {
-            for_each_doc(bytes, format, |doc| encode_into(tok, doc, &mut ids, &mut lens));
+            for_each_doc(bytes, format, |doc| {
+                // Once cancelled the result is discarded, so stop encoding;
+                // the walk itself is a cheap scan and runs out rather than
+                // threading a break through `for_each_doc`'s callback.
+                if !cancelled(cancel) {
+                    encode_into(tok, doc, &mut ids, &mut lens);
+                }
+            });
         }
-        (ids, lens)
+        (!cancelled(cancel)).then_some((ids, lens))
     })
 }
 
@@ -1306,7 +1459,8 @@ mod tests {
             // A fresh pool per shape so each run exercises the pre-sized
             // fork (slots fork lazily on first use).
             let workers = WorkerPool::new();
-            let (flat, lens) = encode_docs_ragged_with(&workers, &proto, &docs, lpt);
+            let (flat, lens) =
+                encode_docs_ragged_with(&workers, &proto, &docs, lpt, None).expect(UNCANCELLABLE);
             assert_eq!(lens, lens_ref, "lens mismatch (lpt={lpt})");
             assert_eq!(flat, ids_ref, "ids mismatch (lpt={lpt})");
         }
@@ -1673,7 +1827,8 @@ mod tests {
 
         for lpt in [true, false] {
             let workers = WorkerPool::new();
-            let (flat, lens) = encode_docs_ragged_with(&workers, &proto, &docs, lpt);
+            let (flat, lens) =
+                encode_docs_ragged_with(&workers, &proto, &docs, lpt, None).expect(UNCANCELLABLE);
             assert_eq!(lens, lens_ref, "lens mismatch (lpt={lpt})");
             if flat != ids_ref {
                 let i = ids_ref
@@ -1723,14 +1878,16 @@ mod tests {
         assert!(chunks.len() > 1, "test must exercise the parallel path");
 
         let workers = WorkerPool::new();
-        let (flat_ref, lens_ref) = encode_chunks_gathered(&workers, &proto, &chunks, total);
+        let (flat_ref, lens_ref) =
+            encode_chunks_gathered(&workers, &proto, &chunks, total, None).expect(UNCANCELLABLE);
         // Byte-level vocab: one token per byte, so any cap below `total`
         // overflows; total / 3 overflows mid-flight with a committed
         // prefix behind it.
         for cap in [0, 1, total / 3] {
             let workers = WorkerPool::new();
             let (flat, lens) =
-                encode_chunks_gathered_with_cap(&workers, &proto, &chunks, total, cap);
+                encode_chunks_gathered_with_cap(&workers, &proto, &chunks, total, cap, None)
+                    .expect(UNCANCELLABLE);
             assert_eq!(lens, lens_ref, "lens mismatch (cap={cap})");
             assert_eq!(flat, flat_ref, "ids mismatch (cap={cap})");
         }
@@ -1767,7 +1924,8 @@ mod tests {
         assert!(chunks.len() > 1, "test must exercise the parallel path");
 
         let workers = WorkerPool::new();
-        let (flat_ref, lens_ref) = encode_chunks_gathered(&workers, &proto, &chunks, total);
+        let (flat_ref, lens_ref) =
+            encode_chunks_gathered(&workers, &proto, &chunks, total, None).expect(UNCANCELLABLE);
 
         // A full-size destination: every chunk commits straight into it.
         let mut dest_buf = vec![0u32; total];
@@ -1775,7 +1933,8 @@ mod tests {
         // SAFETY: `dest_buf` is `total` tokens, exclusively owned for the
         // duration of this call.
         let dest = unsafe { GatherBuf::new(dest_buf.as_mut_ptr(), total) };
-        match encode_chunks_into(&workers, &proto, &chunks, total, dest) {
+        let gathered = encode_chunks_into(&workers, &proto, &chunks, total, dest, None);
+        match gathered.expect(UNCANCELLABLE) {
             GatherOutcome::Committed(n, lens) => {
                 assert_eq!(lens, lens_ref, "lens mismatch (committed)");
                 assert_eq!(&dest_buf[..n], &flat_ref[..], "ids mismatch (committed)");
@@ -1792,12 +1951,51 @@ mod tests {
         // SAFETY: `small_buf` is `cap` tokens, exclusively owned for the
         // duration of this call.
         let dest = unsafe { GatherBuf::new(small_buf.as_mut_ptr(), cap) };
-        match encode_chunks_into(&workers, &proto, &chunks, total, dest) {
+        let gathered = encode_chunks_into(&workers, &proto, &chunks, total, dest, None);
+        match gathered.expect(UNCANCELLABLE) {
             GatherOutcome::Fallback(flat, lens) => {
                 assert_eq!(lens, lens_ref, "lens mismatch (fallback)");
                 assert_eq!(flat, flat_ref, "ids mismatch (fallback)");
             }
             GatherOutcome::Committed(..) => panic!("expected a too-small dest to overflow"),
         }
+    }
+
+    /// Every entry point the Ruby extension cancels must report a cancelled
+    /// run rather than hand back a batch missing its tail — and, with the
+    /// token clear, must be identical to its uncancellable twin.
+    #[test]
+    fn cancelled_runs_return_nothing() {
+        let merges = HashMap::with_hasher(rustc_hash::FxBuildHasher {});
+        let vocab = (0..=u8::MAX).map(|b| vec![b]).collect();
+        let proto = Tokenizer::new(merges, vocab, None);
+        // Eight chunk-sized documents, so the parallel paths really do have
+        // chunk boundaries to stop at (a lone chunk always completes).
+        let owned: Vec<Vec<u8>> = (0..8).map(|_| vec![b'a'; MIN_CHUNK_BYTES]).collect();
+        let docs: Vec<&[u8]> = owned.iter().map(|d| d.as_slice()).collect();
+        let total: usize = docs.iter().map(|d| d.len()).sum();
+        let format = DocFormat::Text { separator: None };
+        let workers = WorkerPool::new();
+
+        let reference = encode_docs_ragged(&workers, &proto, &docs);
+        let cancel = AtomicBool::new(false);
+        let uncancelled = [
+            workers.encode_docs_ragged_cancellable(&proto, &docs, &cancel),
+            workers.encode_files_docs_cancellable(&proto, &docs, &format, &cancel),
+            workers.encode_files_docs_serial_cancellable(&proto, &docs, &format, &cancel),
+        ];
+        for got in &uncancelled {
+            assert!(got.as_ref() == Some(&reference), "uncancelled run differs");
+        }
+
+        cancel.store(true, Ordering::Relaxed);
+        let mut buf = vec![0u32; total];
+        // SAFETY: `buf` holds `total` tokens and is exclusively owned here.
+        let dest = unsafe { GatherBuf::new(buf.as_mut_ptr(), total) };
+        let ragged = workers.encode_docs_ragged_cancellable(&proto, &docs, &cancel);
+        let into = workers.encode_docs_into_cancellable(&proto, &docs, dest, &cancel);
+        let files = workers.encode_files_docs_cancellable(&proto, &docs, &format, &cancel);
+        let serial = workers.encode_files_docs_serial_cancellable(&proto, &docs, &format, &cancel);
+        assert!(ragged.is_none() && into.is_none() && files.is_none() && serial.is_none());
     }
 }
