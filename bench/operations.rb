@@ -15,6 +15,7 @@
 require "benchmark/ips"
 require "tiktoken_ruby"
 require "tmpdir"
+require "fileutils"
 require "gigatoken"
 
 Warning[:experimental] = false # IO::Buffer
@@ -46,7 +47,9 @@ enc = Tiktoken.get_encoding("cl100k_base")
 [short, medium, large].each { |t| tok.encode(t) && enc.encode(t) }
 ids = tok.encode(medium)
 packed = tok.encode_batch(batch, packed: true)
-corpus = File.join(Dir.mktmpdir("gigatoken-bench"), "docs.txt")
+corpus_dir = Dir.mktmpdir("gigatoken-bench")
+at_exit { FileUtils.remove_entry(corpus_dir) }
+corpus = File.join(corpus_dir, "docs.txt")
 File.write(corpus, batch.join("<|endoftext|>"))
 
 # operation => [gigatoken call, tiktoken_ruby call or nil]

@@ -61,9 +61,10 @@ Gigatoken::Tokenizer.load("openai-community/gpt2")   # dispatches here for org/n
 ```
 
 The download goes over `async-http`, honours `HF_TOKEN` (or `HUGGING_FACE_HUB_TOKEN`,
-or the token file `hf auth login` writes), and lands in the standard
-HuggingFace cache (`HF_HUB_CACHE`, then `$HF_HOME/hub`), so later loads by
-this gem or by `huggingface_hub` are served from disk.
+or the token file `hf auth login` writes), talks to `HF_ENDPOINT` when that is
+set (a mirror, or a local server) and huggingface.co otherwise, and lands in
+the standard HuggingFace cache (`HF_HUB_CACHE`, then `$HF_HOME/hub`), so later
+loads by this gem or by `huggingface_hub` are served from disk.
 
 To point at a mirror, or a local server in tests, inject the client:
 

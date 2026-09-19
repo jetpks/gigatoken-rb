@@ -51,10 +51,11 @@ A `.tiktoken` mergeable-ranks file. `pretokenizer:` is one of
 content to id. **Raises** `Gigatoken::Error` for an unknown scheme, naming
 the valid ones, and for non-dense ranks.
 
-### `Gigatoken::Tokenizer.from_hub(repo_id, revision: "main", hub: Hub.new)`
+### `Gigatoken::Tokenizer.from_hub(repo_id, revision: "main", hub: nil)`
 
 `tokenizer.json` from a HuggingFace Hub repo, served from the standard HF
-cache and downloaded into it on a miss. See
+cache and downloaded into it on a miss. `hub:` is a `Gigatoken::Hub`; when
+omitted one is built for the call, against `HF_ENDPOINT` if set. See
 [Load a tokenizer](../how-to/load-a-tokenizer.md) for token and cache
 discovery.
 

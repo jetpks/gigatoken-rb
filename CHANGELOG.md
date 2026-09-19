@@ -15,8 +15,14 @@
   `Async::HTTP::Internet` and three Hashes — including for the packaged
   encodings and local files that never touch the network. The client is
   built only when the source turns out to be a repo id: 3 objects per load
-  instead of 8. `from_json` no longer copies the whole `tokenizer.json` to
-  retag its encoding.
+  instead of 8. `from_hub` takes the same lazy `hub: nil` default. The Hub
+  endpoint honours `HF_ENDPOINT`, as huggingface_hub does, so the default
+  client can be pointed at a mirror or a test server without injecting one.
+  `from_json` retags a non-UTF-8-tagged String rather than copying every
+  input.
+
+- **The extension crate is 0.3.0 too** (`ext/gigatoken/Cargo.toml`,
+  `Cargo.lock`), moving with the gem as every release has.
 
 - **No per-document copy in the ragged batch path.** The extension built
   each document's Array from a fresh `Vec` copy of its slice of the flat

@@ -66,6 +66,13 @@ RSpec.describe Gigatoken::Tokenizer do
     expect { Gigatoken::Tokenizer.from_json("not json") }.to raise_error(Gigatoken::Error)
   end
 
+  it "reads special tokens from the JSON bytes whatever the String's encoding tag" do
+    from_binary = described_class.from_json(fixture).special_tokens
+    %w[UTF-8 US-ASCII ISO-8859-1].each do |tag|
+      expect(described_class.from_json(fixture.dup.force_encoding(tag)).special_tokens).to eq(from_binary)
+    end
+  end
+
   describe ".from_tiktoken" do
     it "requires a pretokenizer keyword" do
       expect { described_class.from_tiktoken(ranks_path) }.to raise_error(ArgumentError)
@@ -159,6 +166,21 @@ RSpec.describe Gigatoken::Tokenizer do
         end
       ensure
         ENV["HF_HOME"] = original_home
+      end
+    end
+
+    it "dispatches a repo-id-shaped string to from_hub with a default Hub, honoring HF_ENDPOINT" do
+      Dir.mktmpdir do |cache_dir|
+        original = ENV.values_at("HF_HOME", "HF_ENDPOINT")
+        ENV["HF_HOME"] = cache_dir
+        app = ->(_request) { Protocol::HTTP::Response[200, {"x-repo-commit" => "c" * 40}, [fixture]] }
+
+        run_hub_server(app) do |base_url|
+          ENV["HF_ENDPOINT"] = base_url
+          expect(described_class.load("acme/gpt2").encode("Hello, world!")).to eq([15496, 11, 995, 0])
+        end
+      ensure
+        ENV["HF_HOME"], ENV["HF_ENDPOINT"] = original
       end
     end
 

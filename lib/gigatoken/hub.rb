@@ -99,6 +99,12 @@ module Gigatoken
         revision.match?(/\A[0-9a-f]{40}\z/)
       end
 
+      # The Hub endpoint, resolved like huggingface_hub does it: HF_ENDPOINT,
+      # then https://huggingface.co.
+      def default_endpoint
+        env("HF_ENDPOINT") || DEFAULT_ENDPOINT
+      end
+
       private
 
       def env(key)
@@ -125,8 +131,9 @@ module Gigatoken
 
     # @parameter endpoint [String] the Hub endpoint to fetch from — override
     #   for pointing at a local server in tests (dependency injection, not a
-    #   mock).
-    def initialize(endpoint: DEFAULT_ENDPOINT)
+    #   mock); defaults to Hub.default_endpoint (HF_ENDPOINT, then
+    #   huggingface.co).
+    def initialize(endpoint: self.class.default_endpoint)
       @endpoint = endpoint.chomp("/")
       @internet = Async::HTTP::Internet.new
     end
