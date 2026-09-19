@@ -9,7 +9,7 @@ RSpec.describe Gigatoken::CLI::Validate do
   fixtures = File.expand_path("../../fixtures", __dir__)
   fixture_path = File.expand_path("../../../tests/fixtures/gpt2_tokenizer.json", __dir__)
   docs_txt = File.join(fixtures, "docs.txt")
-  docs_gz = File.join(fixtures, "docs.txt.gz")
+  compressed = {gz: File.join(fixtures, "docs.txt.gz"), zst: File.join(fixtures, "docs.txt.zst")}
 
   let(:stdout) { StringIO.new }
   let(:stderr) { StringIO.new }
@@ -40,26 +40,17 @@ RSpec.describe Gigatoken::CLI::Validate do
   # The whole point of validate is that both sides see the same bytes: the
   # native source decompresses, so the Ruby-side split has to as well or a
   # correct tokenizer "fails" on every compressed corpus.
-  it "agrees on a .gz corpus, matching the uncompressed run document for document" do
-    command.call(tokenizer: fixture_path, files: [docs_gz], doc_separator: "<|endoftext|>")
-    from_gz = stdout.string.dup
+  compressed.each do |kind, path|
+    it "agrees on a .#{kind} corpus, matching the uncompressed run document for document" do
+      command.call(tokenizer: fixture_path, files: [path], doc_separator: "<|endoftext|>")
+      from_compressed = stdout.string.dup
 
-    stdout.truncate(0)
-    stdout.rewind
-    command.call(tokenizer: fixture_path, files: [docs_txt], doc_separator: "<|endoftext|>")
+      stdout.truncate(0)
+      stdout.rewind
+      command.call(tokenizer: fixture_path, files: [docs_txt], doc_separator: "<|endoftext|>")
 
-    expect(from_gz).to match(/\Avalidation OK: [1-9]\d* documents match\n\z/)
-    expect(from_gz).to eq(stdout.string)
-  end
-
-  it "refuses .zst, naming the missing decoder and the native path that handles it" do
-    Dir.mktmpdir do |dir|
-      zst = File.join(dir, "docs.txt.zst")
-      File.binwrite(zst, "not really zstd")
-
-      expect { command.call(tokenizer: fixture_path, files: [zst]) }
-        .to raise_error(SystemExit) { |e| expect(e.status).to eq(1) }
-      expect(stderr.string).to match(/\Aerror: .*zstd.*encode_files/)
+      expect(from_compressed).to match(/\Avalidation OK: [1-9]\d* documents match\n\z/)
+      expect(from_compressed).to eq(stdout.string)
     end
   end
 

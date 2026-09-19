@@ -26,6 +26,9 @@ module Gigatoken
 
         gt_tokenizer = Support.load_tokenizer(tokenizer, pretokenizer: pretokenizer)
 
+        # Only the batch path materializes the documents; the native paths
+        # leave this nil and count their bytes off the clock below.
+        docs = nil
         start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
         if packed
           encoded = gt_tokenizer.encode_files(Support.text_file_source(files, doc_separator), parallel: parallel, packed: true)

@@ -37,22 +37,17 @@ number is bytes, and `none` or `unlimited` means no cap.
 
 ## Compressed FILES
 
-`.gz` files work in both commands: the Ruby-side split decompresses them the
-way the native file sources do, so `validate` compares like with like and
-`bench` reports MB/s over the decompressed bytes.
-
-`.zst` does not: gigatoken-rb has no Ruby-side zstd decoder (the `zstd-ruby`
-gem is not a dependency), and reporting throughput over compressed bytes or
-validating decompressed output against compressed input would both be
-silently wrong, so both commands refuse it with `error: ...`. Decompress the
-file first, or use the library's `Tokenizer#encode_files`, which handles
-`.zst` natively.
+`.gz`, `.zst` and `.zstd` files work in both commands. The Ruby-side split
+reads them through the engine's own decoder — the same one the native file
+sources load through, detecting compression from the extension — so
+`validate` compares like with like and `bench` reports MB/s over the
+decompressed bytes.
 
 ## Errors
 
 Errors print a single `error: ...` line and exit 1, with no backtrace —
-a tokenizer that will not load, a missing or unreadable FILE, an empty
-`--doc-separator`, or an empty FILES list.
+a tokenizer that will not load, a missing, unreadable or undecompressable
+FILE, an empty `--doc-separator`, or an empty FILES list.
 
 ```sh
 gigatoken bench cl100k_base owt_train.txt --doc-separator "<|endoftext|>" --packed

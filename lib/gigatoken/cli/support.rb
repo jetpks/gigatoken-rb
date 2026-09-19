@@ -1,7 +1,6 @@
 # frozen_string_literal: true
 
 require "etc"
-require "zlib"
 
 module Gigatoken
   module CLI
@@ -19,27 +18,13 @@ module Gigatoken
       SIZE_PATTERN = /\A\s*(\d+(?:\.\d+)?)\s*([kmgt]?)(i?)b?\s*\z/i
       private_constant :SIZE_PATTERN
 
-      # Compression is detected from the extension, the same way the native
-      # file sources do it (src/input/file_source.rs `detect_compression`) —
-      # the Ruby-side split has to agree with them or the two paths see
-      # different bytes.
-      ZSTD_SUFFIXES = [".zst", ".zstd"].freeze
-      private_constant :ZSTD_SUFFIXES
-
-      READ_CHUNK_BYTES = 1 << 20
-      private_constant :READ_CHUNK_BYTES
-
       class << self
         # The argument shapes dry-cli itself lets through: FILES declared
         # `required: true` still arrives empty, and an empty separator would
-        # split every byte into its own document. A .zst input is refused
-        # here rather than part-way through, so neither command does work it
-        # cannot finish.
+        # split every byte into its own document.
         def check_usage!(files, separator)
           raise Gigatoken::Error, "FILES is required: name at least one file to encode" if files.empty?
           raise Gigatoken::Error, "--doc-separator cannot be empty" if separator == ""
-
-          files.each { |file| refuse_zstd!(file.to_s) }
         end
 
         # Load TOKENIZER: a tokenizer.json path/directory, a packaged
@@ -86,7 +71,7 @@ module Gigatoken
         # file's decompressed size, not its size on disk — so throughput is
         # reported over the input that was tokenized.
         def input_bytesize(files)
-          files.sum { |file| decompressed_size(file.to_s) }
+          files.sum { |file| read_decompressed(file.to_s).bytesize }
         end
 
         # The prefix of `docs` totalling at most `limit_bytes`, byte-
@@ -128,47 +113,13 @@ module Gigatoken
 
         private
 
-        # gigatoken-rb has no Ruby-side zstd decoder — `zstd-ruby` is not a
-        # dependency — so the commands that need the documents (or their
-        # size) in Ruby cannot handle .zst. The library's own
-        # `Tokenizer#encode_files` decompresses it natively and is
-        # unaffected; decompress the file first to bench or validate it.
+        # One file's bytes, decompressed. `Native.read_input` is the core's
+        # own decoder — the one the native file sources load through — so
+        # `.gz`, `.zst`/`.zstd` and plain files are detected and read here
+        # exactly as they are on the other side of `validate`, and an
+        # unreadable file raises Gigatoken::Error naming it.
         def read_decompressed(path)
-          refuse_zstd!(path)
-          return File.binread(path) unless gzip?(path)
-
-          gunzip(path) { |gz| gz.read.b }
-        end
-
-        # The decompressed size without materializing the bytes: --packed
-        # exists so a large corpus never becomes Ruby Strings, and counting
-        # it must not undo that.
-        def decompressed_size(path)
-          refuse_zstd!(path)
-          return File.size(path) unless gzip?(path)
-
-          gunzip(path) do |gz|
-            size = 0
-            size += gz.read(READ_CHUNK_BYTES).bytesize until gz.eof?
-            size
-          end
-        end
-
-        def gunzip(path, &block)
-          Zlib::GzipReader.open(path, &block)
-        rescue Zlib::Error => e
-          raise Gigatoken::Error, "#{path}: #{e.message}"
-        end
-
-        def refuse_zstd!(path)
-          return unless ZSTD_SUFFIXES.any? { |suffix| path.end_with?(suffix) }
-
-          raise Gigatoken::Error, "#{path}: the CLI has no zstd decoder (the zstd-ruby gem is not a dependency); " \
-            "decompress it first, or use Tokenizer#encode_files, which decompresses .zst natively"
-        end
-
-        def gzip?(path)
-          path.end_with?(".gz")
+          Gigatoken::Native.read_input(path)
         end
 
         def darwin_cpu_info
