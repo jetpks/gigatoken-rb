@@ -108,5 +108,13 @@ RSpec.describe Gigatoken::Encodings do
     it "explains a Symbol name too" do
       expect(described_class.unpackable_reason(:p50k_base)).to match(/dense/i)
     end
+
+    # The registry only records the reason; Tokenizer.from_encoding is what
+    # raises it, and a caller asking for an unloadable model deserves the
+    # class that says so.
+    it "reaches the caller as a Gigatoken::ModelError through Tokenizer.from_encoding" do
+      expect { Gigatoken::Tokenizer.from_encoding("p50k_base") }
+        .to raise_error(Gigatoken::ModelError, /#{Regexp.escape(described_class.unpackable_reason("p50k_base"))}/)
+    end
   end
 end

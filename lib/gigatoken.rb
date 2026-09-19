@@ -4,7 +4,10 @@ require_relative "gigatoken/version"
 
 module Gigatoken
   # Raised for tokenizer load and encode failures surfaced from the native
-  # extension — never a raw Rust panic across the Ruby boundary.
+  # extension — never a raw Rust panic across the Ruby boundary. The base of
+  # the three below: rescue this to catch everything gigatoken raises.
+  # Anything narrower than the three has no class of its own — CLI usage
+  # errors and the odd leftover are this one directly.
   class Error < StandardError; end
 
   # Everything Gigatoken::Hub raises: HTTP status, transport, timeout, repo-id

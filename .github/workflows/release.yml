@@ -50,11 +50,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Ruby
-        uses: ruby/setup-ruby@v1
+      # Building the gem needs only Ruby, but installing it compiles the
+      # extension — so this job needs the same nightly toolchain ruby-ci.yml
+      # names (see the note there: rust-toolchain.toml alone is not enough).
+      - name: Set up Ruby & Rust
+        uses: oxidize-rb/actions/setup-ruby-and-rust@main
         with:
           ruby-version: "3.4"
           bundler-cache: true
+          cargo-cache: true
+          cache-version: v1
+          rustup-toolchain: nightly-2026-09-18
 
       - name: Build gem
         run: bundle exec rake build
@@ -63,11 +69,13 @@ jobs:
       # installs, so an unshippable one has to fail the release rather than be
       # discovered by the first user to `gem install` it. This compiles the
       # extension from the packaged files alone — nothing the gemspec omits is
-      # on disk for it to fall back to.
+      # on disk for it to fall back to. Installed without `--local`, so its
+      # runtime dependencies (rb_sys among them, which extconf.rb requires)
+      # are fetched rather than looked for in pkg/.
       - name: Install the source gem and require it
         run: |
           set -e
-          gem install --local pkg/*.gem
+          gem install pkg/*.gem
           ruby -e 'require "gigatoken"; abort "encode mismatch" unless Gigatoken::Tokenizer.from_encoding("cl100k_base").encode("Hello, world!") == [9906, 11, 1917, 0]'
 
       - uses: actions/upload-artifact@v4
