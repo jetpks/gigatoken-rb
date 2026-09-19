@@ -24,10 +24,18 @@
   (huggingface_hub's `HF_HUB_ETAG_TIMEOUT` / `HF_HUB_DOWNLOAD_TIMEOUT`
   value), overridable with `Gigatoken::Hub.new(timeout:)`.
 
+- **Redirects carry the right headers.** The `Authorization` header travels
+  on a same-origin redirect — huggingface.co answers a renamed repo with a
+  307 to its new name, which used to fail — and is dropped crossing to
+  another origin, so the LFS CDN never sees the token (huggingface_hub's
+  rule). `x-repo-commit` is read from the first hop that carries it, whether
+  that is the `resolve/` hop or the one that finally answers 200.
+
 - **A batch encode interrupted mid-flight stops there.** `Timeout`,
-  `Thread#kill`, an Async timeout and Ctrl-C cancel `encode_batch` /
-  `encode_files` at the next document boundary and raise where you called
-  it, instead of running the whole corpus to completion first. The partial
+  `Thread#kill`, Ctrl-C and — on Ruby 4.0, where the fiber scheduler's worker
+  pool exists — an Async timeout cancel `encode_batch` / `encode_files` at the
+  next document boundary and raise where you called it, instead of running
+  the whole corpus to completion first. The partial
   result is discarded and the inputs are left untouched. A single-chunk
   batch interrupted by a trapped (non-raising) signal returns its complete
   result rather than a truncated one.
@@ -81,8 +89,9 @@
 - **`.zst` on the CLI.** `bench` and `validate` decompress `.gz` and `.zst`
   inputs through the core's own decoder — the same one `encode_files` uses —
   and report MB/s over the decompressed byte count, so a compressed corpus
-  and its plain twin report the same figure. 0.3.0 refused `.zst` on the
-  Ruby-side path.
+  and its plain twin report the same figure. 0.3.0 read compressed FILES raw
+  on the Ruby side, so `validate` mismatched on them and `bench` counted
+  compressed bytes.
 
 - **`from_encoding` takes a Symbol**, matching `load(:cl100k_base)`.
 

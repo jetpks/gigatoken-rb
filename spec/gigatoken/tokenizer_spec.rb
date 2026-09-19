@@ -253,8 +253,12 @@ RSpec.describe Gigatoken::Tokenizer do
       expect(tokenizer.vocab_size).to eq(257) # 256 bytes + <|endoftext|>
     end
 
-    it "raises Gigatoken::Error for a .tiktoken path with no pretokenizer, naming the valid schemes" do
-      expect { described_class.load(ranks_path) }.to raise_error(Gigatoken::Error, /pretokenizer/)
+    it "raises Gigatoken::ModelError for a .tiktoken path with no pretokenizer, naming the valid schemes" do
+      expect { described_class.load(ranks_path) }.to raise_error(Gigatoken::ModelError, /pretokenizer/)
+    end
+
+    it "raises Gigatoken::ModelError for a source that is no file, no packaged name and no repo id" do
+      expect { described_class.load("/no/such/thing") }.to raise_error(Gigatoken::ModelError, %r{/no/such/thing})
     end
 
     it "dispatches a repo-id-shaped string to from_hub, via an injected Hub" do

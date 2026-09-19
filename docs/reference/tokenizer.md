@@ -128,7 +128,7 @@ output.
 
 The bytes for an Array of token ids, as an `ASCII-8BIT` String. **Raises**
 `Gigatoken::InputError` naming the id when one is outside the vocabulary
-(anything `>= #vocab_size` that is not a special token).
+(anything `>= #vocab_size`).
 
 ## Introspection
 

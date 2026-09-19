@@ -88,7 +88,7 @@ module Gigatoken
       source = source.to_s
       if source.end_with?(".tiktoken")
         unless pretokenizer
-          raise Error, "#{source.inspect}: a .tiktoken file carries no pretokenizer scheme of its own — " \
+          raise ModelError, "#{source.inspect}: a .tiktoken file carries no pretokenizer scheme of its own — " \
             "pass pretokenizer: (one of #{Native.pretokenizer_names.join(", ")})"
         end
         return from_tiktoken(source, pretokenizer: pretokenizer, special_tokens: special_tokens)
@@ -97,7 +97,7 @@ module Gigatoken
       return from_encoding(source) if Encodings::NAMES.include?(source) || Encodings.unpackable_reason(source)
       return from_hub(source, revision: revision, hub: hub) if Hub.looks_like_repo_id?(source)
 
-      raise Error, "#{source.inspect}: no such file or directory, not a .tiktoken path, and doesn't look like a HuggingFace Hub repo id"
+      raise ModelError, "#{source.inspect}: no such file or directory, not a .tiktoken path, and doesn't look like a HuggingFace Hub repo id"
     end
 
     # `data` is UTF-8 JSON whatever its encoding tag says (File.binread tags
