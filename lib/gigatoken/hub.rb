@@ -50,11 +50,13 @@ module Gigatoken
     private_constant :RESERVED
 
     # How a request, or the body read that follows it, fails underneath
-    # async-http: a connect/read timeout, a refused or reset connection, DNS
-    # resolution, a body cut short, a malformed endpoint, TLS. All of them
-    # reach the caller as Gigatoken::Error.
+    # async-http: a connect/read timeout, a refused or reset connection, a
+    # proxy refusing the CONNECT tunnel, DNS resolution, a body cut short, a
+    # malformed endpoint, TLS. All of them reach the caller as
+    # Gigatoken::HubError.
     TRANSPORT_ERRORS = [
       Async::TimeoutError,
+      Async::HTTP::Proxy::ConnectFailure,
       IOError,
       SocketError,
       SystemCallError,
@@ -210,7 +212,7 @@ module Gigatoken
       {"repo id" => repo_id, "filename" => filename, "revision" => revision}.each do |what, value|
         next if self.class.safe_component?(value)
 
-        raise Error, "#{what} #{value.inspect}: must not be empty or absolute, " \
+        raise HubError, "#{what} #{value.inspect}: must not be empty or absolute, " \
           "or contain a NUL byte or a \".\" or \"..\" path segment"
       end
 
@@ -228,32 +230,60 @@ module Gigatoken
       clients = []
       url = resolve_url(repo_id, filename, revision)
       token = self.class.hf_token
-      response = get(url, auth_headers(token), clients)
+      headers = auth_headers(token)
+      response = get(url, headers, clients)
       # Unlisted headers parse as a Header::Generic (an Array of values);
       # x-repo-commit is always a single value, so flatten it to a String.
       commit = response.headers["x-repo-commit"]&.to_s
 
-      # Redirects are followed by hand: resolve/ URLs answer with the
-      # x-repo-commit header and a redirect to a CDN for LFS files, and the
-      # Authorization header must not travel to the other host.
+      # Redirects are followed by hand: a resolve/ URL answers an LFS file
+      # with a redirect to a CDN, a renamed repo with one to its new name,
+      # and both headers below need a rule of their own across the hop.
       hops = 0
       while (300...400).cover?(response.status)
         location = response.headers["location"]
         response.close
-        raise Error, "#{url}: redirect with no Location header" unless location
-        raise Error, "#{url}: too many redirects" if (hops += 1) > MAX_REDIRECTS
+        raise HubError, "#{url}: redirect with no Location header" unless location
+        raise HubError, "#{url}: too many redirects" if (hops += 1) > MAX_REDIRECTS
 
-        url = absolutize(location, url)
-        response = get(url, {"user-agent" => "gigatoken"}, clients)
+        target = absolutize(location, url)
+        # A renamed repo answers with a same-origin redirect that still needs
+        # the token; the LFS CDN elsewhere authenticates by signed URL and
+        # must never see it — huggingface_hub drops the header on the same
+        # rule.
+        headers = auth_headers(nil) unless same_origin?(target, url)
+        url = target
+        response = get(url, headers, clients)
+        # An LFS file carries x-repo-commit on the resolve/ hop; a renamed
+        # repo carries it only on the hop that finally answers 200.
+        commit ||= response.headers["x-repo-commit"]&.to_s
       end
       ensure_ok!(url, response, !!token)
-      ensure_commit!(url, response, commit)
+      ensure_commit!(url, commit)
 
       write_to_cache(repo_id, filename, revision, commit, response)
     rescue *TRANSPORT_ERRORS => e
-      raise Error, "#{url}: #{e.message} (#{e.class})"
+      raise HubError, "#{url}: #{e.message} (#{e.class})"
     ensure
-      clients.each(&:close)
+      close_all(response, clients)
+    end
+
+    # Release everything the fetch holds, in the one place every exit passes
+    # through. Order matters: an unread body keeps its connection checked
+    # out, and Async::HTTP::Client#close waits for its pool to drain, so the
+    # response goes first and the clients innermost-first — a tunnel client's
+    # connection is held by the proxy client opened under it. Bounded, and
+    # deaf to the ways a broken connection fails to close: a connection some
+    # failure left mid-stream would otherwise stall the drain, and with it
+    # the Sync this all runs inside, for good. A leaked socket is worth less
+    # than the caller's result or exception.
+    def close_all(response, clients)
+      Async::Task.current.with_timeout(@timeout) do
+        response&.close
+        clients.reverse_each(&:close)
+      end
+    rescue *TRANSPORT_ERRORS
+      nil
     end
 
     # `endpoint/repo/resolve/revision/filename`, percent-encoded the way
@@ -309,7 +339,7 @@ module Gigatoken
     def endpoint_for(url)
       Async::HTTP::Endpoint.parse(url, timeout: @timeout)
     rescue ArgumentError => e
-      raise Error, "#{url}: #{e.message} (#{e.class})"
+      raise HubError, "#{url}: #{e.message} (#{e.class})"
     end
 
     # A client for one hop, remembered in `clients` so #fetch can close it
@@ -340,8 +370,6 @@ module Gigatoken
       rescue
         FileUtils.rm_f(tmp)
         raise
-      ensure
-        response.close
       end
       File.rename(tmp, target)
 
@@ -356,25 +384,24 @@ module Gigatoken
       target
     end
 
-    # Raise on a non-success status, closing the response first: an unread
-    # body keeps the HTTP/1.x connection — and the Sync around it — alive,
-    # so the exception would never reach the caller.
+    # Raise on a non-success status. The unread body is left to #close_all,
+    # which every exit from #fetch passes through: it keeps the HTTP/1.x
+    # connection — and the Sync around it — alive until it is closed, so the
+    # exception would otherwise never reach the caller.
     def ensure_ok!(url, response, had_token)
       status = response.status
       return if (200...400).cover?(status)
 
-      response.close
-
       case status
       when 404
-        raise Error, "#{url}: HTTP 404 — no such repo with that file, and no such local file either"
+        raise HubError, "#{url}: HTTP 404 — no such repo with that file, and no such local file either"
       when 401, 403
         token_note = had_token ? "the request used the discovered token" : "no token was found"
-        raise Error,
+        raise HubError,
           "#{url}: HTTP #{status} — the repo may be private or gated (#{token_note}; set HF_TOKEN or run " \
           "`hf auth login`, and accept the repo's terms on huggingface.co if it is gated)"
       else
-        raise Error, "#{url}: HTTP #{status}"
+        raise HubError, "#{url}: HTTP #{status}"
       end
     end
 
@@ -382,11 +409,10 @@ module Gigatoken
     # a real commit hash may become one: anything else would write the body
     # wherever the header points. A missing header also means the endpoint
     # isn't a Hub, whose snapshot would never be found again.
-    def ensure_commit!(url, response, commit)
+    def ensure_commit!(url, commit)
       return if self.class.commit_hash?(commit.to_s)
 
-      response.close
-      raise Error, "#{url}: response is missing a usable x-repo-commit header (#{commit.inspect}) — it does not " \
+      raise HubError, "#{url}: response is missing a usable x-repo-commit header (#{commit.inspect}) — it does not " \
         "seem to be served by a HuggingFace Hub endpoint; if HF_ENDPOINT is set, check that it points to a " \
         "Hub-compatible endpoint, and otherwise check your firewall and proxy settings"
     end
@@ -397,15 +423,22 @@ module Gigatoken
     def absolutize(location, base)
       return location if location.include?("://")
 
-      origin_end = base.index("://") ? base.index("://") + 3 : 0
-      origin_end = base.index("/", origin_end) || base.length
+      base_origin = origin(base)
+      return "#{base_origin}#{location}" if location.start_with?("/")
 
-      if location.start_with?("/")
-        "#{base[0...origin_end]}#{location}"
-      else
-        dir_end = base.rindex("/") || base.length
-        "#{base[0...[dir_end, origin_end].max]}/#{location}"
-      end
+      dir_end = base.rindex("/") || base.length
+      "#{base[0...[dir_end, base_origin.length].max]}/#{location}"
+    end
+
+    # Scheme and authority of a URL — everything before its path. Two URLs
+    # sharing one may pass the Authorization header between them.
+    def origin(url)
+      scheme_end = url.index("://")
+      url[0...(url.index("/", scheme_end ? scheme_end + 3 : 0) || url.length)]
+    end
+
+    def same_origin?(url, other)
+      origin(url).casecmp?(origin(other))
     end
   end
 end

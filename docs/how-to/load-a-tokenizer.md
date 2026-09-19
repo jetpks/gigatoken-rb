@@ -68,8 +68,9 @@ loads by this gem or by `huggingface_hub` are served from disk.
 
 Requests time out after 10 seconds — huggingface_hub's default — and follow
 `http_proxy` / `https_proxy` (with `no_proxy`) when the environment sets them.
-Every failure is a `Gigatoken::Error` naming the URL, including a refused
-connection, a DNS failure and the timeout itself.
+Every failure is a `Gigatoken::HubError` (a `Gigatoken::Error`) naming the URL,
+including a refused connection, a proxy refusing the `CONNECT` tunnel, a DNS
+failure and the timeout itself.
 
 A revision may be nested (`revision: "refs/pr/1"`), and is percent-encoded in
 the URL like huggingface_hub does it. The repo id, the filename and the
