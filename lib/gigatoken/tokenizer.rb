@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "json"
+require "zlib"
 
 module Gigatoken
   # A tokenizer: encode, batch encode, decode, and vocabulary introspection
@@ -52,11 +53,13 @@ module Gigatoken
       new(native, special_tokens: special_tokens)
     end
 
-    # Load one of the tiktoken encodings gigatoken vendors ranks for, by
-    # name — see Gigatoken::Encodings::NAMES — entirely from the vendored
-    # files: no network, no writable cache.
+    # Load one of the encodings gigatoken vendors a file for, by name — see
+    # Gigatoken::Encodings::NAMES — entirely from the vendored files: no
+    # network, no writable cache. A tiktoken entry loads its ranks; a
+    # tokenizer.json entry is gunzipped and loaded by from_json.
     def self.from_encoding(name)
       encoding = Encodings[name]
+      return from_json(Zlib.gunzip(File.binread(encoding[:json_file]))) if encoding&.key?(:json_file)
       return from_tiktoken(encoding[:rank_file], pretokenizer: encoding[:pretokenizer], special_tokens: encoding[:special_tokens]) if encoding
 
       reason = Encodings.unpackable_reason(name)

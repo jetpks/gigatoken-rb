@@ -1,5 +1,26 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- **`qwen35`, `qwen38` and `muse_spark` are packaged encodings.** The Qwen 3.5
+  / 3.6, Qwen 3.8 and Muse Spark tokenizers ship inside the gem as gzipped
+  HuggingFace `tokenizer.json` files, so `Tokenizer.from_encoding` and
+  `Tokenizer.load` resolve all three by name offline, with no network and no
+  writable cache. `qwen38` is `qwen35` plus seven audio/TTS special tokens
+  (`<|audio_start|>`, `<|audio_end|>`, `<tts_pad>`, `<tts_text_bos>`,
+  `<tts_text_eod>`, `<tts_text_bos_single>`, `<|audio_pad|>`); ordinary text
+  encodes the same under both. `muse_spark` is `meta-models/Muse-Glimmer-30B`'s
+  tokenizer — Meta publishes no standalone Muse Spark one. Their special
+  tokens come from the file, and output matches HuggingFace `tokenizers` with
+  `add_special_tokens: false`: gigatoken applies no post-processor, so
+  `encode` never prepends `<|begin_of_text|>` for `muse_spark`. A registry
+  entry for these is `{json_file:}` rather than the tiktoken entries'
+  `{rank_file:, pretokenizer:, special_tokens:}`. Each load reads, gunzips and
+  parses its file (about 0.4 s). Source revisions, hashes and licence are in
+  `lib/gigatoken/encodings/PROVENANCE.md`.
+
 ## [0.4.0] - 2026-09-19
 
 ### Fixed
