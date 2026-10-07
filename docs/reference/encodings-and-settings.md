@@ -6,20 +6,40 @@ type: reference
 
 ## `Gigatoken::Encodings`
 
-The tiktoken encodings vendored inside the gem, with the pieces a
-`.tiktoken` file doesn't carry. Provenance, source URLs and hashes are in
-`lib/gigatoken/encodings/PROVENANCE.md`.
+The encodings vendored inside the gem: four tiktoken rank files, with the
+pieces a `.tiktoken` file doesn't carry, and three HuggingFace
+`tokenizer.json` files, which carry their own. Provenance, source URLs and
+hashes are in `lib/gigatoken/encodings/PROVENANCE.md`.
 
 ### `Gigatoken::Encodings::NAMES → Array<String>`
 
-`["r50k_base", "cl100k_base", "o200k_base", "o200k_harmony"]`.
+`["r50k_base", "cl100k_base", "o200k_base", "o200k_harmony", "qwen35", "qwen38", "muse_spark"]`.
 
 ### `Gigatoken::Encodings[name] → Hash | nil`
 
-`{rank_file:, pretokenizer:, special_tokens:}` for a packaged name, or
-`nil`. `o200k_harmony` reuses `o200k_base`'s ranks and scheme and differs
-only in its special-token table (10 named control tokens plus 1081
-reserved slots).
+`{rank_file:, pretokenizer:, special_tokens:}` for a tiktoken name,
+`{json_file:}` for `qwen35`, `qwen38` and `muse_spark`, or `nil`. The
+entries are deep-frozen. `o200k_harmony` reuses `o200k_base`'s ranks and
+scheme and differs only in its special-token table (10 named control tokens
+plus 1081 reserved slots).
+
+A `json_file:` entry names a gzipped HuggingFace `tokenizer.json`
+(`lib/gigatoken/encodings/<name>.json.gz`) and registers nothing else: the
+pretokenizer and the special tokens are the file's, and `Tokenizer#special_tokens`
+holds its `"special": true` added tokens, as `Tokenizer.from_json` reads them
+— 14 for `qwen35`, 21 for `qwen38`, 2048 for `muse_spark`.
+
+| Name | Tokenizer | `vocab_size` |
+|---|---|---|
+| `qwen35` | Qwen 3.5 and 3.6 | 248070 |
+| `qwen38` | `qwen35` plus seven audio/TTS special tokens (`<|audio_start|>`, `<|audio_end|>`, `<tts_pad>`, `<tts_text_bos>`, `<tts_text_eod>`, `<tts_text_bos_single>`, `<|audio_pad|>`) | 248077 |
+| `muse_spark` | `meta-models/Muse-Glimmer-30B` | 202048 |
+
+Output matches HuggingFace `tokenizers` with `add_special_tokens: false`:
+gigatoken applies no post-processor, so `encode` never prepends
+`<|begin_of_text|>` for `muse_spark`. Qwen's 12 non-special added tokens
+(`<think>`, `<tool_call>`, …) are matched atomically but are not in
+`special_tokens`.
 
 ### `Gigatoken::Encodings.unpackable_reason(name) → String | nil`
 

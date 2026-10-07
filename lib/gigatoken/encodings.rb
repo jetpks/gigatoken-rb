@@ -1,10 +1,11 @@
 # frozen_string_literal: true
 
 module Gigatoken
-  # The tiktoken encodings gigatoken vendors ranks for, and the pieces a
-  # .tiktoken file doesn't carry: its pretokenizer scheme and special-token
-  # table (see Tokenizer.from_tiktoken and lib/gigatoken/encodings/
-  # PROVENANCE.md, the source of truth this is transcribed from).
+  # The encodings gigatoken vendors a file for. For the tiktoken ones, the
+  # pieces a .tiktoken file doesn't carry: its pretokenizer scheme and
+  # special-token table (see Tokenizer.from_tiktoken and lib/gigatoken/
+  # encodings/PROVENANCE.md, the source of truth this is transcribed from).
+  # The HuggingFace ones are whole tokenizer.json files, which carry theirs.
   module Encodings
     DATA_DIR = File.expand_path("encodings", __dir__)
     private_constant :DATA_DIR
@@ -40,10 +41,10 @@ module Gigatoken
     HARMONY_RESERVED_TAIL = (200013..201087).to_h { |id| ["<|reserved_#{id}|>", id] }.freeze
     private_constant :HARMONY_RESERVED_TAIL
 
-    # Deep-frozen: entries, their `special_tokens` tables and the `rank_file`
-    # paths. `Tokenizer#special_tokens` hands the registry's own Hash back to
-    # callers, so anything less lets one caller's poke rewrite what every
-    # later `from_encoding` in the process loads.
+    # Deep-frozen: entries, their `special_tokens` tables and the `rank_file` /
+    # `json_file` paths. `Tokenizer#special_tokens` hands the registry's own
+    # Hash back to callers, so anything less lets one caller's poke rewrite
+    # what every later `from_encoding` in the process loads.
     REGISTRY = {
       "r50k_base" => {
         rank_file: File.join(DATA_DIR, "r50k_base.tiktoken"),
@@ -70,7 +71,21 @@ module Gigatoken
         rank_file: File.join(DATA_DIR, "o200k_base.tiktoken"),
         pretokenizer: "o200k",
         special_tokens: HARMONY_HEAD_TOKENS.merge(HARMONY_RESERVED_TAIL).freeze
-      }
+      },
+      # The three below are gzipped HuggingFace tokenizer.json files, vendored
+      # verbatim (see PROVENANCE.md for repos, revisions and hashes). Nothing
+      # else is registered: the pretokenizer and the special tokens are the
+      # file's own, read at load as Tokenizer.from_json reads them.
+      #
+      # Qwen 3.5 and 3.6 share this one file.
+      "qwen35" => {json_file: File.join(DATA_DIR, "qwen35.json.gz")},
+      # The qwen35 file plus seven audio/TTS special tokens — vendored
+      # separately because a JSON-backed tokenizer takes its added tokens
+      # from the file.
+      "qwen38" => {json_file: File.join(DATA_DIR, "qwen38.json.gz")},
+      # meta-models/Muse-Glimmer-30B's file: Meta publishes no standalone
+      # Muse Spark tokenizer.
+      "muse_spark" => {json_file: File.join(DATA_DIR, "muse_spark.json.gz")}
     }.each_value { |encoding| encoding.each_value(&:freeze).freeze }.freeze
     private_constant :REGISTRY
 
@@ -91,9 +106,9 @@ module Gigatoken
     private_constant :UNPACKABLE_REASONS
 
     class << self
-      # The {rank_file:, pretokenizer:, special_tokens:} registered for a
-      # packaged encoding name, or nil. Names are Strings or Symbols, as
-      # Tokenizer.load accepts both.
+      # The {rank_file:, pretokenizer:, special_tokens:} (tiktoken) or
+      # {json_file:} (HuggingFace) registered for a packaged encoding name, or
+      # nil. Names are Strings or Symbols, as Tokenizer.load accepts both.
       def [](name)
         REGISTRY[name.to_s]
       end

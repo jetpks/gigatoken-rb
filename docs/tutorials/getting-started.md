@@ -23,8 +23,9 @@ bundle add gigatoken     # or: gem install gigatoken
 
 ## 2. Load a tokenizer
 
-Four tiktoken encodings are vendored inside the gem, so this needs no
-network and no cache directory:
+Seven encodings are vendored inside the gem — four tiktoken ones (`r50k_base`,
+`cl100k_base`, `o200k_base`, `o200k_harmony`) and the HuggingFace `qwen35`,
+`qwen38` and `muse_spark` — so this needs no network and no cache directory:
 
 ```ruby
 require "gigatoken"
