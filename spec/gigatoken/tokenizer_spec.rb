@@ -64,7 +64,7 @@ RSpec.describe Gigatoken::Tokenizer do
     {
       "a dummy encoding" => ["hello".dup.force_encoding("UTF-7"), /converter/],
       "invalid bytes for the tag" => ["\x82".dup.force_encoding("Shift_JIS"), /Shift_JIS/],
-      "an undefined byte" => ["\x81".dup.force_encoding("Windows-1252"), /Windows-1252/]
+      "an undefined byte" => ["\x81".dup.force_encoding("Windows-1252"), /Windows-1252/i]
     }.each do |description, (text, message)|
       it "raises Gigatoken::InputError carrying String#encode's message for #{description}" do
         expect { tokenizer.encode(text) }.to raise_error(Gigatoken::InputError, message)
