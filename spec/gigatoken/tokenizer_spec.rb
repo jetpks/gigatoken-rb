@@ -234,7 +234,7 @@ RSpec.describe Gigatoken::Tokenizer do
       expect(qwen35.values_at("<|endoftext|>", "<|im_start|>", "<|im_end|>")).to eq([248044, 248045, 248046])
       expect(qwen38["<|audio_pad|>"]).to eq(248076)
       expect(qwen35).not_to have_key("<|audio_pad|>")
-      expect(qwen38.to_a - qwen35.to_a).to have_attributes(size: 7)
+      expect((qwen38.to_a - qwen35.to_a).size).to eq(7)
       expect(muse.values_at("<|begin_of_text|>", "<|end_of_text|>", "<|eot|>")).to eq([200000, 200001, 200008])
       expect(qwen35).to be_frozen
     end

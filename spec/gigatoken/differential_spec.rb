@@ -8,11 +8,11 @@ require "zlib"
 # Proves each packaged encoding byte-identical to an independent
 # implementation over this repo's own source and docs: the rank-backed
 # (tiktoken) ones to tiktoken_ruby, the JSON-backed (HuggingFace) ones to
-# HuggingFace's own `tokenizers` gem. The tiktoken half runs — in both directions, because gigatoken always
-# honours an encoding's special tokens and tiktoken's default `encode` does
-# not (this repo's own files contain "<|endoftext|>" as literal text), so a
-# one-sided comparison can't tell a correct encoder from one checked against
-# the wrong oracle method.
+# HuggingFace's own `tokenizers` gem. The tiktoken half is checked in both
+# directions, because gigatoken always honours an encoding's special tokens
+# and tiktoken's default `encode` does not (this repo's own files contain
+# "<|endoftext|>" as literal text), so a one-sided comparison can't tell a
+# correct encoder from one checked against the wrong oracle method.
 RSpec.describe "packaged encodings against their oracles" do
   corpus_paths = (Dir["lib/**/*.rb"] + Dir["spec/**/*.rb"] + Dir["src/**/*.rs"] + ["README.md", "CHANGELOG.md"])
     .select { |path| File.file?(path) }.sort
