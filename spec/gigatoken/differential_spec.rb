@@ -2,14 +2,18 @@
 
 require_relative "../spec_helper"
 require "tiktoken_ruby"
+require "tokenizers"
+require "zlib"
 
-# Proves each packaged encoding byte-identical to tiktoken_ruby over this
-# repo's own source and docs — in both directions, because gigatoken always
-# honours an encoding's special tokens and tiktoken's default `encode` does
-# not (this repo's own files contain "<|endoftext|>" as literal text), so a
-# one-sided comparison can't tell a correct encoder from one checked against
-# the wrong oracle method.
-RSpec.describe "packaged encodings against tiktoken_ruby" do
+# Proves each packaged encoding byte-identical to an independent
+# implementation over this repo's own source and docs: the rank-backed
+# (tiktoken) ones to tiktoken_ruby, the JSON-backed (HuggingFace) ones to
+# HuggingFace's own `tokenizers` gem. The tiktoken half is checked in both
+# directions, because gigatoken always honours an encoding's special tokens
+# and tiktoken's default `encode` does not (this repo's own files contain
+# "<|endoftext|>" as literal text), so a one-sided comparison can't tell a
+# correct encoder from one checked against the wrong oracle method.
+RSpec.describe "packaged encodings against their oracles" do
   corpus_paths = (Dir["lib/**/*.rb"] + Dir["spec/**/*.rb"] + Dir["src/**/*.rs"] + ["README.md", "CHANGELOG.md"])
     .select { |path| File.file?(path) }.sort
   corpus = corpus_paths.map { |path| File.read(path, encoding: "UTF-8") }
@@ -30,7 +34,7 @@ RSpec.describe "packaged encodings against tiktoken_ruby" do
   # tiktoken_ruby is the outlier (see PROVENANCE.md). Comparing harmony
   # against tiktoken_ruby would fail on tiktoken_ruby's defect, not
   # gigatoken's — do not restore that comparison to "fix" this.
-  (Gigatoken::Encodings::NAMES - ["o200k_harmony"]).each do |name|
+  (Gigatoken::Encodings::NAMES.select { |name| Gigatoken::Encodings[name][:rank_file] } - ["o200k_harmony"]).each do |name|
     describe name do
       entry = Gigatoken::Encodings[name]
       oracle = Tiktoken.get_encoding(name)
@@ -43,6 +47,24 @@ RSpec.describe "packaged encodings against tiktoken_ruby" do
       it "is byte-identical to tiktoken_ruby's plain encode for a special_tokens: {} tokenizer" do
         plain = Gigatoken::Tokenizer.from_tiktoken(entry[:rank_file], pretokenizer: entry[:pretokenizer], special_tokens: {})
         corpus.each { |text| expect(plain.encode(text)).to eq(oracle.encode(text)) }
+      end
+    end
+  end
+
+  # The JSON-backed encodings are checked against `tokenizers` (HuggingFace's
+  # own implementation) loading the same decompressed file, with
+  # `add_special_tokens: false`: that flag skips the post-processor, which
+  # gigatoken never applies — muse_spark's TemplateProcessing would otherwise
+  # prepend <|begin_of_text|> to every oracle row. The added tokens
+  # themselves (this repo's own files contain literals like "<|im_start|>")
+  # are matched by both sides regardless of the flag.
+  Gigatoken::Encodings::NAMES.select { |name| Gigatoken::Encodings[name][:json_file] }.each do |name|
+    describe name do
+      it "is byte-identical to tokenizers' encode with add_special_tokens: false" do
+        packaged = Gigatoken::Tokenizer.from_encoding(name)
+        json = Zlib.gunzip(File.binread(Gigatoken::Encodings[name][:json_file])).force_encoding(Encoding::UTF_8)
+        oracle = Tokenizers::Tokenizer.from_str(json)
+        corpus.each { |text| expect(packaged.encode(text)).to eq(oracle.encode(text, add_special_tokens: false).ids) }
       end
     end
   end

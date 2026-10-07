@@ -4,8 +4,8 @@ require_relative "../spec_helper"
 
 RSpec.describe Gigatoken::Encodings do
   describe "::NAMES" do
-    it "includes every packaged tiktoken encoding" do
-      expect(described_class::NAMES).to include("r50k_base", "cl100k_base", "o200k_base", "o200k_harmony")
+    it "includes every packaged encoding" do
+      expect(described_class::NAMES).to include("r50k_base", "cl100k_base", "o200k_base", "o200k_harmony", "qwen35", "qwen38", "muse_spark")
     end
 
     it "excludes names known but not packaged, each carrying an unpackable reason" do
@@ -59,6 +59,14 @@ RSpec.describe Gigatoken::Encodings do
       expect(special.keys.count { |k| k.start_with?("<|reserved_") }).to eq(1081)
     end
 
+    it "resolves each HuggingFace encoding to its vendored gzipped tokenizer.json and nothing else" do
+      %w[qwen35 qwen38 muse_spark].each do |name|
+        encoding = described_class[name]
+        expect(encoding.keys).to eq([:json_file])
+        expect(File.basename(encoding[:json_file])).to eq("#{name}.json.gz")
+      end
+    end
+
     it "returns nil for an unpackaged name" do
       expect(described_class["not_an_encoding"]).to be_nil
     end
@@ -69,21 +77,21 @@ RSpec.describe Gigatoken::Encodings do
 
     # Tokenizer#special_tokens hands the registry's own Hash back, so a
     # shallow freeze would let one caller's poke rewrite every later load.
-    it "is frozen all the way down: entry, special tokens, and rank file" do
+    it "is frozen all the way down: entry, special tokens, and file paths" do
       described_class::NAMES.each do |name|
         encoding = described_class[name]
 
         expect(encoding).to be_frozen
-        expect(encoding[:rank_file]).to be_frozen
-        expect(encoding[:special_tokens]).to be_frozen
-        expect { encoding[:special_tokens]["<|pwned|>"] = 1 }.to raise_error(FrozenError)
+        expect(encoding.values).to all(be_frozen)
         expect { encoding[:pretokenizer] = "gpt2" }.to raise_error(FrozenError)
       end
+      expect { described_class["r50k_base"][:special_tokens]["<|pwned|>"] = 1 }.to raise_error(FrozenError)
     end
 
-    it "points each rank file at a file that actually exists on disk" do
+    it "points each vendored file at a file that actually exists on disk" do
       described_class::NAMES.each do |name|
-        expect(File.exist?(described_class[name][:rank_file])).to be(true)
+        encoding = described_class[name]
+        expect(File.exist?(encoding[:rank_file] || encoding[:json_file])).to be(true)
       end
     end
   end

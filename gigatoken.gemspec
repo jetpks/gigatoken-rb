@@ -22,6 +22,7 @@ Gem::Specification.new do |spec|
   spec.files = Dir[
     "lib/**/*.rb",
     "lib/gigatoken/encodings/*.tiktoken",
+    "lib/gigatoken/encodings/*.json.gz",
     "lib/gigatoken/encodings/PROVENANCE.md",
     "exe/*",
     "ext/gigatoken/src/**/*.rs",

@@ -8,7 +8,7 @@ type: how-to
 When you already know what you have, call the specific constructor and skip
 the dispatch.
 
-## A packaged tiktoken encoding, by name
+## A packaged encoding, by name
 
 ```ruby
 Gigatoken::Tokenizer.from_encoding("cl100k_base")
@@ -16,11 +16,20 @@ Gigatoken::Tokenizer.load("cl100k_base")          # same result
 ```
 
 `r50k_base`, `cl100k_base`, `o200k_base` and `o200k_harmony` ship inside the
-gem (ranks, pretokenizer scheme and special-token table), so they load
-offline. Packaged names are checked before the Hub-repo-id shape, so a bare
+gem (ranks, pretokenizer scheme and special-token table), and so do `qwen35`,
+`qwen38` and `muse_spark` (whole `tokenizer.json` files, gzipped), so they all
+load offline. Packaged names are checked before the Hub-repo-id shape, so a bare
 name like `o200k_base` never reaches the network. `p50k_base` and
 `p50k_edit` are known but deliberately not packaged; asking for either
 raises `Gigatoken::Error` saying why.
+
+The three `tokenizer.json` encodings take their special tokens from the file.
+`qwen35` is the Qwen 3.5 and 3.6 tokenizer; `qwen38` is that file plus seven
+audio/TTS special tokens, so ordinary text encodes the same under both;
+`muse_spark` is Muse-Glimmer-30B's tokenizer. `encode` matches HuggingFace
+`tokenizers` with `add_special_tokens: false` — it never prepends
+`<|begin_of_text|>` for `muse_spark`. Each load reads and parses the file
+(about 0.4 s), so load once and reuse the tokenizer.
 
 ## A `tokenizer.json` file, or a directory containing one
 

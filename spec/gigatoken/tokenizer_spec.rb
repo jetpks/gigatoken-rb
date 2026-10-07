@@ -64,7 +64,7 @@ RSpec.describe Gigatoken::Tokenizer do
     {
       "a dummy encoding" => ["hello".dup.force_encoding("UTF-7"), /converter/],
       "invalid bytes for the tag" => ["\x82".dup.force_encoding("Shift_JIS"), /Shift_JIS/],
-      "an undefined byte" => ["\x81".dup.force_encoding("Windows-1252"), /Windows-1252/]
+      "an undefined byte" => ["\x81".dup.force_encoding("Windows-1252"), /Windows-1252/i]
     }.each do |description, (text, message)|
       it "raises Gigatoken::InputError carrying String#encode's message for #{description}" do
         expect { tokenizer.encode(text) }.to raise_error(Gigatoken::InputError, message)
@@ -190,7 +190,10 @@ RSpec.describe Gigatoken::Tokenizer do
 
   describe ".from_encoding" do
     it "resolves each packaged encoding by name with its full vocab_size" do
-      {"r50k_base" => 50257, "cl100k_base" => 100277, "o200k_base" => 200019}.each do |name, vocab_size|
+      {
+        "r50k_base" => 50257, "cl100k_base" => 100277, "o200k_base" => 200019,
+        "qwen35" => 248070, "qwen38" => 248077, "muse_spark" => 202048
+      }.each do |name, vocab_size|
         expect(described_class.from_encoding(name).vocab_size).to eq(vocab_size)
       end
     end
@@ -199,7 +202,10 @@ RSpec.describe Gigatoken::Tokenizer do
       {
         "r50k_base" => {"hello world" => [31373, 995], "日本語 tokens" => [33768, 98, 17312, 105, 45739, 252, 16326]},
         "cl100k_base" => {"hello world" => [15339, 1917], "日本語 tokens" => [9080, 22656, 45918, 252, 11460]},
-        "o200k_base" => {"hello world" => [24912, 2375], "日本語 tokens" => [9048, 40909, 20290]}
+        "o200k_base" => {"hello world" => [24912, 2375], "日本語 tokens" => [9048, 40909, 20290]},
+        "qwen35" => {"hello world" => [14556, 1814], "日本語 tokens" => [247359, 10885]},
+        "qwen38" => {"hello world" => [14556, 1814], "日本語 tokens" => [247359, 10885]},
+        "muse_spark" => {"hello world" => [25681, 3817], "日本語 tokens" => [21764, 16728, 22274]}
       }.each do |name, cases|
         tokenizer = described_class.from_encoding(name)
         cases.each { |text, ids| expect(tokenizer.encode(text)).to eq(ids) }
@@ -219,9 +225,27 @@ RSpec.describe Gigatoken::Tokenizer do
       expect(described_class.from_encoding("r50k_base").special_tokens).to eq({"<|endoftext|>" => 50256})
     end
 
+    it "reads a HuggingFace encoding's special tokens from its file: qwen38 is qwen35 plus seven audio/TTS tokens" do
+      qwen35 = described_class.from_encoding("qwen35").special_tokens
+      qwen38 = described_class.from_encoding("qwen38").special_tokens
+      muse = described_class.from_encoding(:muse_spark).special_tokens
+
+      expect([qwen35.size, qwen38.size, muse.size]).to eq([14, 21, 2048])
+      expect(qwen35.values_at("<|endoftext|>", "<|im_start|>", "<|im_end|>")).to eq([248044, 248045, 248046])
+      expect(qwen38["<|audio_pad|>"]).to eq(248076)
+      expect(qwen35).not_to have_key("<|audio_pad|>")
+      expect((qwen38.to_a - qwen35.to_a).size).to eq(7)
+      expect(muse.values_at("<|begin_of_text|>", "<|end_of_text|>", "<|eot|>")).to eq([200000, 200001, 200008])
+      expect(qwen35).to be_frozen
+    end
+
+    it "does not prepend <|begin_of_text|> for muse_spark: no post-processor is applied" do
+      expect(described_class.from_encoding("muse_spark").encode("hi")).not_to start_with(200000)
+    end
+
     it "raises Gigatoken::ModelError naming the bad input and the packaged encodings" do
       expect { described_class.from_encoding("not_an_encoding") }.to raise_error(Gigatoken::ModelError) do |error|
-        expect(error.message).to include("not_an_encoding", "r50k_base", "cl100k_base", "o200k_base")
+        expect(error.message).to include("not_an_encoding", "r50k_base", "cl100k_base", "o200k_base", "qwen35", "qwen38", "muse_spark")
       end
     end
 
@@ -306,6 +330,12 @@ RSpec.describe Gigatoken::Tokenizer do
       end
     end
 
+    it "dispatches each HuggingFace encoding name to from_encoding" do
+      {"qwen35" => 248070, "qwen38" => 248077, "muse_spark" => 202048}.each do |name, vocab_size|
+        expect(described_class.load(name).vocab_size).to eq(vocab_size)
+      end
+    end
+
     it "still dispatches a bare legacy repo id like gpt2 to the Hub rather than the packaged registry" do
       hub_reached = false
       hub = Object.new
@@ -371,7 +401,7 @@ RSpec.describe Gigatoken::Tokenizer do
         hub = Object.new
         hub.define_singleton_method(:hub_file) { |*| raise "NETWORK REACHED" }
 
-        %w[r50k_base cl100k_base o200k_base].each do |name|
+        %w[r50k_base cl100k_base o200k_base qwen35 qwen38 muse_spark].each do |name|
           expect(described_class.from_encoding(name)).to be_a(described_class)
           expect(described_class.load(name, hub: hub)).to be_a(described_class)
         end

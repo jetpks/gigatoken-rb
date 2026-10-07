@@ -225,7 +225,7 @@ English-ish prose with a little non-ASCII; the batch is 1,000 documents of
 | PackedResult#to_a, 1000 docs | 1,059 | — | 1,001 | — | 1,379 KiB |
 | encode_files, 1000 x 1 KB | 987 | — | 1,009 | — | 1,379 KiB |
 | encode_files packed, 1000 x 1 KB | 1,135 | — | 16 | — | 703 KiB |
-| Tokenizer.from_encoding | 20 | — | 2 | — | 0 |
+| Tokenizer.from_encoding("cl100k_base") | 20 | — | 2 | — | 0 |
 | Tokenizer.load("cl100k_base") | 20 | — | 3 | — | 0 |
 
 **How to read it.** Single-string `encode` runs 8x `tiktoken_ruby` at 45 B

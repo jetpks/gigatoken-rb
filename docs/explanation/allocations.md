@@ -22,8 +22,12 @@ objects, why, and where the remaining costs come from.
 | `PackedResult#[]` | 1 | the Array of ids |
 | `PackedResult#to_a` | n + 1 | one Array per document plus the outer one |
 | `encode_files(path, packed: true)` | 16 | as the packed batch, plus the `TextFileSource` and the argument ceremony around it |
-| `Tokenizer.from_encoding(name)` | 2 | the `Tokenizer` and its native tokenizer |
-| `Tokenizer.load(name)` | 3 | the same, plus the path copy `File.exist?` makes while deciding the source's shape |
+| `Tokenizer.from_encoding(name)`, tiktoken entry | 2 | the `Tokenizer` and its native tokenizer |
+| `Tokenizer.load(name)`, tiktoken entry | 3 | the same, plus the path copy `File.exist?` makes while deciding the source's shape |
+
+The JSON-backed entries (`qwen35`, `qwen38`, `muse_spark`) are not budgeted:
+each load reads, gunzips and parses a `tokenizer.json`, which allocates the
+Strings those steps need.
 
 The budgets are frozen in `spec/gigatoken/allocations_spec.rb`, so a
 change that adds an object fails the suite.
