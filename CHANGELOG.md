@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.6.0] - 2026-10-30
+
+### Changed
+
+- **Ruby 3.3 support is dropped; the floor is now >= 3.4.**
+  `gigatoken.gemspec` floors `required_ruby_version` at `>= 3.4.0`, and the
+  CI matrices match: `ruby-ci.yml` runs 3.4 and 4.0 only, and `release.yml`'s
+  cross-gem job builds `ruby-versions: "3.4,4.0"`.
+
 ## [0.5.0] - 2026-10-07
 
 ### Added
