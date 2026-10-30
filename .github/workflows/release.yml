@@ -31,7 +31,7 @@ jobs:
         uses: oxidize-rb/actions/cross-gem@v1
         with:
           platform: ${{ matrix.platform }}
-          ruby-versions: "3.3,3.4,4.0"
+          ruby-versions: "3.4,4.0"
           # The dock images pin RUSTUP_DEFAULT_TOOLCHAIN=stable but honor
           # rust-toolchain.toml via rustup's first-invocation auto-install,
           # which also provisions the cross-target std libs declared in its
