@@ -49,9 +49,11 @@ jobs:
       # which links libpython — a library this fork has no surface for and
       # no runner guarantees — so the core is tested with
       # --no-default-features, the same configuration the Ruby extension
-      # consumes it in. The skips are the six tests that hard-require ~/data
-      # corpora (r50k_base.tiktoken, TinyStoriesV2-GPT4-*.txt) no CI runner
-      # has; upstream itself never runs cargo test in CI.
+      # consumes it in. The skips are the seventeen tests that hard-require
+      # ~/data corpora (r50k_base.tiktoken, TinyStoriesV2-GPT4-*.txt,
+      # owt_train.txt) no CI runner has — upstream itself never runs
+      # cargo test in CI. `_owt` skips the ten owt_train.txt corpus
+      # diffs; the rest are exact names.
       - name: Run Rust tests
         run: >-
           cargo test --workspace --no-default-features --
@@ -61,6 +63,8 @@ jobs:
           --skip count_matches_next
           --skip simd_matches_fast
           --skip test_pretokenizer_ts
+          --skip _owt
+          --skip test_safe_split_ranges_pretoken_equivalent
 
       - name: Run ruby tests
         run: bundle exec rspec
