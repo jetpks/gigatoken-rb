@@ -46,7 +46,8 @@ module Gigatoken
     # pretokenization scheme nor special tokens — nothing is guessed here,
     # so `pretokenizer:` is required: one of the schemes gigatoken ships
     # (see Native.pretokenizer_names, e.g. "gpt2"/"r50k", "gpt4"/"cl100k",
-    # "o200k", "qwen2", "qwen35", "olmo3", "deepseek_v3", "nemotron", "kimi").
+    # "o200k", "qwen2", "qwen35", "olmo3", "deepseek_v3", "nemotron",
+    # "nemotron_right_aligned" or "kimi").
     # `special_tokens:` maps token content to id (none by default).
     def self.from_tiktoken(path, pretokenizer:, special_tokens: {})
       native = Native::BPETokenizer.from_tiktoken(path.to_s, pretokenizer, special_tokens)
