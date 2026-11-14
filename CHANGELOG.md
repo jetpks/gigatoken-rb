@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.7.0] - 2026-11-14
+
+### Added
+
+- **`nemotron_right_aligned` is a shipped pretokenizer scheme.** Port of
+  upstream gigatoken `a001507` (issue #60): the Nemotron-3 regex with digits
+  grouped in threes counted back from each run's end, where plain
+  `nemotron` stays digit-by-digit — `"1234567"` tokenizes as `1|234|567`.
+  `Tokenizer.from_tiktoken` and `Tokenizer.load` accept the scheme by name,
+  and `Gigatoken::Native.pretokenizer_names` lists it.
+
+- **tokenizer.json files carrying the right-aligned regex now load.** A
+  `pre_tokenizer` of `Sequence[Split(Regex=<right-aligned>), ByteLevel]` —
+  the shape NVIDIA's export uses — used to raise `Unknown pre_tokenizer
+  Split regexes`; `Tokenizer.from_json`, `from_file` and `from_hub` now
+  resolve it to the new scheme.
+
+### Changed
+
+- **Rust tests run in CI.** `ruby-ci.yml` gains a `Run Rust tests` step
+  (`cargo test --workspace --no-default-features`, skipping the six tests
+  that hard-require `~/data` corpora) after compiling the extension — the
+  Rust core is a first-class concern of the gem.
+
 ## [0.6.0] - 2026-10-30
 
 ### Changed

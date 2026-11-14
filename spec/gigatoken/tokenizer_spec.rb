@@ -153,6 +153,61 @@ RSpec.describe Gigatoken::Tokenizer do
         expect { described_class.from_file(dir) }.to raise_error(Gigatoken::ModelError, /tokenizer\.json/)
       end
     end
+
+    # NVIDIA exports the right-aligned scheme as a Split regex inside a
+    # Sequence with ByteLevel; the regex is the NemotronRightAligned arm's
+    # from src/pretokenize/options.rs, verbatim. The gpt2 fixture vocab has
+    # "123" and "456" but not "567", so "123456" is the probe that shows the
+    # grouping.
+    it "loads a tokenizer.json carrying the right-aligned Nemotron Split regex" do
+      regex = '[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]*[\p{Ll}\p{Lm}\p{Lo}\p{M}]+' \
+              '|[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]+[\p{Ll}\p{Lm}\p{Lo}\p{M}]*' \
+              '|\p{N}{1,3}(?=(?:\p{N}{3})*(?!\p{N}))|\p{N}{1,2}' \
+              '| ?[^\s\p{L}\p{N}]+[\r\n/]*|\s*[\r\n]+|\s+(?!\S)|\s+'
+      doc = JSON.parse(fixture)
+      doc["pre_tokenizer"] = {
+        "type" => "Sequence",
+        "pretokenizers" => [
+          {"type" => "Split", "behavior" => "Isolated", "invert" => false, "pattern" => {"Regex" => regex}},
+          {"type" => "ByteLevel", "add_prefix_space" => false, "trim_offsets" => true, "use_regex" => false}
+        ]
+      }
+      Dir.mktmpdir do |dir|
+        path = File.join(dir, "tokenizer.json")
+        File.write(path, JSON.generate(doc))
+
+        tokenizer = described_class.from_file(path)
+        expect(tokenizer.encode("123456")).to eq(tokenizer.encode("123") + tokenizer.encode("456"))
+      end
+    end
+  end
+
+  # The fixture ranks file is byte-level — 256 single-byte tokens — so it
+  # cannot show digit grouping. Synthesize upstream's conftest fixture
+  # instead: every single byte, then every 2- and 3-digit string, one
+  # "<base64> <id>" line each, and hand back the path plus the id map the
+  # expectations are derived from (never hardcoded ids).
+  def write_digit_ranks(dir)
+    vocab = {}
+    path = File.join(dir, "digit-ranks.tiktoken")
+    File.open(path, "w") do |file|
+      id = 0
+      (0..255).each do |byte|
+        token = [byte].pack("C")
+        vocab[token] = id
+        file.puts("#{[token].pack("m0")} #{id}")
+        id += 1
+      end
+      [2, 3].each do |digits|
+        (10**digits).times do |i|
+          token = i.to_s.rjust(digits, "0")
+          vocab[token] = id
+          file.puts("#{[token].pack("m0")} #{id}")
+          id += 1
+        end
+      end
+    end
+    [path, vocab]
   end
 
   describe ".from_tiktoken" do
@@ -161,7 +216,7 @@ RSpec.describe Gigatoken::Tokenizer do
     end
 
     it "resolves each shipped pretokenizer scheme" do
-      %w[gpt2 gpt4 qwen2 qwen35 olmo3 deepseek_v3 o200k nemotron kimi].each do |scheme|
+      %w[gpt2 gpt4 qwen2 qwen35 olmo3 deepseek_v3 o200k nemotron nemotron_right_aligned kimi].each do |scheme|
         expect(described_class.from_tiktoken(ranks_path, pretokenizer: scheme)).to be_a(described_class)
       end
     end
@@ -169,6 +224,28 @@ RSpec.describe Gigatoken::Tokenizer do
     it "raises Gigatoken::Error naming the scheme and the valid ones for an unknown pretokenizer" do
       expect { described_class.from_tiktoken(ranks_path, pretokenizer: "not_a_scheme") }
         .to raise_error(Gigatoken::Error, /not_a_scheme/)
+    end
+
+    it "groups digit runs in threes from the run's end under nemotron_right_aligned" do
+      Dir.mktmpdir do |dir|
+        ranks, vocab = write_digit_ranks(dir)
+        tokenizer = described_class.from_tiktoken(ranks, pretokenizer: "nemotron_right_aligned")
+
+        expect(tokenizer.encode("1234567")).to eq(%w[1 234 567].map { |token| vocab[token] })
+        expect(tokenizer.encode("123456")).to eq(%w[123 456].map { |token| vocab[token] })
+      end
+    end
+
+    # The scheme's whole point, made visible against the same ranks file:
+    # plain nemotron's single-digit \p{N} arm encodes digit-by-digit where
+    # the right-aligned variant groups.
+    it "encodes the same digits one token each under plain nemotron" do
+      Dir.mktmpdir do |dir|
+        ranks, vocab = write_digit_ranks(dir)
+        tokenizer = described_class.from_tiktoken(ranks, pretokenizer: "nemotron")
+
+        expect(tokenizer.encode("1234567")).to eq(%w[1 2 3 4 5 6 7].map { |token| vocab[token] })
+      end
     end
 
     it "reports caller-supplied special tokens and round-trips them through encode/decode" do
