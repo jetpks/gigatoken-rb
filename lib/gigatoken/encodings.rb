@@ -85,7 +85,16 @@ module Gigatoken
       "qwen38" => {json_file: File.join(DATA_DIR, "qwen38.json.gz")},
       # meta-models/Muse-Glimmer-30B's file: Meta publishes no standalone
       # Muse Spark tokenizer.
-      "muse_spark" => {json_file: File.join(DATA_DIR, "muse_spark.json.gz")}
+      "muse_spark" => {json_file: File.join(DATA_DIR, "muse_spark.json.gz")},
+      # nvidia's Nemotron-3 tokenizer, one file shared across the family
+      # (Nano-4B, Super-120B, Ultra-550B, 3.5-Lightning). Vendored under the
+      # NVIDIA Nemotron Open Model License — the one packaged encoding whose
+      # file is not Apache-2.0/MIT; its license text ships alongside as
+      # NVIDIA-NEMOTRON-OPEN-MODEL-LICENSE.txt (license §3a) and its
+      # pretokenizer resolves to the `nemotron` scheme (single-digit \p{N}),
+      # not 0.7.0's `nemotron_right_aligned` — no published Nemotron tokenizer
+      # carries that regex yet. See PROVENANCE.md.
+      "nemotron" => {json_file: File.join(DATA_DIR, "nemotron.json.gz")}
     }.each_value { |encoding| encoding.each_value(&:freeze).freeze }.freeze
     private_constant :REGISTRY
 

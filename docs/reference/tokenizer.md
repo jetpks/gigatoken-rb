@@ -40,7 +40,8 @@ Packaged names are checked before the Hub-repo shape. `hub:` is a
 
 One of the packaged encodings by name — a String or a Symbol — entirely
 from the vendored files: ranks through `from_tiktoken`, or, for `qwen35`,
-`qwen38` and `muse_spark`, a gzipped `tokenizer.json` through `from_json`. **Raises** `Gigatoken::ModelError` naming the
+`qwen38`, `muse_spark` and `nemotron`, a gzipped `tokenizer.json` through
+`from_json`. **Raises** `Gigatoken::ModelError` naming the
 packaged encodings otherwise.
 
 ### `Gigatoken::Tokenizer.from_file(path)`

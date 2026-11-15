@@ -9,7 +9,7 @@ carries **mergeable ranks only** — the pretokenizer split regex and the specia
 tokens belong to the encoding's *definition*, not to the file, and live in code
 (see the table below).
 
-The three `.json.gz` files are HuggingFace `tokenizer.json` files, not tiktoken
+The four `.json.gz` files are HuggingFace `tokenizer.json` files, not tiktoken
 tables; they are covered in [their own section](#huggingface-tokenizerjson-files)
 at the end.
 
@@ -130,6 +130,7 @@ records only the file, and `Tokenizer.from_encoding` loads it with
 | `qwen35.json.gz`     | 12,807,982 | `5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42` |
 | `qwen38.json.gz`     | 12,809,320 | `0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3` |
 | `muse_spark.json.gz` | 28,129,897 | `c9dbee66967b58f31a7c27f723c3760da3526ccd0427578e8905b0abb0031c4d` |
+| `nemotron.json.gz`   | 17,077,484 | `623c34567aebb18582765289fbe23d901c62704d6518d71866e0e58db892b5b7` |
 
 ### Source
 
@@ -141,6 +142,7 @@ a pinned commit:
 | `qwen35`     | `Qwen/Qwen3.5-27B`             | `fc05daec18b0a78c049392ed2e771dde82bdf654` | <https://huggingface.co/Qwen/Qwen3.5-27B/resolve/fc05daec18b0a78c049392ed2e771dde82bdf654/tokenizer.json> |
 | `qwen38`     | `Qwen/Qwen3.8-27B`             | `1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0` | <https://huggingface.co/Qwen/Qwen3.8-27B/resolve/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/tokenizer.json> |
 | `muse_spark` | `meta-models/Muse-Glimmer-30B` | `a4e59da52a7bc87ae7251dd5545c0dd437c44b68` | <https://huggingface.co/meta-models/Muse-Glimmer-30B/resolve/a4e59da52a7bc87ae7251dd5545c0dd437c44b68/tokenizer.json> |
+| `nemotron`   | `nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16` | `dfaf35de3e30f1867dd8dbc38a7fc9fb52d3914f` | <https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16/resolve/dfaf35de3e30f1867dd8dbc38a7fc9fb52d3914f/tokenizer.json> |
 
 **`qwen35` is shared across releases.** The Hub's tree API
 (`https://huggingface.co/api/models/<repo>?blobs=true`) reports the identical
@@ -171,6 +173,18 @@ special tokens" (vocabulary 202,048), trained from Muse Spark's outputs, and
 this exact repo and revision is the one the reference application pins. As of
 2026-10-07 that revision is also `main`.
 
+**`nemotron` is shared across the Nemotron-3 family.** The Hub's tree API
+reports the identical LFS sha256 `623c3456…` for `tokenizer.json` in
+`nvidia/NVIDIA-Nemotron-3-{Nano-4B, Super-120B, Ultra-550B}-BF16` and
+`nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16` (queried 2026-11-14), so
+one file serves the family; `Nano-4B` is the repo cited.
+`NVIDIA-Nemotron-3-Nano-30B-A3B-BF16` carries a different file
+(`c6021eb6…`, one byte larger) and is **not** covered by the hash above.
+The file's pretokenizer is a Sequence whose Split regex is the `nemotron`
+scheme — single-digit `\p{N}` — which `from_json` resolves by name; no
+published Nemotron tokenizer carries 0.7.0's right-aligned digit arm yet, so
+this file is deliberately *not* registered as `nemotron_right_aligned`.
+
 ### Authenticity
 
 Verified three independent ways at retrieval time:
@@ -185,7 +199,8 @@ Verified three independent ways at retrieval time:
    [`tokenizers`](https://rubygems.org/gems/tokenizers) 0.7.0 loading the same
    decompressed file with `add_special_tokens: false`, across this repo's own
    source and docs (`spec/gigatoken/differential_spec.rb`). Resulting
-   `vocab_size`: 248070 / 248077 / 202048; `special_tokens.size`: 14 / 21 / 2048.
+   `vocab_size`: 248070 / 248077 / 202048 / 131072; `special_tokens.size`:
+   14 / 21 / 2048 / 994.
 
 ### Compression
 
@@ -193,7 +208,7 @@ Each file was compressed with `gzip -9 -n` (no name or timestamp in the gzip
 header, so the bytes are reproducible), and `gunzip -c` of it reproduces the
 published file byte-for-byte — the sha256s above are of the decompressed
 bytes. Compressed sizes: 3,514,616 (`qwen35`), 3,514,699 (`qwen38`), 4,475,666
-(`muse_spark`).
+(`muse_spark`), 2,732,764 (`nemotron`).
 
 ### What gigatoken does not take from the file
 
@@ -206,17 +221,31 @@ bytes. Compressed sizes: 3,514,616 (`qwen35`), 3,514,699 (`qwen38`), 4,475,666
   `<|repo_name|>`, `<|file_sep|>`, `<tool_response>` and so on) are matched
   atomically by the engine, like the special ones, but only `"special": true`
   tokens appear in `Tokenizer#special_tokens` — 14 for `qwen35`, 21 for
-  `qwen38`.
+  `qwen38`. `nemotron`'s file marks all 994 of its added tokens special, so
+  its table is the file's own list verbatim.
 - **`tokenizer_config.json`.** Not vendored; gigatoken reads only
   `tokenizer.json`.
 
 ### Licence
 
-All three repos are Apache-2.0, each with its own `LICENSE` at the pinned
-revision:
+The Qwen and Muse repos are Apache-2.0, each with its own `LICENSE` at the
+pinned revision:
 
 - <https://huggingface.co/Qwen/Qwen3.5-27B/blob/fc05daec18b0a78c049392ed2e771dde82bdf654/LICENSE>
 - <https://huggingface.co/Qwen/Qwen3.8-27B/blob/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/LICENSE>
 - <https://huggingface.co/meta-models/Muse-Glimmer-30B/blob/a4e59da52a7bc87ae7251dd5545c0dd437c44b68/LICENSE>
 
+`nemotron` is different: every Nemotron-3 repo declares `license: other`,
+`license_name: nvidia-nemotron-open-model-license` — the **NVIDIA Nemotron
+Open Model License** (v. December 15, 2025), whose text lives at
+<https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-nemotron-open-model-license/>
+(the repo's own `LICENSE` file is a zero-byte placeholder, so the card's link
+is the canonical source). It is permissive — commercial use, Derivative Works
+and **redistribution and sublicensing** are expressly granted — but it is not
+OSI-approved, making `nemotron` the one packaged encoding whose file is not
+Apache-2.0/MIT. Its §3a obligation, "give any other recipients of the Work a
+copy of this License", is met by shipping the licence text alongside the
+file as `NVIDIA-NEMOTRON-OPEN-MODEL-LICENSE.txt` in this directory; the file
+carries no embedded copyright notice and the repo ships no NOTICE file, so
+§3b/§3c add nothing further to retain.
 The files are vendored here unmodified (gzipped).
