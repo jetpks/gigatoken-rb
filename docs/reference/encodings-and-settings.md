@@ -13,12 +13,12 @@ hashes are in `lib/gigatoken/encodings/PROVENANCE.md`.
 
 ### `Gigatoken::Encodings::NAMES → Array<String>`
 
-`["r50k_base", "cl100k_base", "o200k_base", "o200k_harmony", "qwen35", "qwen38", "muse_spark"]`.
+`["r50k_base", "cl100k_base", "o200k_base", "o200k_harmony", "qwen35", "qwen38", "muse_spark", "nemotron"]`.
 
 ### `Gigatoken::Encodings[name] → Hash | nil`
 
 `{rank_file:, pretokenizer:, special_tokens:}` for a tiktoken name,
-`{json_file:}` for `qwen35`, `qwen38` and `muse_spark`, or `nil`. The
+`{json_file:}` for `qwen35`, `qwen38`, `muse_spark` and `nemotron`, or `nil`. The
 entries are deep-frozen. `o200k_harmony` reuses `o200k_base`'s ranks and
 scheme and differs only in its special-token table (10 named control tokens
 plus 1081 reserved slots).
@@ -27,13 +27,15 @@ A `json_file:` entry names a gzipped HuggingFace `tokenizer.json`
 (`lib/gigatoken/encodings/<name>.json.gz`) and registers nothing else: the
 pretokenizer and the special tokens are the file's, and `Tokenizer#special_tokens`
 holds its `"special": true` added tokens, as `Tokenizer.from_json` reads them
-— 14 for `qwen35`, 21 for `qwen38`, 2048 for `muse_spark`.
+— 14 for `qwen35`, 21 for `qwen38`, 2048 for `muse_spark`, 994 for
+`nemotron`.
 
 | Name | Tokenizer | `vocab_size` |
 |---|---|---|
 | `qwen35` | Qwen 3.5 and 3.6 | 248070 |
 | `qwen38` | `qwen35` plus seven audio/TTS special tokens (`<|audio_start|>`, `<|audio_end|>`, `<tts_pad>`, `<tts_text_bos>`, `<tts_text_eod>`, `<tts_text_bos_single>`, `<|audio_pad|>`) | 248077 |
 | `muse_spark` | `meta-models/Muse-Glimmer-30B` | 202048 |
+| `nemotron` | nvidia Nemotron-3 (one file across the family; single-digit `\p{N}` scheme, not `nemotron_right_aligned`) | 131072 |
 
 Output matches HuggingFace `tokenizers` with `add_special_tokens: false`:
 gigatoken applies no post-processor, so `encode` never prepends

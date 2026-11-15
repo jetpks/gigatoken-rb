@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.8.0] - 2026-11-14
+
+### Added
+
+- **`nemotron` is a packaged encoding.** nvidia's Nemotron-3 tokenizer
+  (`tokenizer.json` from `nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16`, pinned in
+  `PROVENANCE.md`; one file shared across the Nano/Super/Ultra/3.5-Lightning
+  family), vendored gzipped and resolved by name through
+  `Tokenizer.from_encoding` and `Tokenizer.load` entirely offline.
+  `vocab_size` 131072, 994 file-defined special tokens. Its digit rule is
+  the single-digit `\p{N}` `nemotron` scheme — no published Nemotron
+  tokenizer carries 0.7.0's `nemotron_right_aligned` regex yet. First
+  packaged encoding under a bespoke licence: the permissive NVIDIA Nemotron
+  Open Model License, whose text ships alongside the file as
+  `NVIDIA-NEMOTRON-OPEN-MODEL-LICENSE.txt`.
+
 ## [0.7.0] - 2026-11-14
 
 ### Added

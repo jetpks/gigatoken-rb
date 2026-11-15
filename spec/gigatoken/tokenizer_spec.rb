@@ -269,7 +269,8 @@ RSpec.describe Gigatoken::Tokenizer do
     it "resolves each packaged encoding by name with its full vocab_size" do
       {
         "r50k_base" => 50257, "cl100k_base" => 100277, "o200k_base" => 200019,
-        "qwen35" => 248070, "qwen38" => 248077, "muse_spark" => 202048
+        "qwen35" => 248070, "qwen38" => 248077, "muse_spark" => 202048,
+        "nemotron" => 131072
       }.each do |name, vocab_size|
         expect(described_class.from_encoding(name).vocab_size).to eq(vocab_size)
       end
@@ -282,7 +283,8 @@ RSpec.describe Gigatoken::Tokenizer do
         "o200k_base" => {"hello world" => [24912, 2375], "日本語 tokens" => [9048, 40909, 20290]},
         "qwen35" => {"hello world" => [14556, 1814], "日本語 tokens" => [247359, 10885]},
         "qwen38" => {"hello world" => [14556, 1814], "日本語 tokens" => [247359, 10885]},
-        "muse_spark" => {"hello world" => [25681, 3817], "日本語 tokens" => [21764, 16728, 22274]}
+        "muse_spark" => {"hello world" => [25681, 3817], "日本語 tokens" => [21764, 16728, 22274]},
+        "nemotron" => {"hello world" => [29706, 4304], "日本語 tokens" => [10008, 15199, 34421]}
       }.each do |name, cases|
         tokenizer = described_class.from_encoding(name)
         cases.each { |text, ids| expect(tokenizer.encode(text)).to eq(ids) }
@@ -314,6 +316,21 @@ RSpec.describe Gigatoken::Tokenizer do
       expect((qwen38.to_a - qwen35.to_a).size).to eq(7)
       expect(muse.values_at("<|begin_of_text|>", "<|end_of_text|>", "<|eot|>")).to eq([200000, 200001, 200008])
       expect(qwen35).to be_frozen
+    end
+
+    it "reads nemotron's special tokens from its file: Llama-style control tokens, 994 of them" do
+      nemotron = described_class.from_encoding("nemotron").special_tokens
+
+      expect(nemotron.size).to eq(994)
+      expect(nemotron.values_at("<unk>", "<s>", "</s>", "[INST]", "[/INST]")).to eq([0, 1, 2, 3, 4])
+      expect(nemotron.keys).to include("[AVAILABLE_TOOLS]")
+      expect(nemotron).to be_frozen
+    end
+
+    it "encodes digits one token each through the packaged nemotron file: the plain \\p{N} scheme" do
+      tokenizer = described_class.from_encoding("nemotron")
+
+      expect(tokenizer.encode("1234567")).to eq([1049, 1050, 1051, 1052, 1053, 1054, 1055])
     end
 
     it "does not prepend <|begin_of_text|> for muse_spark: no post-processor is applied" do

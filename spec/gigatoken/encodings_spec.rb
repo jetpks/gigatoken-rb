@@ -60,7 +60,7 @@ RSpec.describe Gigatoken::Encodings do
     end
 
     it "resolves each HuggingFace encoding to its vendored gzipped tokenizer.json and nothing else" do
-      %w[qwen35 qwen38 muse_spark].each do |name|
+      %w[qwen35 qwen38 muse_spark nemotron].each do |name|
         encoding = described_class[name]
         expect(encoding.keys).to eq([:json_file])
         expect(File.basename(encoding[:json_file])).to eq("#{name}.json.gz")

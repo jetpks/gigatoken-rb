@@ -23,6 +23,7 @@ Gem::Specification.new do |spec|
     "lib/**/*.rb",
     "lib/gigatoken/encodings/*.tiktoken",
     "lib/gigatoken/encodings/*.json.gz",
+    "lib/gigatoken/encodings/NVIDIA-NEMOTRON-OPEN-MODEL-LICENSE.txt",
     "lib/gigatoken/encodings/PROVENANCE.md",
     "exe/*",
     "ext/gigatoken/src/**/*.rs",

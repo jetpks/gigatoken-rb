@@ -25,7 +25,8 @@ objects, why, and where the remaining costs come from.
 | `Tokenizer.from_encoding(name)`, tiktoken entry | 2 | the `Tokenizer` and its native tokenizer |
 | `Tokenizer.load(name)`, tiktoken entry | 3 | the same, plus the path copy `File.exist?` makes while deciding the source's shape |
 
-The JSON-backed entries (`qwen35`, `qwen38`, `muse_spark`) are not budgeted:
+The JSON-backed entries (`qwen35`, `qwen38`, `muse_spark`, `nemotron`) are
+not budgeted:
 each load reads, gunzips and parses a `tokenizer.json`, which allocates the
 Strings those steps need.
 
